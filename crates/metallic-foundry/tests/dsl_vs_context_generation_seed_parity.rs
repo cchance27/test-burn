@@ -57,7 +57,10 @@ fn run_seed_parity() -> Result<(), MetalError> {
     if prompt_tokens.is_empty() {
         return Err(MetalError::InvalidShape("Tokenizer returned empty prompt encoding".into()));
     }
-    let eos = foundry_tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+    let eos = foundry_tokenizer
+        .special_tokens()
+        .eos_token_id
+        .ok_or_else(|| MetalError::InvalidOperation("Tokenizer metadata missing required 'eos_token_id'".into()))?;
 
     // Sanity check: greedy next-token parity on this (templated) prompt.
     // If this fails, the divergence is in logits/forward, not sampling.

@@ -14,10 +14,35 @@ impl<T: Default> Default for Param<T> {
 }
 
 fn parse_ref_or_err<E: serde::de::Error>(value: &str) -> Result<String, E> {
+    parse_ref(value).ok_or_else(|| E::custom("expected \"{var_name}\" for Param reference"))
+}
+
+fn parse_ref(value: &str) -> Option<String> {
     if value.starts_with('{') && value.ends_with('}') && value.len() > 2 {
-        Ok(value[1..value.len() - 1].to_string())
+        Some(value[1..value.len() - 1].to_string())
     } else {
-        Err(E::custom("expected \"{var_name}\" for Param reference"))
+        None
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum TemplateKwargParam {
+    Literal(serde_json::Value),
+    Input(String),
+}
+
+impl<'de> Deserialize<'de> for TemplateKwargParam {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let serde_json::Value::String(s) = &value
+            && let Some(name) = parse_ref(s)
+        {
+            return Ok(Self::Input(name));
+        }
+        Ok(Self::Literal(value))
     }
 }
 
@@ -292,6 +317,12 @@ pub struct FormatChatSpec {
     /// - `"delta"`: render only newly appended messages since the last run of this op instance
     #[serde(default)]
     pub mode: Option<String>,
+    /// Optional kwargs forwarded to chat-template rendering.
+    ///
+    /// Values can be literals (`true`, `1`, `"foo"`, arrays/maps) or workflow references
+    /// via `"{var_name}"`.
+    #[serde(default)]
+    pub template_kwargs: FxHashMap<String, TemplateKwargParam>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

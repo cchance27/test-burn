@@ -263,8 +263,28 @@ fn metadata_usize(metadata: &GGUFMetadata, keys: &[&str]) -> Option<usize> {
     None
 }
 
-fn metadata_vocab_size(metadata: &GGUFMetadata) -> Option<usize> {
-    if let Some(v) = metadata_usize(metadata, &["vocab_size", "model.vocab_size"]) {
+fn metadata_architecture(metadata: &GGUFMetadata) -> Option<&str> {
+    match metadata.entries.get("general.architecture") {
+        Some(GGUFValue::String(value)) if !value.trim().is_empty() => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+fn metadata_arch_usize(metadata: &GGUFMetadata, arch: Option<&str>, suffixes: &[&str], fallback_keys: &[&str]) -> Option<usize> {
+    if let Some(arch) = arch {
+        for suffix in suffixes {
+            let key = format!("{arch}.{suffix}");
+            if let Some(v) = metadata_usize(metadata, &[&key]) {
+                return Some(v);
+            }
+        }
+    }
+
+    metadata_usize(metadata, fallback_keys)
+}
+
+fn metadata_vocab_size(metadata: &GGUFMetadata, arch: Option<&str>) -> Option<usize> {
+    if let Some(v) = metadata_arch_usize(metadata, arch, &["vocab_size"], &["vocab_size", "model.vocab_size"]) {
         return Some(v);
     }
 
@@ -275,22 +295,13 @@ fn metadata_vocab_size(metadata: &GGUFMetadata) -> Option<usize> {
     None
 }
 
-fn adjust_embedding_dims(_name: &str, dims: &mut [usize], metadata: &GGUFMetadata) {
+fn adjust_embedding_dims(_name: &str, dims: &mut [usize], metadata: &GGUFMetadata, arch: Option<&str>) {
     if dims.len() != 2 {
         return;
     }
 
-    let d_model = metadata_usize(
-        metadata,
-        &[
-            "qwen2.embedding_length",
-            "qwen2.d_model",
-            "model.d_model",
-            "llama.embedding_length",
-            "llama.d_model",
-        ],
-    );
-    let vocab = metadata_vocab_size(metadata);
+    let d_model = metadata_arch_usize(metadata, arch, &["embedding_length", "d_model"], &["model.d_model", "d_model"]);
+    let vocab = metadata_vocab_size(metadata, arch);
 
     if let (Some(d_model), Some(vocab)) = (d_model, vocab)
         && dims[0] == d_model
@@ -322,19 +333,11 @@ impl GGUFModelLoader {
     /// Load a model from the GGUF file
     pub fn load_model(&self) -> Result<GGUFModel, GGUFError> {
         let mut tensors: FxHashMap<String, GGUFTensor> = FxHashMap::default();
-        let arch = self
-            .gguf_file
-            .metadata
-            .entries
-            .get("general.architecture")
-            .and_then(|value| match value {
-                GGUFValue::String(s) => Some(s.as_str()),
-                _ => None,
-            });
 
+        let arch = metadata_architecture(&self.gguf_file.metadata);
         for tensor_info in &self.gguf_file.tensor_metadata {
             let mut dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
-            adjust_embedding_dims(&tensor_info.name, &mut dims, &self.gguf_file.metadata);
+            adjust_embedding_dims(&tensor_info.name, &mut dims, &self.gguf_file.metadata, arch);
             let expected_elements: usize = dims.iter().product();
 
             tensors.insert(

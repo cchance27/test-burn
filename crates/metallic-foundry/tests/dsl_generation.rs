@@ -34,7 +34,10 @@ fn test_dsl_qwen25_generation() -> Result<(), MetalError> {
 
     eprintln!("Prompt: '{}'", prompt);
     let max_new_tokens = 100;
-    let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+    let eos = tokenizer
+        .special_tokens()
+        .eos_token_id
+        .ok_or_else(|| MetalError::InvalidOperation("Tokenizer metadata missing required 'eos_token_id'".into()))?;
 
     // Validate the model's built-in autoregressive generate() implementation using the chat template.
     // Use sampling defaults similar to the CLI to avoid greedy repetition.

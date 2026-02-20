@@ -233,7 +233,11 @@ fn test_e2e_forward_pass() {
     // Now test actual token generation using the generate() method
     eprintln!("\n=== Testing Token Generation ===");
 
-    let stop_tokens: Vec<u32> = vec![tokenizer.special_tokens().eos_token_id.unwrap_or(151645)];
+    let eos = tokenizer
+        .special_tokens()
+        .eos_token_id
+        .expect("Tokenizer metadata missing required 'eos_token_id'");
+    let stop_tokens: Vec<u32> = vec![eos];
     let max_new_tokens = 50;
 
     match model.generate(

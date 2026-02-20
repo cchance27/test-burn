@@ -60,8 +60,7 @@
     },
     {
       "name": "eos_token",
-      "type": "u32",
-      "default": 151645
+      "type": "u32"
     }
   ],
   "steps": [

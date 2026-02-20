@@ -118,9 +118,14 @@
       "label": "System Prompt"
     },
     {
+      "name": "enable_thinking",
+      "type": "u32",
+      "default": 0,
+      "hidden": true
+    },
+    {
       "name": "eos_token",
       "type": "u32",
-      "default": 151645,
       "hidden": true
     }
   ],
@@ -132,7 +137,10 @@
       "system_prompt": "system_prompt",
       "output": "formatted_delta",
       "mode": "delta",
-      "add_generation_prompt": true
+      "add_generation_prompt": true,
+      "template_kwargs": {
+        "enable_thinking": "{enable_thinking}"
+      }
     },
     {
       "op": "tokenize",

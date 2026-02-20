@@ -42,6 +42,24 @@ pub struct CliConfig {
     /// Optional workflow JSON file path (Foundry engine only). If provided, may include model resources for multi-model workflows.
     #[arg(long, value_name = "WORKFLOW_JSON")]
     pub workflow: Option<String>,
+
+    /// Workflow input override (repeatable): --kwarg key=value
+    ///
+    /// Applies to Foundry workflow inputs and is ignored by workflows/models that do not use the key.
+    #[arg(long = "kwarg", value_name = "KEY=VALUE", action = clap::ArgAction::Append)]
+    pub workflow_kwargs: Vec<String>,
+
+    /// Convenience toggle for workflows/templates that support `enable_thinking`.
+    ///
+    /// Equivalent to passing `--kwarg enable_thinking=1`.
+    #[arg(long, conflicts_with = "no_thinking")]
+    pub thinking: bool,
+
+    /// Convenience toggle for workflows/templates that support `enable_thinking`.
+    ///
+    /// Equivalent to passing `--kwarg enable_thinking=0`.
+    #[arg(long = "no-thinking", conflicts_with = "thinking")]
+    pub no_thinking: bool,
 }
 
 /// Generation configuration options
@@ -153,6 +171,33 @@ impl CliConfig {
         prompts.push(DEFAULT_PROMPT.to_string());
         prompts
     }
+
+    /// Parse repeatable `--kwarg key=value` flags into normalized pairs.
+    pub fn parsed_workflow_kwargs(&self) -> Result<Vec<(String, String)>, String> {
+        let mut out = Vec::with_capacity(self.workflow_kwargs.len());
+        for raw in &self.workflow_kwargs {
+            let Some((key_raw, value_raw)) = raw.split_once('=') else {
+                return Err(format!("Invalid --kwarg '{raw}': expected key=value"));
+            };
+            let key = key_raw.trim();
+            if key.is_empty() {
+                return Err(format!("Invalid --kwarg '{raw}': key cannot be empty"));
+            }
+            out.push((key.to_string(), value_raw.trim().to_string()));
+        }
+        Ok(out)
+    }
+
+    /// Returns explicit thinking override from convenience flags.
+    pub fn thinking_override(&self) -> Option<bool> {
+        if self.thinking {
+            Some(true)
+        } else if self.no_thinking {
+            Some(false)
+        } else {
+            None
+        }
+    }
 }
 
 impl Default for GenerationConfig {
@@ -188,6 +233,9 @@ mod tests {
             sdpa_backend: None,
             engine: Engine::Context,
             workflow: None,
+            workflow_kwargs: Vec::new(),
+            thinking: false,
+            no_thinking: false,
         };
 
         assert_eq!(config.get_prompts(), Vec::<String>::new());
@@ -205,6 +253,9 @@ mod tests {
             sdpa_backend: None,
             engine: Engine::Context,
             workflow: None,
+            workflow_kwargs: Vec::new(),
+            thinking: false,
+            no_thinking: false,
         };
 
         assert_eq!(config.get_prompts(), vec!["Hello, world!".to_string()]);
@@ -222,8 +273,38 @@ mod tests {
             sdpa_backend: None,
             engine: Engine::Context,
             workflow: None,
+            workflow_kwargs: Vec::new(),
+            thinking: false,
+            no_thinking: false,
         };
 
         assert_eq!(config.get_prompts(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_cli_config_parses_workflow_kwargs() {
+        let config = CliConfig {
+            gguf_path: "test.gguf".to_string(),
+            prompts: vec!["hello".to_string()],
+            generation: GenerationConfig::default(),
+            backend: None,
+            verbose: 0,
+            output_format: OutputFormat::Text,
+            sdpa_backend: None,
+            engine: Engine::Foundry,
+            workflow: None,
+            workflow_kwargs: vec!["enable_thinking=0".to_string(), "tools=[]".to_string()],
+            thinking: false,
+            no_thinking: false,
+        };
+
+        let parsed = config.parsed_workflow_kwargs().expect("valid kwarg list");
+        assert_eq!(
+            parsed,
+            vec![
+                ("enable_thinking".to_string(), "0".to_string()),
+                ("tools".to_string(), "[]".to_string())
+            ]
+        );
     }
 }

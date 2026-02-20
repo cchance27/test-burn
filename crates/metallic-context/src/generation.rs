@@ -539,7 +539,10 @@ where
     }
 
     let eos_check_start = Instant::now();
-    let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+    let eos_token_id = tokenizer
+        .special_tokens()
+        .eos_token_id
+        .ok_or_else(|| MetalError::InvalidOperation("Tokenizer metadata missing required 'eos_token_id'".to_string()))?;
     let is_eos = token.token_id == eos_token_id;
     let eos_check_duration = eos_check_start.elapsed();
     if !eos_check_duration.is_zero() {

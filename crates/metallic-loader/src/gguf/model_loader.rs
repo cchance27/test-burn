@@ -140,8 +140,28 @@ fn metadata_usize(metadata: &GGUFMetadata, keys: &[&str]) -> Option<usize> {
     None
 }
 
-fn metadata_vocab_size(metadata: &GGUFMetadata) -> Option<usize> {
-    if let Some(v) = metadata_usize(metadata, &["vocab_size", "model.vocab_size"]) {
+fn metadata_architecture(metadata: &GGUFMetadata) -> Option<&str> {
+    match metadata.entries.get("general.architecture") {
+        Some(GGUFValue::String(value)) if !value.trim().is_empty() => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+fn metadata_arch_usize(metadata: &GGUFMetadata, arch: Option<&str>, suffixes: &[&str], fallback_keys: &[&str]) -> Option<usize> {
+    if let Some(arch) = arch {
+        for suffix in suffixes {
+            let key = format!("{arch}.{suffix}");
+            if let Some(v) = metadata_usize(metadata, &[&key]) {
+                return Some(v);
+            }
+        }
+    }
+
+    metadata_usize(metadata, fallback_keys)
+}
+
+fn metadata_vocab_size(metadata: &GGUFMetadata, arch: Option<&str>) -> Option<usize> {
+    if let Some(v) = metadata_arch_usize(metadata, arch, &["vocab_size"], &["vocab_size", "model.vocab_size"]) {
         return Some(v);
     }
 
@@ -152,28 +172,62 @@ fn metadata_vocab_size(metadata: &GGUFMetadata) -> Option<usize> {
     None
 }
 
-fn adjust_embedding_dims(_name: &str, dims: &mut [usize], metadata: &GGUFMetadata) {
+fn adjust_embedding_dims(_name: &str, dims: &mut [usize], metadata: &GGUFMetadata, arch: Option<&str>) {
     if dims.len() != 2 {
         return;
     }
 
-    let d_model = metadata_usize(
-        metadata,
-        &[
-            "qwen2.embedding_length",
-            "qwen2.d_model",
-            "model.d_model",
-            "llama.embedding_length",
-            "llama.d_model",
-        ],
-    );
-    let vocab = metadata_vocab_size(metadata);
+    let d_model = metadata_arch_usize(metadata, arch, &["embedding_length", "d_model"], &["model.d_model", "d_model"]);
+    let vocab = metadata_vocab_size(metadata, arch);
 
     if let (Some(d_model), Some(vocab)) = (d_model, vocab)
         && dims[0] == d_model
         && dims[1] == vocab
     {
         dims.swap(0, 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GGUFMetadata, GGUFValue, adjust_embedding_dims};
+
+    #[test]
+    fn adjust_embedding_dims_uses_arch_prefixed_metadata() {
+        let mut metadata = GGUFMetadata::default();
+        metadata
+            .entries
+            .insert("general.architecture".to_string(), GGUFValue::String("customarch".to_string()));
+        metadata
+            .entries
+            .insert("customarch.embedding_length".to_string(), GGUFValue::U32(1024));
+        metadata.entries.insert("customarch.vocab_size".to_string(), GGUFValue::U32(32000));
+
+        let mut dims = [1024usize, 32000usize];
+        adjust_embedding_dims("token_embd.weight", &mut dims, &metadata, Some("customarch"));
+        assert_eq!(dims, [32000, 1024]);
+    }
+
+    #[test]
+    fn adjust_embedding_dims_falls_back_to_model_keys() {
+        let mut metadata = GGUFMetadata::default();
+        metadata.entries.insert("model.d_model".to_string(), GGUFValue::U32(2048));
+        metadata.entries.insert("model.vocab_size".to_string(), GGUFValue::U32(128000));
+
+        let mut dims = [2048usize, 128000usize];
+        adjust_embedding_dims("token_embd.weight", &mut dims, &metadata, None);
+        assert_eq!(dims, [128000, 2048]);
+    }
+
+    #[test]
+    fn adjust_embedding_dims_leaves_non_matching_shapes_unchanged() {
+        let mut metadata = GGUFMetadata::default();
+        metadata.entries.insert("model.d_model".to_string(), GGUFValue::U32(2048));
+        metadata.entries.insert("model.vocab_size".to_string(), GGUFValue::U32(128000));
+
+        let mut dims = [2048usize, 777usize];
+        adjust_embedding_dims("layer.weight", &mut dims, &metadata, None);
+        assert_eq!(dims, [2048, 777]);
     }
 }
 
@@ -205,7 +259,7 @@ impl GGUFModelLoader {
 
         for tensor_info in &self.gguf_file.tensor_metadata {
             let mut dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
-            adjust_embedding_dims(&tensor_info.name, &mut dims, &self.gguf_file.metadata);
+            adjust_embedding_dims(&tensor_info.name, &mut dims, &self.gguf_file.metadata, arch);
             tensors.insert(
                 tensor_info.name.clone(),
                 GGUFTensor {
@@ -402,31 +456,48 @@ impl LoadedModel for GGUFModel {
     }
 
     fn inferred_architecture_params(&self) -> Vec<(String, MetadataValue<'_>)> {
-        let arch = self.architecture().unwrap_or("");
+        let arch = self.architecture().or_else(|| metadata_architecture(&self.gguf_file.metadata));
         let mut params = Vec::new();
 
         // Common keys (many GGUFs expose these).
-        if let Some(v) = self.metadata.get("model.vocab_size") {
+        if let Some(arch) = arch {
+            let arch_vocab = format!("{arch}.vocab_size");
+            if let Some(v) = self.metadata.get(&arch_vocab) {
+                params.push(("vocab_size".to_string(), v));
+            }
+        }
+        if !params.iter().any(|(name, _)| name == "vocab_size")
+            && let Some(v) = self.metadata.get("model.vocab_size")
+        {
             params.push(("vocab_size".to_string(), v));
-        } else if let Some(GGUFValue::Array(tokens)) = self.gguf_file.metadata.entries.get("tokenizer.ggml.tokens") {
+        } else if !params.iter().any(|(name, _)| name == "vocab_size")
+            && let Some(GGUFValue::Array(tokens)) = self.gguf_file.metadata.entries.get("tokenizer.ggml.tokens")
+        {
             params.push(("vocab_size".to_string(), MetadataValue::Int(tokens.len() as i64)));
         }
 
-        if arch.contains("qwen2") {
-            let mappings = [
-                ("d_model", "qwen2.embedding_length"),
-                ("n_heads", "qwen2.attention.head_count"),
-                ("n_kv_heads", "qwen2.attention.head_count_kv"),
-                ("n_layers", "qwen2.block_count"),
-                ("ff_dim", "qwen2.feed_forward_length"),
-                ("max_seq_len", "qwen2.context_length"),
-                ("rope_base", "qwen2.rope.freq_base"),
-                ("rms_eps", "qwen2.attention.layer_norm_rms_epsilon"),
+        if let Some(arch) = arch {
+            let mappings: [(&str, &[&str]); 8] = [
+                ("d_model", &["embedding_length", "d_model", "hidden_size"]),
+                ("n_heads", &["attention.head_count", "attention.n_heads", "n_head"]),
+                ("n_kv_heads", &["attention.head_count_kv", "attention.n_kv_heads", "n_head_kv"]),
+                ("n_layers", &["block_count", "n_layer", "num_hidden_layers"]),
+                ("ff_dim", &["feed_forward_length", "ffn_dim", "intermediate_size"]),
+                ("max_seq_len", &["context_length", "max_context_length", "max_sequence_length"]),
+                ("rope_base", &["rope.freq_base", "rope.theta", "rope_freq_base"]),
+                (
+                    "rms_eps",
+                    &["attention.layer_norm_rms_epsilon", "layer_norm_rms_epsilon", "rms_norm_eps"],
+                ),
             ];
 
-            for (field, gguf_key) in mappings {
-                if let Some(v) = self.metadata.get(gguf_key) {
-                    params.push((field.to_string(), v));
+            for (field, suffixes) in mappings {
+                for suffix in suffixes {
+                    let key = format!("{arch}.{suffix}");
+                    if let Some(v) = self.metadata.get(&key) {
+                        params.push((field.to_string(), v));
+                        break;
+                    }
                 }
             }
         }

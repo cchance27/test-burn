@@ -33,6 +33,16 @@ The DSL `architecture.prepare` section can declare:
 - `tensors`: intermediate/KV/rope tensors the executor must allocate and bind.
 - `rope`: the logical tensor names for RoPE caches (cos/sin). The executor computes and uploads their contents.
 
+### Layer-aware RoPE control (KvPrepFused)
+
+`KvPrepFused` now supports optional layer-aware RoPE skipping through dynamic params:
+
+- `layer_idx` (0-based, default `0`)
+- `no_rope_layer_step` (default `0`, disabled)
+
+When `no_rope_layer_step > 0`, RoPE is skipped for layers where `(layer_idx + 1) % no_rope_layer_step == 0`.
+This is used by SmolLM3-style periodic no-RoPE layers while keeping the same fused KV-prep kernel path.
+
 ### `architecture.weight_bindings` contract
 
 The DSL `architecture.weight_bindings` section declares which source tensors must be materialized and bound before inference.

@@ -48,7 +48,10 @@ fn test_dsl_vs_context_chat_prefill_greedy_next_token_parity() -> Result<(), Met
     assert_eq!(dsl_tokens, legacy_tokens, "Chat prompt tokenization mismatch");
 
     // --- Next-token logits parity via greedy generation of 1 token ---
-    let eos = dsl_tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+    let eos = dsl_tokenizer
+        .special_tokens()
+        .eos_token_id
+        .ok_or_else(|| MetalError::InvalidOperation("Tokenizer metadata missing required 'eos_token_id'".into()))?;
 
     // DSL: greedy next token
     let dsl_next = dsl_model.generate_with_seed(&mut foundry, &dsl_tokens, 1, &[eos], 0.0, 1, 0.0, 1337)?;

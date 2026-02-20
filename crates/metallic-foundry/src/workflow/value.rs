@@ -24,6 +24,34 @@ pub enum Value {
 }
 
 impl Value {
+    #[inline]
+    pub fn parse_boolish_str(raw: &str) -> Option<bool> {
+        let s = raw.trim();
+        if s.eq_ignore_ascii_case("true") || s == "1" {
+            Some(true)
+        } else if s.eq_ignore_ascii_case("false") || s == "0" {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn json_boolish(value: &serde_json::Value) -> Option<bool> {
+        match value {
+            serde_json::Value::Bool(v) => Some(*v),
+            serde_json::Value::Number(v) => {
+                if let Some(i) = v.as_i64() {
+                    Some(i != 0)
+                } else {
+                    v.as_f64().map(|f| f != 0.0)
+                }
+            }
+            serde_json::Value::String(v) => Self::parse_boolish_str(v),
+            _ => None,
+        }
+    }
+
     pub fn from_json(v: serde_json::Value) -> Self {
         match v {
             serde_json::Value::Number(n) => {
@@ -137,6 +165,17 @@ impl Value {
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Bool(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    pub fn as_boolish(&self) -> Option<bool> {
+        match self {
+            Value::Bool(v) => Some(*v),
+            Value::U32(v) => Some(*v != 0),
+            Value::Usize(v) => Some(*v != 0),
+            Value::F32(v) => Some(*v != 0.0),
+            Value::Text(v) => Self::parse_boolish_str(v),
             _ => None,
         }
     }

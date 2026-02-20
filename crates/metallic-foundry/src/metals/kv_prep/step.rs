@@ -68,9 +68,11 @@ impl Step for KvPrepFusedStep {
 
         let cos_idx = symbols.get_or_create(bindings.interpolate(self.cos.0.clone()));
         let sin_idx = symbols.get_or_create(bindings.interpolate(self.sin.0.clone()));
+        let mut step = self.clone();
+        step.params = step.params.bind_scope_literals(bindings);
 
         vec![Box::new(CompiledKvPrepFusedStep {
-            step: self.clone(),
+            step,
             q_idx,
             k_idx,
             v_idx,

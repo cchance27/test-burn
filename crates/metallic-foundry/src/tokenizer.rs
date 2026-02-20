@@ -46,6 +46,7 @@ impl PreTokenizerKind {
             "llama3",
             "llama-v3",
             "llama-bpe",
+            "smaug-bpe",
             "falcon3",
             "falcon-h1",
             "pixtral",
@@ -80,6 +81,26 @@ impl PreTokenizerKind {
         // must be bypassed for a specific `tokenizer.ggml.pre` family.
         false
     }
+}
+
+fn pretokenizer_default_add_bos(name: Option<&str>) -> bool {
+    let Some(name) = name.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+
+    [
+        "llama3",
+        "llama-v3",
+        "llama-bpe",
+        "falcon3",
+        "falcon-h1",
+        "pixtral",
+        "midm-2.0",
+        "lfm2",
+        "tekken",
+    ]
+    .iter()
+    .any(|v| name.eq_ignore_ascii_case(v))
 }
 
 fn bytes_to_unicode() -> FxHashMap<u8, char> {
@@ -154,14 +175,91 @@ pub struct BPETokenizer {
     char_vocab: FxHashMap<char, u32>,
     /// Precompiled regex for special token spans (`<|...|>`).
     special_token_re: Regex,
+    /// Literal control/special tokens that should be matched as atomic pieces.
+    special_literal_tokens: Vec<Arc<str>>,
     /// Precompiled regex for normal tokenization pieces.
     token_piece_re: Regex,
+    /// Pre-tokenizer family selected from metadata.
+    pre_tokenizer_kind: PreTokenizerKind,
     /// Some GGUF pre-tokenizer variants may require bypassing merge ranks.
     /// Currently disabled for all known variants.
     ignore_merges: bool,
 }
 
 impl BPETokenizer {
+    fn system_prompt_from_env() -> Option<String> {
+        std::env::var("METALLIC_SYSTEM_PROMPT")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    #[inline]
+    fn debug_dump_chat_template_render(kind: &str, formatted: &str) {
+        if std::env::var("METALLIC_DEBUG_CHAT_TEMPLATE").is_ok() {
+            eprintln!(
+                "[metallic][debug] chat_template_render kind={} chars={}\n{}",
+                kind,
+                formatted.chars().count(),
+                formatted
+            );
+        }
+    }
+
+    fn format_im_marker_messages(messages: &[Message], add_generation_prompt: bool) -> String {
+        let mut cap = 0usize;
+        for m in messages {
+            cap = cap.saturating_add(m.role.len()).saturating_add(m.content.len()).saturating_add(32);
+        }
+        let mut s = String::with_capacity(cap.saturating_add(32));
+        for m in messages {
+            s.push_str("<|im_start|>");
+            s.push_str(m.role.as_str());
+            s.push('\n');
+            s.push_str(m.content.as_str());
+            s.push_str("<|im_end|>\n");
+        }
+        if add_generation_prompt {
+            s.push_str("<|im_start|>assistant\n");
+        }
+        s
+    }
+
+    /// Canonical chat-message rendering entrypoint used by both tokenizer helpers and workflow `format_chat`.
+    pub fn render_chat_messages(
+        &self,
+        messages: &[Message],
+        add_generation_prompt: bool,
+        template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<(String, &'static str), MetalError> {
+        if let Some(template) = &self.chat_template {
+            let bos_token = self
+                .special_tokens
+                .bos_token_id
+                .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
+            let eos_token = self
+                .special_tokens
+                .eos_token_id
+                .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
+
+            let formatted = template.render(messages, bos_token, eos_token, add_generation_prompt, template_kwargs)?;
+            Self::debug_dump_chat_template_render("messages", &formatted);
+            return Ok((formatted, "chat_template"));
+        }
+
+        let has_im_markers = self.has_token("<|im_start|>") && self.has_token("<|im_end|>");
+        if has_im_markers {
+            let formatted = Self::format_im_marker_messages(messages, add_generation_prompt);
+            Self::debug_dump_chat_template_render("im_marker_fallback", &formatted);
+            return Ok((formatted, "im_marker_fallback"));
+        }
+
+        Ok((
+            messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n"),
+            "plain_join",
+        ))
+    }
+
     /// Create a new tokenizer with the given vocabulary and merges
     pub fn new(
         vocab: FxHashMap<u32, String>,
@@ -234,6 +332,14 @@ impl BPETokenizer {
             }
         }
 
+        let mut special_literal_tokens: Vec<Arc<str>> = Vec::new();
+        for token in vocab_arc.values() {
+            if token.starts_with('<') && token.ends_with('>') && !token.chars().any(|ch| ch.is_whitespace()) {
+                special_literal_tokens.push(Arc::clone(token));
+            }
+        }
+        special_literal_tokens.sort_by_key(|t| std::cmp::Reverse(t.len()));
+
         let special_token_re = Regex::new(r"<\|[^>]*\|>").map_err(|e| BPETokenizerError::RegexError(e))?;
         let pre_kind = PreTokenizerKind::from_metadata_name(pre_tokenizer_name);
         let token_piece_re = Regex::new(pre_kind.token_piece_pattern()).map_err(|e| BPETokenizerError::RegexError(e))?;
@@ -255,7 +361,9 @@ impl BPETokenizer {
             byte_decoder_lut,
             char_vocab,
             special_token_re,
+            special_literal_tokens,
             token_piece_re,
+            pre_tokenizer_kind: pre_kind,
             ignore_merges: pre_kind.ignore_merges(),
         })
     }
@@ -309,15 +417,6 @@ impl BPETokenizer {
             .get_u32("tokenizer.ggml.padding_token_id")
             .or_else(|| metadata.get_u32("standard.padding_token_id"));
 
-        let add_bos_token = metadata
-            .get("tokenizer.ggml.add_bos_token")
-            .or_else(|| metadata.get("standard.add_bos_token"))
-            .and_then(|v| match v {
-                metallic_loader::MetadataValue::Bool(b) => Some(b),
-                _ => None,
-            })
-            .unwrap_or(false);
-
         let chat_template = metadata
             .get_string("tokenizer.chat_template")
             .or_else(|| metadata.get_string("standard.chat_template"))
@@ -327,6 +426,15 @@ impl BPETokenizer {
         let pre_tokenizer_name = metadata
             .get_string("tokenizer.ggml.pre")
             .or_else(|| metadata.get_string("standard.pre"));
+
+        let add_bos_token = metadata
+            .get("tokenizer.ggml.add_bos_token")
+            .or_else(|| metadata.get("standard.add_bos_token"))
+            .and_then(|v| match v {
+                metallic_loader::MetadataValue::Bool(b) => Some(b),
+                _ => None,
+            })
+            .unwrap_or_else(|| pretokenizer_default_add_bos(pre_tokenizer_name.as_deref()));
 
         // Parse token types array
         let token_types_map = if let Some(arr) = token_types_value {
@@ -379,24 +487,189 @@ impl BPETokenizer {
         self.encode_simd(text)
     }
 
-    fn process_pieces(&self, text: &str, mut processor: impl FnMut(&str) -> Result<(), MetalError>) -> Result<(), MetalError> {
-        let mut last = 0;
-        for mat in self.special_token_re.find_iter(text) {
-            let mat = mat?;
-            if mat.start() > last {
-                let subtext = &text[last..mat.start()];
-                for submat in self.token_piece_re.find_iter(subtext) {
-                    processor(submat?.as_str())?;
+    fn process_non_special_subtext(
+        &self,
+        subtext: &str,
+        processor: &mut impl FnMut(&str) -> Result<(), MetalError>,
+    ) -> Result<(), MetalError> {
+        if matches!(self.pre_tokenizer_kind, PreTokenizerKind::Llama3Like) {
+            return self.process_llama3_like_pieces(subtext, processor);
+        }
+
+        for submat in self.token_piece_re.find_iter(subtext) {
+            processor(submat?.as_str())?;
+        }
+        Ok(())
+    }
+
+    fn process_llama3_like_pieces(
+        &self,
+        subtext: &str,
+        processor: &mut impl FnMut(&str) -> Result<(), MetalError>,
+    ) -> Result<(), MetalError> {
+        if subtext.is_empty() {
+            return Ok(());
+        }
+
+        let chars: Vec<char> = subtext.chars().collect();
+        let mut char_starts: Vec<usize> = subtext.char_indices().map(|(idx, _)| idx).collect();
+        char_starts.push(subtext.len());
+
+        let mut emit_piece = |start_char: usize, end_char: usize| -> Result<(), MetalError> {
+            if end_char <= start_char {
+                return Ok(());
+            }
+            let start_byte = char_starts[start_char];
+            let end_byte = char_starts[end_char];
+            processor(&subtext[start_byte..end_byte])
+        };
+
+        let n = chars.len();
+        let mut pos = 0usize;
+        while pos < n {
+            let start = pos;
+            let c = chars[pos];
+
+            if c == '\'' && pos + 1 < n {
+                let c1 = chars[pos + 1].to_ascii_lowercase();
+                if c1 == 's' || c1 == 't' || c1 == 'm' || c1 == 'd' {
+                    pos += 2;
+                    emit_piece(start, pos)?;
+                    continue;
+                }
+                if pos + 2 < n {
+                    let c2 = chars[pos + 2].to_ascii_lowercase();
+                    if (c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') || (c1 == 'l' && c2 == 'l') {
+                        pos += 3;
+                        emit_piece(start, pos)?;
+                        continue;
+                    }
                 }
             }
-            processor(mat.as_str())?;
-            last = mat.end();
-        }
-        if last < text.len() {
-            let subtext = &text[last..];
-            for submat in self.token_piece_re.find_iter(subtext) {
-                processor(submat?.as_str())?;
+
+            if c != '\r' && c != '\n' && !c.is_numeric() && (c.is_alphabetic() || (pos + 1 < n && chars[pos + 1].is_alphabetic())) {
+                pos += 1;
+                while pos < n && chars[pos].is_alphabetic() {
+                    pos += 1;
+                }
+                emit_piece(start, pos)?;
+                continue;
             }
+
+            if c.is_numeric() {
+                let mut group_start = pos;
+                while pos < n && chars[pos].is_numeric() {
+                    pos += 1;
+                    if pos - group_start >= 3 {
+                        emit_piece(group_start, pos)?;
+                        group_start = pos;
+                    }
+                }
+                emit_piece(group_start, pos)?;
+                continue;
+            }
+
+            let mut test_pos = pos;
+            if c == ' ' && pos + 1 < n {
+                test_pos = pos + 1;
+            }
+            let punct_like =
+                (test_pos < n) && !chars[test_pos].is_whitespace() && !chars[test_pos].is_alphabetic() && !chars[test_pos].is_numeric();
+            if punct_like {
+                if c == ' ' {
+                    pos += 1;
+                }
+                while pos < n {
+                    let ch = chars[pos];
+                    if ch.is_whitespace() || ch.is_alphabetic() || ch.is_numeric() {
+                        break;
+                    }
+                    pos += 1;
+                }
+                while pos < n && (chars[pos] == '\r' || chars[pos] == '\n') {
+                    pos += 1;
+                }
+                emit_piece(start, pos)?;
+                continue;
+            }
+
+            let mut num_whitespace = 0usize;
+            let mut last_end_r_or_n = 0usize;
+            while pos + num_whitespace < n && chars[pos + num_whitespace].is_whitespace() {
+                let ch = chars[pos + num_whitespace];
+                if ch == '\r' || ch == '\n' {
+                    last_end_r_or_n = pos + num_whitespace + 1;
+                }
+                num_whitespace += 1;
+            }
+
+            if last_end_r_or_n > 0 {
+                pos = last_end_r_or_n;
+                emit_piece(start, pos)?;
+                continue;
+            }
+            if num_whitespace > 1 && pos + num_whitespace < n {
+                pos += num_whitespace - 1;
+                emit_piece(start, pos)?;
+                continue;
+            }
+            if num_whitespace > 0 {
+                pos += num_whitespace;
+                emit_piece(start, pos)?;
+                continue;
+            }
+
+            pos += 1;
+            emit_piece(start, pos)?;
+        }
+
+        Ok(())
+    }
+
+    fn process_pieces(&self, text: &str, mut processor: impl FnMut(&str) -> Result<(), MetalError>) -> Result<(), MetalError> {
+        let mut start = 0usize;
+        let mut pos = 0usize;
+
+        while pos < text.len() {
+            let rest = &text[pos..];
+            let mut matched_special: Option<&str> = None;
+            if rest.as_bytes().first().copied() == Some(b'<') {
+                for tok in &self.special_literal_tokens {
+                    let tok = tok.as_ref();
+                    if rest.starts_with(tok) {
+                        matched_special = Some(tok);
+                        break;
+                    }
+                }
+                if matched_special.is_none() {
+                    for mat in self.special_token_re.find_iter(rest) {
+                        let mat = mat?;
+                        if mat.start() == 0 {
+                            matched_special = Some(mat.as_str());
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if let Some(tok) = matched_special {
+                if pos > start {
+                    let subtext = &text[start..pos];
+                    self.process_non_special_subtext(subtext, &mut processor)?;
+                }
+                processor(tok)?;
+                pos += tok.len();
+                start = pos;
+                continue;
+            }
+
+            let ch_len = rest.chars().next().map(char::len_utf8).unwrap_or(1);
+            pos += ch_len;
+        }
+
+        if start < text.len() {
+            let subtext = &text[start..];
+            self.process_non_special_subtext(subtext, &mut processor)?;
         }
         Ok(())
     }
@@ -655,6 +928,42 @@ impl BPETokenizer {
         Ok(result)
     }
 
+    /// Decode tokens while preserving control/special token text from the vocabulary.
+    ///
+    /// This is primarily used by chat-template LCP delta logic, where removing control
+    /// markers (e.g. `<|im_start|>`) would corrupt continuation prompts and KV history.
+    pub fn decode_lossless_preserve_control(&self, tokens: &[u32]) -> Result<String, MetalError> {
+        let mut result = String::new();
+        let mut chunk = String::new();
+        let mut byte_scratch = Vec::new();
+
+        let start_index = self.start_index(tokens);
+        for &token_id in &tokens[start_index..] {
+            if let Some(piece) = self.decode_token_arc(token_id, &mut chunk, &mut byte_scratch)? {
+                result.push_str(piece.as_ref());
+                continue;
+            }
+
+            if !byte_scratch.is_empty() {
+                result.push_str(&String::from_utf8_lossy(&byte_scratch));
+                byte_scratch.clear();
+            }
+
+            if let Some(token) = self.vocab.get(&token_id) {
+                result.push_str(token.as_ref());
+            } else if self.special_tokens.eos_token_id != Some(token_id) {
+                return Err(BPETokenizerError::InvalidTokenId(token_id).into());
+            }
+        }
+
+        if !byte_scratch.is_empty() {
+            result.push_str(&String::from_utf8_lossy(&byte_scratch));
+            byte_scratch.clear();
+        }
+
+        Ok(result)
+    }
+
     /// Decode a single token into a shared string. Tokens that can be reused
     /// directly return a clone of the vocabulary `Arc`; tokens that require
     /// byte decoding or post-processing allocate once and move the buffer into
@@ -670,13 +979,11 @@ impl BPETokenizer {
         if self.special_tokens.eos_token_id == Some(token_id) {
             return Ok(None);
         }
-
-        let token_type = self.token_types.get(&token_id).cloned().unwrap_or(1); // Default to normal
-        if token_type == 3 {
-            // Control token
+        if self.special_tokens.bos_token_id == Some(token_id) || self.special_tokens.pad_token_id == Some(token_id) {
             return Ok(None);
         }
 
+        let token_type = self.token_types.get(&token_id).cloned().unwrap_or(1); // Default to normal
         let token = self.vocab.get(&token_id).ok_or(BPETokenizerError::InvalidTokenId(token_id))?;
         let token_str = token.as_ref();
 
@@ -687,7 +994,7 @@ impl BPETokenizer {
 
         match token_type {
             6 => {
-                // GGUF byte token representation (rare for Qwen, but supported).
+                // GGUF byte token representation (rare, but supported).
                 if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6 {
                     let byte = u8::from_str_radix(&token_str[3..5], 16).map_err(|_| BPETokenizerError::InvalidTokenId(token_id))?;
                     byte_scratch.push(byte);
@@ -835,74 +1142,89 @@ impl BPETokenizer {
     /// Format a single-turn chat prompt using the dynamic template.
     ///
     /// If the tokenizer does not have a chat template, it returns the prompt as-is.
-    pub fn format_single_turn_chat_prompt(&self, prompt: &str) -> Result<String, MetalError> {
+    pub fn format_single_turn_chat_prompt_with_kwargs(
+        &self,
+        prompt: &str,
+        template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<String, MetalError> {
         // Fast-path: if the prompt is already chat-formatted, do not wrap it again.
         if prompt.contains("<|im_start|>") {
             return Ok(prompt.to_string());
         }
 
-        // Prefer Model-provided chat template when available (most correct, matches LM Studio / llama.cpp).
-        if let Some(template) = &self.chat_template {
-            let bos_token = self
-                .special_tokens
-                .bos_token_id
-                .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
-            let eos_token = self
-                .special_tokens
-                .eos_token_id
-                .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
-
-            let messages = vec![
-                Message {
+        if self.chat_template.is_some() {
+            let mut messages = Vec::with_capacity(2);
+            if let Some(system) = Self::system_prompt_from_env() {
+                messages.push(Message {
                     role: "system".to_string(),
-                    content: "You are a helpful assistant.".to_string(),
-                },
-                Message {
-                    role: "user".to_string(),
-                    content: prompt.to_string(),
-                },
-            ];
-
-            return template.render(&messages, bos_token, eos_token, true);
+                    content: system,
+                });
+            }
+            messages.push(Message {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+            });
+            let (formatted, _path) = self.render_chat_messages(&messages, true, template_kwargs)?;
+            return Ok(formatted);
         }
 
         // Fallback: if the tokenizer doesn't provide a template, pass raw prompt through.
         Ok(prompt.to_string())
     }
 
-    pub fn encode_single_turn_chat_prompt(&self, prompt: &str) -> Result<Vec<u32>, MetalError> {
-        let formatted = self.format_single_turn_chat_prompt(prompt)?;
+    pub fn format_single_turn_chat_prompt(&self, prompt: &str) -> Result<String, MetalError> {
+        self.format_single_turn_chat_prompt_with_kwargs(prompt, None)
+    }
+
+    pub fn encode_single_turn_chat_prompt_with_kwargs(
+        &self,
+        prompt: &str,
+        template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<Vec<u32>, MetalError> {
+        let formatted = self.format_single_turn_chat_prompt_with_kwargs(prompt, template_kwargs)?;
         self.encode(&formatted)
+    }
+
+    pub fn encode_single_turn_chat_prompt(&self, prompt: &str) -> Result<Vec<u32>, MetalError> {
+        self.encode_single_turn_chat_prompt_with_kwargs(prompt, None)
     }
 
     /// Format a continuation chat prompt using the dynamic template.
     ///
     /// This adds the user prompt and opens the assistant turn.
-    pub fn format_chat_continuation_prompt(&self, prompt: &str) -> Result<String, MetalError> {
-        let Some(template) = &self.chat_template else {
+    pub fn format_chat_continuation_prompt_with_kwargs(
+        &self,
+        prompt: &str,
+        template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<String, MetalError> {
+        if self.chat_template.is_none() {
             return Ok(prompt.to_string());
-        };
-
-        let bos_token = self
-            .special_tokens
-            .bos_token_id
-            .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
-        let eos_token = self
-            .special_tokens
-            .eos_token_id
-            .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
+        }
 
         let messages = vec![Message {
             role: "user".to_string(),
             content: prompt.to_string(),
         }];
 
-        template.render(&messages, bos_token, eos_token, true)
+        let (formatted, _path) = self.render_chat_messages(&messages, true, template_kwargs)?;
+        Ok(formatted)
+    }
+
+    pub fn format_chat_continuation_prompt(&self, prompt: &str) -> Result<String, MetalError> {
+        self.format_chat_continuation_prompt_with_kwargs(prompt, None)
+    }
+
+    pub fn encode_chat_continuation_prompt_with_kwargs(
+        &self,
+        prompt: &str,
+        template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<Vec<u32>, MetalError> {
+        let formatted = self.format_chat_continuation_prompt_with_kwargs(prompt, template_kwargs)?;
+        self.encode(&formatted)
     }
 
     pub fn encode_chat_continuation_prompt(&self, prompt: &str) -> Result<Vec<u32>, MetalError> {
-        let formatted = self.format_chat_continuation_prompt(prompt)?;
-        self.encode(&formatted)
+        self.encode_chat_continuation_prompt_with_kwargs(prompt, None)
     }
 
     /// Get a token by ID (for testing purposes)
@@ -944,15 +1266,15 @@ mod tests {
 
     #[test]
     fn format_chat_continuation_prompt_inserts_turn_newline_for_chat_templates() {
-        // Use a Qwen-like template for testing
-        let qwen_template = "<|im_start|>user\n{{ messages[0]['content'] }}<|im_end|>\n<|im_start|>assistant\n";
+        // Use a generic `<|im_start|> ... <|im_end|>` template for testing.
+        let im_template = "<|im_start|>user\n{{ messages[0]['content'] }}<|im_end|>\n<|im_start|>assistant\n";
         let tokenizer = BPETokenizer::new(
             FxHashMap::default(),
             Vec::new(),
             FxHashMap::default(),
             SpecialTokens::default(),
             false,
-            Some(qwen_template.to_string()),
+            Some(im_template.to_string()),
         )
         .unwrap();
 
@@ -1001,6 +1323,29 @@ mod tests {
     }
 
     #[test]
+    fn decode_lossless_preserve_control_keeps_control_marker_text() {
+        let mut vocab = FxHashMap::default();
+        vocab.insert(0u32, "<|im_start|>".to_string());
+        vocab.insert(1u32, "user".to_string());
+        vocab.insert(2u32, "\n".to_string());
+        vocab.insert(3u32, "hello".to_string());
+        vocab.insert(4u32, "<|im_end|>\n".to_string());
+
+        let mut token_types = FxHashMap::default();
+        token_types.insert(0u32, 3); // control
+        token_types.insert(4u32, 3); // control
+
+        let tokenizer = BPETokenizer::new(vocab, Vec::new(), token_types, SpecialTokens::default(), false, None).unwrap();
+
+        let tokens = [0u32, 1, 2, 3, 4];
+        let plain = tokenizer.decode_lossless(&tokens).unwrap();
+        let with_control = tokenizer.decode_lossless_preserve_control(&tokens).unwrap();
+
+        assert_eq!(plain, "user\nhello");
+        assert_eq!(with_control, "<|im_start|>user\nhello<|im_end|>\n");
+    }
+
+    #[test]
     fn llama_bpe_pretokenizer_splits_long_digit_runs() {
         let mut vocab = FxHashMap::default();
         vocab.insert(0u32, "?".to_string());
@@ -1019,7 +1364,7 @@ mod tests {
         )
         .unwrap();
         let llama = BPETokenizer::new_with_pretokenizer(
-            vocab,
+            vocab.clone(),
             Vec::new(),
             FxHashMap::default(),
             SpecialTokens::default(),
@@ -1028,9 +1373,20 @@ mod tests {
             Some("llama-bpe"),
         )
         .unwrap();
+        let smaug = BPETokenizer::new_with_pretokenizer(
+            vocab,
+            Vec::new(),
+            FxHashMap::default(),
+            SpecialTokens::default(),
+            false,
+            None,
+            Some("smaug-bpe"),
+        )
+        .unwrap();
 
         assert_eq!(gpt2.encode("1234").unwrap(), vec![1]);
         assert_eq!(llama.encode("1234").unwrap(), vec![2, 3]);
+        assert_eq!(smaug.encode("1234").unwrap(), vec![2, 3]);
     }
 
     #[test]

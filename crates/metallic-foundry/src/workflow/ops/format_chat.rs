@@ -15,6 +15,7 @@ pub(crate) struct FormatChatOp {
     output_var: String,
     add_generation_prompt: bool,
     mode: Option<String>,
+    template_kwargs: FxHashMap<String, crate::workflow::spec::TemplateKwargParam>,
     default_state: ConversationFormatState,
     conversation_states: FxHashMap<String, ConversationFormatState>,
 }
@@ -67,6 +68,7 @@ impl FormatChatOp {
             output_var: spec.output,
             add_generation_prompt: spec.add_generation_prompt,
             mode: spec.mode,
+            template_kwargs: spec.template_kwargs,
             default_state: ConversationFormatState::default(),
             conversation_states: FxHashMap::default(),
         }
@@ -93,6 +95,57 @@ fn map_message(map: &FxHashMap<String, Value>) -> Result<Message, MetalError> {
         role: role.to_string(),
         content: content.to_string(),
     })
+}
+
+fn workflow_value_to_template_json(value: &Value) -> Result<serde_json::Value, MetalError> {
+    match value {
+        Value::U32(v) => Ok(serde_json::Value::from(*v)),
+        Value::Usize(v) => Ok(serde_json::Value::from(*v)),
+        Value::F32(v) => Ok(serde_json::Value::from(*v)),
+        Value::Bool(v) => Ok(serde_json::Value::from(*v)),
+        Value::Text(v) => Ok(serde_json::Value::String(v.to_string())),
+        Value::TokensU32(tokens) => Ok(serde_json::Value::Array(
+            tokens.iter().map(|v| serde_json::Value::from(*v)).collect(),
+        )),
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(workflow_value_to_template_json(item)?);
+            }
+            Ok(serde_json::Value::Array(out))
+        }
+        Value::Map(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                out.insert(k.clone(), workflow_value_to_template_json(v)?);
+            }
+            Ok(serde_json::Value::Object(out))
+        }
+        other => Err(MetalError::InvalidOperation(format!(
+            "format_chat template_kwargs does not support workflow value type '{}'",
+            other.type_name()
+        ))),
+    }
+}
+
+fn resolve_template_kwargs(
+    specs: &FxHashMap<String, crate::workflow::spec::TemplateKwargParam>,
+    ctx: &WorkflowExecutionContext<'_>,
+) -> Result<serde_json::Map<String, serde_json::Value>, MetalError> {
+    let mut resolved = serde_json::Map::new();
+    for (name, spec) in specs {
+        let value = match spec {
+            crate::workflow::spec::TemplateKwargParam::Literal(v) => v.clone(),
+            crate::workflow::spec::TemplateKwargParam::Input(var_name) => {
+                let source = ctx.values.get(var_name).ok_or_else(|| {
+                    MetalError::InvalidOperation(format!("format_chat template_kwargs missing workflow variable '{}'", var_name))
+                })?;
+                workflow_value_to_template_json(source)?
+            }
+        };
+        resolved.insert(name.clone(), value);
+    }
+    Ok(resolved)
 }
 
 fn select_messages_to_render<'a>(
@@ -189,25 +242,6 @@ fn conversation_key_from_ctx(ctx: &WorkflowExecutionContext<'_>) -> Option<Strin
     value.as_usize().map(|v| v.to_string())
 }
 
-fn format_qwen_messages(messages: &[Message], add_generation_prompt: bool) -> String {
-    let mut cap = 0usize;
-    for m in messages {
-        cap = cap.saturating_add(m.role.len()).saturating_add(m.content.len()).saturating_add(32);
-    }
-    let mut s = String::with_capacity(cap.saturating_add(32));
-    for m in messages {
-        s.push_str("<|im_start|>");
-        s.push_str(m.role.as_str());
-        s.push('\n');
-        s.push_str(m.content.as_str());
-        s.push_str("<|im_end|>\n");
-    }
-    if add_generation_prompt {
-        s.push_str("<|im_start|>assistant\n");
-    }
-    s
-}
-
 fn hash_message_key(tag: &str, add_generation_prompt: bool, messages: &[(&str, &str)]) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     "kv-prefix-v2".hash(&mut hasher);
@@ -280,35 +314,9 @@ fn render_messages_with_tokenizer(
     tokenizer: &crate::BPETokenizer,
     messages: &[Message],
     add_generation_prompt: bool,
+    template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<(String, &'static str), MetalError> {
-    let has_qwen_markers = tokenizer.has_token("<|im_start|>") && tokenizer.has_token("<|im_end|>");
-
-    if let Some(template) = tokenizer.chat_template() {
-        // Use raw vocab token text for template vars.
-        // decode_lossless intentionally suppresses control/eos tokens, which breaks templates
-        // that explicitly interpolate `bos_token` / `eos_token` (e.g. Llama).
-        let bos_token = tokenizer
-            .special_tokens()
-            .bos_token_id
-            .and_then(|id| tokenizer.get_token_debug(id).map(|s| s.to_string()));
-        let eos_token = tokenizer
-            .special_tokens()
-            .eos_token_id
-            .and_then(|id| tokenizer.get_token_debug(id).map(|s| s.to_string()));
-        return Ok((
-            template.render(messages, bos_token.as_deref(), eos_token.as_deref(), add_generation_prompt)?,
-            "chat_template",
-        ));
-    }
-
-    if has_qwen_markers {
-        return Ok((format_qwen_messages(messages, add_generation_prompt), "qwen_fallback"));
-    }
-
-    Ok((
-        messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n"),
-        "plain_join",
-    ))
+    tokenizer.render_chat_messages(messages, add_generation_prompt, template_kwargs)
 }
 
 fn longest_common_prefix_len(lhs: &[u32], rhs: &[u32]) -> usize {
@@ -321,6 +329,7 @@ fn compute_template_lcp_delta(
     already_rendered_messages: usize,
     add_generation_prompt: bool,
     conversation_id: Option<&str>,
+    template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<Option<String>, MetalError> {
     if already_rendered_messages == 0 || already_rendered_messages > full_messages.len() {
         return Ok(None);
@@ -334,8 +343,8 @@ fn compute_template_lcp_delta(
     // so the "already rendered" side more closely matches the in-session state.
     let prev_add_generation_prompt = prev_messages.last().is_some_and(|m| m.role != "assistant");
 
-    let (prev_rendered, prev_path) = render_messages_with_tokenizer(tokenizer, prev_messages, prev_add_generation_prompt)?;
-    let (curr_rendered, curr_path) = render_messages_with_tokenizer(tokenizer, full_messages, add_generation_prompt)?;
+    let (prev_rendered, prev_path) = render_messages_with_tokenizer(tokenizer, prev_messages, prev_add_generation_prompt, template_kwargs)?;
+    let (curr_rendered, curr_path) = render_messages_with_tokenizer(tokenizer, full_messages, add_generation_prompt, template_kwargs)?;
     if prev_path != "chat_template" || curr_path != "chat_template" {
         return Ok(None);
     }
@@ -353,7 +362,7 @@ fn compute_template_lcp_delta(
         delta_tokens = delta_tokens.len(),
         "format_chat template LCP delta"
     );
-    let delta = tokenizer.decode_lossless(delta_tokens)?;
+    let delta = tokenizer.decode_lossless_preserve_control(delta_tokens)?;
     Ok(Some(delta))
 }
 
@@ -449,6 +458,19 @@ impl WorkflowOp for FormatChatOp {
 
         let model = ctx.resolve_model(model_id.as_deref())?;
         let tokenizer = model.tokenizer()?;
+        let template_kwargs = resolve_template_kwargs(&self.template_kwargs, ctx)?;
+        let thinking_enabled = template_kwargs.get("enable_thinking").and_then(Value::json_boolish);
+        if !template_kwargs.is_empty() {
+            let kwarg_keys: Vec<&str> = template_kwargs.keys().map(String::as_str).collect();
+            tracing::debug!(
+                target: "metallic_foundry::workflow::ops::format_chat",
+                conversation_id = conversation_key.as_deref().unwrap_or("<default>"),
+                keys = ?kwarg_keys,
+                enable_thinking = thinking_enabled,
+                "format_chat resolved template kwargs"
+            );
+        }
+        let template_kwargs_ref = if template_kwargs.is_empty() { None } else { Some(&template_kwargs) };
         let add_generation_prompt = self.add_generation_prompt && !messages_slice.is_empty();
         let already_rendered_messages = seen_before.saturating_add(selection.skipped_assistant_prefix);
         let lcp_delta = if mode == "delta"
@@ -462,6 +484,7 @@ impl WorkflowOp for FormatChatOp {
                 already_rendered_messages,
                 add_generation_prompt,
                 conversation_key.as_deref(),
+                template_kwargs_ref,
             )?
         } else {
             None
@@ -470,7 +493,7 @@ impl WorkflowOp for FormatChatOp {
         let (formatted, render_path) = if let Some(delta) = lcp_delta {
             (delta, "chat_template_lcp_delta")
         } else {
-            render_messages_with_tokenizer(&tokenizer, &messages_to_render, add_generation_prompt)?
+            render_messages_with_tokenizer(&tokenizer, &messages_to_render, add_generation_prompt, template_kwargs_ref)?
         };
 
         let (kv_prefix_key, kv_prefix_base_key) = compute_kv_prefix_keys(
@@ -512,6 +535,8 @@ impl WorkflowOp for FormatChatOp {
             system_prefix = ?system_prefix_source,
             add_generation_prompt,
             render_path,
+            template_kwargs = template_kwargs.len(),
+            thinking_enabled = thinking_enabled,
             rendered_bytes = formatted.len(),
             kv_prefix_key = kv_prefix_key.as_deref().unwrap_or("<none>"),
             kv_prefix_base_key = kv_prefix_base_key.as_deref().unwrap_or("<none>"),
@@ -723,9 +748,24 @@ mod tests {
         s
     }
 
+    fn format_im_messages(messages: &[Message], add_generation_prompt: bool) -> String {
+        let mut s = String::new();
+        for m in messages {
+            s.push_str("<|im_start|>");
+            s.push_str(m.role.as_str());
+            s.push('\n');
+            s.push_str(m.content.as_str());
+            s.push_str("<|im_end|>\n");
+        }
+        if add_generation_prompt {
+            s.push_str("<|im_start|>assistant\n");
+        }
+        s
+    }
+
     #[test]
-    fn template_lcp_delta_matches_qwen_suffix_for_user_turn() {
-        // Canonical Qwen-style chat template shape.
+    fn template_lcp_delta_matches_im_marker_suffix_for_user_turn() {
+        // Canonical `<|im_start|> ... <|im_end|>` chat-template shape.
         let template = "{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}";
         let full = vec![
             msg_with("system", "s"),
@@ -733,12 +773,12 @@ mod tests {
             msg_with("assistant", "a1"),
             msg_with("user", "u2"),
         ];
-        let prev_render = format_qwen_messages(&full[..3], false);
-        let curr_render = format_qwen_messages(&full, true);
-        let expected_delta = format_qwen_messages(&full[3..], true);
+        let prev_render = format_im_messages(&full[..3], false);
+        let curr_render = format_im_messages(&full, true);
+        let expected_delta = format_im_messages(&full[3..], true);
         let tokenizer = char_level_tokenizer_with_template(template, &[&prev_render, &curr_render, &expected_delta]);
 
-        let delta = compute_template_lcp_delta(&tokenizer, &full, 3, true, Some("conversation-1"))
+        let delta = compute_template_lcp_delta(&tokenizer, &full, 3, true, Some("conversation-1"), None)
             .expect("lcp delta should compute")
             .expect("lcp delta should exist");
         let expected_tokens = tokenizer.encode(&expected_delta).expect("expected tokens");
@@ -761,7 +801,7 @@ mod tests {
         let expected_delta = format_llama_messages(&full[3..], true);
         let tokenizer = char_level_tokenizer_with_template(template, &[&prev_render, &curr_render, &expected_delta]);
 
-        let delta = compute_template_lcp_delta(&tokenizer, &full, 3, true, Some("conversation-llama"))
+        let delta = compute_template_lcp_delta(&tokenizer, &full, 3, true, Some("conversation-llama"), None)
             .expect("lcp delta should compute")
             .expect("lcp delta should exist");
         let expected_tokens = tokenizer.encode(&expected_delta).expect("expected tokens");
@@ -793,18 +833,34 @@ mod tests {
         .expect("tokenizer should build");
 
         let messages = vec![msg_with("user", "hello")];
-        let (rendered, path) = render_messages_with_tokenizer(&tokenizer, &messages, true).expect("render should work");
+        let (rendered, path) = render_messages_with_tokenizer(&tokenizer, &messages, true, None).expect("render should work");
         assert_eq!(path, "chat_template");
         assert_eq!(rendered, "<|begin_of_text|>hello");
     }
 
     #[test]
-    fn template_lcp_delta_matches_qwen_real_template_when_available() {
-        let gguf_path = std::env::var("METALLIC_QWEN_GGUF_TEST_PATH").ok().map(PathBuf::from).or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|cwd| cwd.join("models/qwen2.5-coder-0.5b-instruct-q4_0.gguf"))
-        });
+    fn render_messages_with_template_kwargs_controls_thinking_mode() {
+        let tokenizer = crate::BPETokenizer::new(
+            FxHashMap::default(),
+            Vec::new(),
+            FxHashMap::default(),
+            crate::tokenizer::SpecialTokens::default(),
+            false,
+            Some("{% if enable_thinking %}/think{% else %}/no_think{% endif %}".to_string()),
+        )
+        .expect("tokenizer should build");
+
+        let messages = vec![msg_with("user", "hello")];
+        let mut kwargs = serde_json::Map::new();
+        kwargs.insert("enable_thinking".to_string(), serde_json::Value::Bool(false));
+        let (rendered, path) = render_messages_with_tokenizer(&tokenizer, &messages, true, Some(&kwargs)).expect("render should work");
+        assert_eq!(path, "chat_template");
+        assert_eq!(rendered, "/no_think");
+    }
+
+    #[test]
+    fn template_lcp_delta_matches_real_im_marker_template_when_available() {
+        let gguf_path = std::env::var("METALLIC_CHAT_TEMPLATE_GGUF_TEST_PATH").ok().map(PathBuf::from);
         let Some(gguf_path) = gguf_path else {
             return;
         };
@@ -830,8 +886,8 @@ mod tests {
             msg_with("assistant", "console.log('Hello World');"),
             msg_with("user", "now in rustlang"),
         ];
-        let expected_delta = format_qwen_messages(&full[3..], true);
-        let delta = compute_template_lcp_delta(&tokenizer, &full, 3, true, Some("conversation-1"))
+        let expected_delta = format_im_messages(&full[3..], true);
+        let delta = compute_template_lcp_delta(&tokenizer, &full, 3, true, Some("conversation-1"), None)
             .expect("lcp delta should compute")
             .expect("lcp delta should exist");
 

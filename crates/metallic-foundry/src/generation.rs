@@ -104,19 +104,19 @@ fn system_prompt_from_env() -> Option<Arc<str>> {
 }
 
 fn build_single_turn_messages_value(_tokenizer: &BPETokenizer, prompt: &str) -> Value {
-    let mut sys = FxHashMap::default();
-    sys.insert("role".to_string(), Value::Text("system".into()));
-    // IMPORTANT: keep the default system prompt generic; if the model provides a chat template,
-    // it is the source of truth for formatting. Model-specific hardcoded system prompts can
-    // cause dramatic behavioral shifts (e.g., refusals).
-    let system = system_prompt_from_env().unwrap_or_else(|| Arc::<str>::from("You are a helpful assistant."));
-    sys.insert("content".to_string(), Value::Text(system));
-
     let mut user = FxHashMap::default();
     user.insert("role".to_string(), Value::Text("user".into()));
     user.insert("content".to_string(), Value::Text(prompt.into()));
 
-    Value::Array(vec![Value::Map(sys), Value::Map(user)])
+    let mut messages = Vec::with_capacity(2);
+    if let Some(system) = system_prompt_from_env() {
+        let mut sys = FxHashMap::default();
+        sys.insert("role".to_string(), Value::Text("system".into()));
+        sys.insert("content".to_string(), Value::Text(system));
+        messages.push(Value::Map(sys));
+    }
+    messages.push(Value::Map(user));
+    Value::Array(messages)
 }
 
 /// Streaming generation for the Foundry backend using pre-tokenized prompt ids.
@@ -139,7 +139,7 @@ pub fn generate_streaming_from_tokens(
     let mut models: FxHashMap<String, Arc<CompiledModel>> = FxHashMap::default();
     models.insert("llm".to_string(), model);
 
-    generate_streaming_from_tokens_with_workflow(foundry, &models, tokenizer, prompt_tokens, cfg, tx, workflow.clone())
+    generate_streaming_from_tokens_with_workflow(foundry, &models, tokenizer, prompt_tokens, cfg, tx, workflow.clone(), None)
 }
 
 /// Streaming generation for the Foundry backend using a caller-provided workflow + model map.
@@ -155,6 +155,7 @@ pub fn generate_streaming_from_tokens_with_workflow(
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
     workflow: WorkflowSpec,
+    workflow_input_overrides: Option<&FxHashMap<String, Value>>,
 ) -> Result<(), MetalError> {
     let generation_start = Instant::now();
 
@@ -201,12 +202,19 @@ pub fn generate_streaming_from_tokens_with_workflow(
     inputs.insert("frequency_penalty".to_string(), Value::F32(cfg.frequency_penalty));
 
     // Prefer runner auto-injection of `eos_token` (from the default model's tokenizer) when the workflow declares it.
-    // Keep a fallback for workflows that rely on EOS but do not declare an input (legacy/custom graphs).
     if !wf_cfg.workflow.inputs.iter().any(|i| i.name == "eos_token") {
-        let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+        let eos = tokenizer
+            .special_tokens()
+            .eos_token_id
+            .ok_or_else(|| MetalError::InvalidOperation("Tokenizer metadata missing required 'eos_token_id'".to_string()))?;
         inputs.insert("eos_token".to_string(), Value::U32(eos));
     }
     inputs.insert("seed".to_string(), Value::U32(cfg.seed.unwrap_or_else(rand::random)));
+    if let Some(overrides) = workflow_input_overrides {
+        for (name, value) in overrides {
+            inputs.insert(name.clone(), value.clone());
+        }
+    }
 
     let _outputs = runner.run_streaming(foundry, &wf_cfg.workflow, inputs, &mut callback)?;
 
@@ -276,9 +284,11 @@ pub fn generate_streaming_with_workflow_from_prompt(
     inputs.insert("frequency_penalty".to_string(), Value::F32(cfg.frequency_penalty));
 
     // Prefer runner auto-injection of `eos_token` (from the default model's tokenizer) when the workflow declares it.
-    // Keep a fallback for workflows that rely on EOS but do not declare an input (legacy/custom graphs).
     if !wf_cfg.workflow.inputs.iter().any(|i| i.name == "eos_token") {
-        let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+        let eos = tokenizer
+            .special_tokens()
+            .eos_token_id
+            .ok_or_else(|| MetalError::InvalidOperation("Tokenizer metadata missing required 'eos_token_id'".to_string()))?;
         inputs.insert("eos_token".to_string(), Value::U32(eos));
     }
     inputs.insert("seed".to_string(), Value::U32(cfg.seed.unwrap_or_else(rand::random)));

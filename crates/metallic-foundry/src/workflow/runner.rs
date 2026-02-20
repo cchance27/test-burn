@@ -345,7 +345,7 @@ impl WorkflowRunner {
         // Rationale:
         // - Workflows are model-agnostic, but token IDs (EOS/BOS/etc.) are tokenizer-defined.
         // - Callers often persist workflow defaults as "inputs", which should not pin an incorrect
-        //   model-specific EOS value (e.g. 151645 for non-Qwen models).
+        //   model-specific EOS value.
         // - If multiple models are loaded and `workflow.default_model` is missing, we cannot infer safely.
         if workflow.inputs.iter().any(|i| i.name == "eos_token") {
             let model_id = if let Some(id) = workflow.default_model.as_deref() {
@@ -377,6 +377,12 @@ impl WorkflowRunner {
                     inputs.insert("eos_token".to_string(), Value::U32(eos));
                 }
             }
+        }
+        if workflow.inputs.iter().any(|i| i.name == "eos_token") && !inputs.contains_key("eos_token") {
+            return Err(MetalError::InvalidOperation(
+                "Workflow requires 'eos_token', but no explicit value was provided and tokenizer metadata did not expose 'eos_token_id'"
+                    .to_string(),
+            ));
         }
 
         let fp = workflow_fingerprint(workflow);
@@ -426,17 +432,17 @@ mod tests {
 
     #[test]
     fn inferred_eos_used_when_not_explicitly_supplied() {
-        assert!(should_override_with_inferred_eos(false, Some(151645), Some(151645)));
-        assert!(should_override_with_inferred_eos(false, None, Some(151645)));
+        assert!(should_override_with_inferred_eos(false, Some(42), Some(42)));
+        assert!(should_override_with_inferred_eos(false, None, Some(42)));
     }
 
     #[test]
     fn inferred_eos_used_when_supplied_value_matches_workflow_default() {
-        assert!(should_override_with_inferred_eos(true, Some(151645), Some(151645)));
+        assert!(should_override_with_inferred_eos(true, Some(42), Some(42)));
     }
 
     #[test]
     fn explicit_non_default_eos_is_preserved() {
-        assert!(!should_override_with_inferred_eos(true, Some(2), Some(151645)));
+        assert!(!should_override_with_inferred_eos(true, Some(2), Some(42)));
     }
 }

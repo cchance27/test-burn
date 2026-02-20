@@ -16,7 +16,7 @@ fn test_qwen_template_parity() {
         },
     ];
 
-    let rendered = template.render(&messages, None, None, true).unwrap();
+    let rendered = template.render(&messages, None, None, true, None).unwrap();
 
     let expected =
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello!<|im_end|>\n<|im_start|>assistant\n";
@@ -33,7 +33,7 @@ fn test_llama3_template() {
         content: "Tell me a joke.".to_string(),
     }];
 
-    let rendered = template.render(&messages, None, None, true).unwrap();
+    let rendered = template.render(&messages, None, None, true, None).unwrap();
     let expected = "<|start_header_id|>user<|end_header_id|>\n\nTell me a joke.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
     assert_eq!(rendered, expected);
 }
@@ -49,7 +49,7 @@ fn test_mistral_template() {
         content: "What is 2+2?".to_string(),
     }];
 
-    let rendered = template.render(&messages, Some("<s>"), Some("</s>"), true).unwrap();
+    let rendered = template.render(&messages, Some("<s>"), Some("</s>"), true, None).unwrap();
     let expected = "<s>[INST] What is 2+2? [/INST]";
     assert_eq!(rendered, expected);
 }

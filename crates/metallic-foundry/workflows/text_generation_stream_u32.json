@@ -14,7 +14,7 @@
     {"name":"presence_penalty","type":"f32","default":0.0},
     {"name":"frequency_penalty","type":"f32","default":0.0},
     {"name":"seed","type":"u32","default":42},
-    {"name":"eos_token","type":"u32","default":151645},
+    {"name":"eos_token","type":"u32"},
     {"name":"stream_capacity","type":"u32","default":4096}
   ],
   "steps": [

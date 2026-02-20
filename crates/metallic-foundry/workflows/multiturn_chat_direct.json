@@ -14,10 +14,11 @@
     { "name": "presence_penalty", "type": "f32", "default": 0.0 },
     { "name": "frequency_penalty", "type": "f32", "default": 0.0 },
     { "name": "seed", "type": "u32", "default": 42 },
-    { "name": "eos_token", "type": "u32", "default": 151645 }
+    { "name": "enable_thinking", "type": "u32", "default": 0, "hidden": true },
+    { "name": "eos_token", "type": "u32" }
   ],
   "steps": [
-    { "op": "format_chat", "model_id": "llm", "input": "messages", "output": "formatted_delta", "mode": "delta", "add_generation_prompt": true },
+    { "op": "format_chat", "model_id": "llm", "input": "messages", "output": "formatted_delta", "mode": "delta", "add_generation_prompt": true, "template_kwargs": { "enable_thinking": "{enable_thinking}" } },
     { "op": "tokenize", "model_id": "llm", "input": "formatted_delta", "output": "prompt_tokens_delta", "mode": "raw" },
     { "op": "prefill", "model_id": "llm", "input": "prompt_tokens_delta", "output_pos": "current_pos", "mode": "delta", "logits_binding": "logits" },
     {

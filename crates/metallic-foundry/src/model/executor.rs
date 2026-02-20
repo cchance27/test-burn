@@ -3330,7 +3330,10 @@ impl CompiledModel {
     ) -> Result<Vec<u32>, MetalError> {
         let tokenizer = self.tokenizer()?;
         let prompt_tokens = tokenizer.encode_single_turn_chat_prompt(prompt)?;
-        let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+        let eos = tokenizer
+            .special_tokens()
+            .eos_token_id
+            .ok_or_else(|| MetalError::InvalidOperation("Tokenizer metadata missing required 'eos_token_id'".to_string()))?;
         self.generate(foundry, &prompt_tokens, max_new_tokens, &[eos], temperature, top_k, top_p)
     }
 

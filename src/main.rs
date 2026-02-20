@@ -8,7 +8,7 @@ use metallic_context::{
     Context, F16Element, TensorElement, Tokenizer, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{KernelBackendKind, KernelBackendOverride, KernelBackendOverrides}, profiling_state
 };
 use metallic_foundry::{
-    model::{CompiledModel, ModelBuilder}, workflow::WorkflowRunner
+    model::{CompiledModel, ModelBuilder}, workflow::{Value as WorkflowValue, WorkflowRunner}
 };
 use metallic_instrumentation::{MetricEvent, config::AppConfig, prelude::*, record_metric_async};
 use metallic_loader::ModelLoader;
@@ -100,6 +100,15 @@ fn main() -> AppResult<()> {
     let worker_engine = cli_config.engine;
     let worker_output_format = cli_config.output_format.clone();
     let workflow_path = cli_config.workflow.clone();
+    let worker_workflow_kwargs = cli_config
+        .parsed_workflow_kwargs()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    let kwarg_enable_thinking = worker_workflow_kwargs
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "enable_thinking")
+        .and_then(|(_, value)| WorkflowValue::parse_boolish_str(value));
+    let worker_thinking_override = cli_config.thinking_override().or(kwarg_enable_thinking);
 
     fn env_bool(name: &str) -> bool {
         let Ok(value) = std::env::var(name) else {
@@ -115,6 +124,116 @@ fn main() -> AppResult<()> {
 
     fn env_is_set(name: &str) -> bool {
         std::env::var(name).is_ok()
+    }
+
+    fn parse_workflow_kwarg_value(raw: &str) -> WorkflowValue {
+        let trimmed = raw.trim();
+        if trimmed.eq_ignore_ascii_case("true") {
+            return WorkflowValue::Bool(true);
+        }
+        if trimmed.eq_ignore_ascii_case("false") {
+            return WorkflowValue::Bool(false);
+        }
+        if let Ok(v) = trimmed.parse::<u32>() {
+            return WorkflowValue::U32(v);
+        }
+        if let Ok(v) = trimmed.parse::<usize>() {
+            return WorkflowValue::Usize(v);
+        }
+        if let Ok(v) = trimmed.parse::<f32>() {
+            return WorkflowValue::F32(v);
+        }
+        if (trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with('"'))
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed)
+        {
+            return WorkflowValue::from_json(json);
+        }
+        WorkflowValue::Text(Arc::<str>::from(trimmed.to_string()))
+    }
+
+    fn build_workflow_cli_inputs(kwargs: &[(String, String)], thinking_override: Option<bool>) -> Result<FxHashMap<String, WorkflowValue>> {
+        let mut out: FxHashMap<String, WorkflowValue> = FxHashMap::default();
+        for (key, value) in kwargs {
+            out.insert(key.clone(), parse_workflow_kwarg_value(value));
+        }
+        if let Some(enabled) = thinking_override {
+            out.insert("enable_thinking".to_string(), WorkflowValue::U32(u32::from(enabled)));
+        }
+        Ok(out)
+    }
+
+    fn summarize_workflow_value(value: &WorkflowValue) -> String {
+        match value {
+            WorkflowValue::Bool(v) => v.to_string(),
+            WorkflowValue::U32(v) => v.to_string(),
+            WorkflowValue::Usize(v) => v.to_string(),
+            WorkflowValue::F32(v) => v.to_string(),
+            WorkflowValue::Text(v) => {
+                let text = v.as_ref();
+                if text.len() > 64 {
+                    format!("{}…", &text[..64])
+                } else {
+                    text.to_string()
+                }
+            }
+            WorkflowValue::Array(items) => format!("<array:{}>", items.len()),
+            WorkflowValue::Map(map) => format!("<map:{}>", map.len()),
+            WorkflowValue::TokensU32(tokens) => format!("<tokens:{}>", tokens.len()),
+            WorkflowValue::Tensor(_) => "<tensor>".to_string(),
+            WorkflowValue::ChannelU32(_) => "<channel_u32>".to_string(),
+            WorkflowValue::CommandBuffer(_) => "<command_buffer>".to_string(),
+        }
+    }
+
+    fn workflow_value_to_json(value: &WorkflowValue) -> Result<serde_json::Value> {
+        Ok(match value {
+            WorkflowValue::U32(v) => serde_json::Value::from(*v),
+            WorkflowValue::Usize(v) => serde_json::Value::from(*v),
+            WorkflowValue::F32(v) => serde_json::Value::from(*v),
+            WorkflowValue::Bool(v) => serde_json::Value::from(*v),
+            WorkflowValue::Text(v) => serde_json::Value::String(v.to_string()),
+            WorkflowValue::Array(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(workflow_value_to_json(item)?);
+                }
+                serde_json::Value::Array(out)
+            }
+            WorkflowValue::Map(map) => {
+                let mut out = serde_json::Map::new();
+                for (key, item) in map {
+                    out.insert(key.clone(), workflow_value_to_json(item)?);
+                }
+                serde_json::Value::Object(out)
+            }
+            WorkflowValue::TokensU32(tokens) => serde_json::Value::Array(tokens.iter().map(|v| serde_json::Value::from(*v)).collect()),
+            WorkflowValue::Tensor(_) => return Err(anyhow::anyhow!("Cannot convert tensor workflow kwarg to template JSON")),
+            WorkflowValue::ChannelU32(_) => {
+                return Err(anyhow::anyhow!("Cannot convert channel workflow kwarg to template JSON"));
+            }
+            WorkflowValue::CommandBuffer(_) => {
+                return Err(anyhow::anyhow!("Cannot convert command_buffer workflow kwarg to template JSON"));
+            }
+        })
+    }
+
+    fn workflow_template_kwargs(
+        workflow_cli_inputs: &FxHashMap<String, WorkflowValue>,
+    ) -> Result<Option<serde_json::Map<String, serde_json::Value>>> {
+        if workflow_cli_inputs.is_empty() {
+            return Ok(None);
+        }
+        let mut out = serde_json::Map::new();
+        for (key, value) in workflow_cli_inputs {
+            out.insert(key.clone(), workflow_value_to_json(value)?);
+        }
+        Ok(Some(out))
+    }
+
+    fn apply_workflow_cli_inputs(inputs: &mut FxHashMap<String, WorkflowValue>, workflow_cli_inputs: &FxHashMap<String, WorkflowValue>) {
+        for (key, value) in workflow_cli_inputs {
+            inputs.insert(key.clone(), value.clone());
+        }
     }
 
     // Defensive: it's easy to accidentally leave `METALLIC_IGNORE_EOS_STOP=1` in the environment from
@@ -154,6 +273,40 @@ fn main() -> AppResult<()> {
         let worker_tx = tx.clone();
         thread::spawn(move || -> Result<()> {
             let worker = || -> Result<()> {
+                let workflow_cli_inputs = build_workflow_cli_inputs(&worker_workflow_kwargs, worker_thinking_override)?;
+                let tokenizer_template_kwargs = workflow_template_kwargs(&workflow_cli_inputs)?;
+                if !workflow_cli_inputs.is_empty() {
+                    tracing::info!(
+                        kwarg_count = workflow_cli_inputs.len(),
+                        "Loaded workflow CLI kwargs (--kwarg / --thinking)"
+                    );
+                    for (key, value) in &workflow_cli_inputs {
+                        tracing::debug!(
+                            key = key.as_str(),
+                            value_type = value.type_name(),
+                            value = summarize_workflow_value(value),
+                            "Workflow CLI kwarg"
+                        );
+                    }
+                }
+                if let Some(value) = workflow_cli_inputs.get("enable_thinking") {
+                    if let Some(enabled) = value.as_boolish() {
+                        tracing::info!(enable_thinking = enabled, "Thinking override provided by CLI");
+                    } else {
+                        tracing::debug!(
+                            value_type = value.type_name(),
+                            value = summarize_workflow_value(value),
+                            "enable_thinking provided but not coercible to bool"
+                        );
+                    }
+                }
+                if let Some(kwargs) = tokenizer_template_kwargs.as_ref() {
+                    tracing::debug!(
+                        template_kwargs = kwargs.len(),
+                        "Tokenizer/template kwargs prepared for chat rendering"
+                    );
+                }
+
                 // Send initial empty memory update - simplified for new system
                 emit_startup_memory_update(&worker_tx)?;
 
@@ -199,6 +352,9 @@ fn main() -> AppResult<()> {
 
                 match worker_engine {
                     cli::config::Engine::Context => {
+                        if !workflow_cli_inputs.is_empty() {
+                            tracing::debug!("Ignoring --kwarg/--thinking overrides for Context engine");
+                        }
                         worker_tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
                         let loader = GGUFModelLoader::new(gguf);
                         emit_startup_memory_update(&worker_tx)?;
@@ -417,7 +573,7 @@ fn main() -> AppResult<()> {
                                 let formatted = if disable_chat_template {
                                     prompts[0].clone()
                                 } else {
-                                    tokenizer.format_single_turn_chat_prompt(&prompts[0])?
+                                    tokenizer.format_single_turn_chat_prompt_with_kwargs(&prompts[0], tokenizer_template_kwargs.as_ref())?
                                 };
                                 let toks = tokenizer.encode(&formatted)?;
                                 let head_n = 64usize.min(toks.len());
@@ -441,12 +597,15 @@ fn main() -> AppResult<()> {
                                     shown,
                                     suffix
                                 );
+                                if env_is_set("METALLIC_DEBUG_TOKENIZE_FULL") {
+                                    eprintln!("[metallic][debug] token_ids_full={:?}", toks);
+                                }
                             }
 
                             let tokens0 = if disable_chat_template {
                                 tokenizer.encode(&prompts[0])?
                             } else {
-                                tokenizer.encode_single_turn_chat_prompt(&prompts[0])?
+                                tokenizer.encode_single_turn_chat_prompt_with_kwargs(&prompts[0], tokenizer_template_kwargs.as_ref())?
                             };
 
                             let tokenization_duration = tokenization_start.elapsed();
@@ -463,12 +622,11 @@ fn main() -> AppResult<()> {
 
                                 use metallic_foundry::workflow::Value as WfValue;
 
-                                fn sys_prompt() -> String {
+                                fn sys_prompt() -> Option<String> {
                                     std::env::var("METALLIC_SYSTEM_PROMPT")
                                         .ok()
                                         .map(|s| s.trim().to_string())
                                         .filter(|s| !s.is_empty())
-                                        .unwrap_or_else(|| "You are a helpful assistant.".to_string())
                                 }
 
                                 fn msg(role: &str, content: &str) -> WfValue {
@@ -488,7 +646,11 @@ fn main() -> AppResult<()> {
                                     }
 
                                     let messages_input: Vec<WfValue> = if turn_idx == 0 {
-                                        vec![msg("system", &system), msg("user", turn_prompt)]
+                                        if let Some(system) = system.as_deref() {
+                                            vec![msg("system", system), msg("user", turn_prompt)]
+                                        } else {
+                                            vec![msg("user", turn_prompt)]
+                                        }
                                     } else {
                                         vec![msg("user", turn_prompt)]
                                     };
@@ -499,7 +661,8 @@ fn main() -> AppResult<()> {
                                     } else if disable_chat_template {
                                         tokenizer.encode(turn_prompt)?
                                     } else {
-                                        tokenizer.encode_chat_continuation_prompt(turn_prompt)?
+                                        tokenizer
+                                            .encode_chat_continuation_prompt_with_kwargs(turn_prompt, tokenizer_template_kwargs.as_ref())?
                                     };
 
                                     // Remove BOS if present to avoid polluting the context in the middle of a chat.
@@ -528,9 +691,14 @@ fn main() -> AppResult<()> {
                                     inputs.insert("seed".to_string(), WfValue::U32(cfg.seed.unwrap_or(42)));
                                     // Prefer runner auto-injection of `eos_token` when the workflow declares it.
                                     if !workflow.inputs.iter().any(|i| i.name == "eos_token") {
-                                        let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+                                        let eos = tokenizer.special_tokens().eos_token_id.ok_or_else(|| {
+                                            metallic_foundry::MetalError::InvalidOperation(
+                                                "Tokenizer metadata missing required 'eos_token_id'".to_string(),
+                                            )
+                                        })?;
                                         inputs.insert("eos_token".to_string(), WfValue::U32(eos));
                                     }
+                                    apply_workflow_cli_inputs(&mut inputs, &workflow_cli_inputs);
 
                                     let mut decode_scratch = Vec::new();
                                     let mut decoded_chunk = String::new();
@@ -579,7 +747,8 @@ fn main() -> AppResult<()> {
                                 } else if disable_chat_template {
                                     tokenizer.encode(turn_prompt)?
                                 } else {
-                                    tokenizer.encode_chat_continuation_prompt(turn_prompt)?
+                                    tokenizer
+                                        .encode_chat_continuation_prompt_with_kwargs(turn_prompt, tokenizer_template_kwargs.as_ref())?
                                 };
 
                                 // Remove BOS if present to avoid polluting the context in the middle of a chat.
@@ -601,6 +770,7 @@ fn main() -> AppResult<()> {
                                         &cfg,
                                         &worker_tx,
                                         workflow.clone(),
+                                        Some(&workflow_cli_inputs),
                                     )?;
                                 } else {
                                     // Single-model default workflow path.
@@ -626,12 +796,11 @@ fn main() -> AppResult<()> {
                             // - Preserve KV cache in Foundry sessions; prefill consumes only the delta tokens.
                             use metallic_foundry::workflow::Value as WfValue;
 
-                            fn sys_prompt() -> String {
+                            fn sys_prompt() -> Option<String> {
                                 std::env::var("METALLIC_SYSTEM_PROMPT")
                                     .ok()
                                     .map(|s| s.trim().to_string())
                                     .filter(|s| !s.is_empty())
-                                    .unwrap_or_else(|| "You are a helpful assistant.".to_string())
                             }
 
                             fn msg(role: &str, content: &str) -> WfValue {
@@ -655,7 +824,7 @@ fn main() -> AppResult<()> {
                                 let formatted = if disable_chat_template {
                                     prompts[0].clone()
                                 } else {
-                                    tokenizer.format_single_turn_chat_prompt(&prompts[0])?
+                                    tokenizer.format_single_turn_chat_prompt_with_kwargs(&prompts[0], tokenizer_template_kwargs.as_ref())?
                                 };
                                 let toks = tokenizer.encode(&formatted)?;
                                 let head_n = 64usize.min(toks.len());
@@ -679,6 +848,9 @@ fn main() -> AppResult<()> {
                                     shown,
                                     suffix
                                 );
+                                if env_is_set("METALLIC_DEBUG_TOKENIZE_FULL") {
+                                    eprintln!("[metallic][debug] token_ids_full={:?}", toks);
+                                }
                             }
 
                             loop {
@@ -713,7 +885,11 @@ fn main() -> AppResult<()> {
                                 };
 
                                 let messages_input: Vec<WfValue> = if is_first_turn {
-                                    vec![msg("system", &system), msg("user", &user_prompt)]
+                                    if let Some(system) = system.as_deref() {
+                                        vec![msg("system", system), msg("user", &user_prompt)]
+                                    } else {
+                                        vec![msg("user", &user_prompt)]
+                                    }
                                 } else {
                                     vec![msg("user", &user_prompt)]
                                 };
@@ -735,9 +911,14 @@ fn main() -> AppResult<()> {
                                 inputs.insert("seed".to_string(), WfValue::U32(cfg.seed.unwrap_or(42)));
                                 // Prefer runner auto-injection of `eos_token` when the workflow declares it.
                                 if !workflow.inputs.iter().any(|i| i.name == "eos_token") {
-                                    let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+                                    let eos = tokenizer.special_tokens().eos_token_id.ok_or_else(|| {
+                                        metallic_foundry::MetalError::InvalidOperation(
+                                            "Tokenizer metadata missing required 'eos_token_id'".to_string(),
+                                        )
+                                    })?;
                                     inputs.insert("eos_token".to_string(), WfValue::U32(eos));
                                 }
+                                apply_workflow_cli_inputs(&mut inputs, &workflow_cli_inputs);
 
                                 let mut decode_scratch = Vec::new();
                                 let mut decoded_chunk = String::new();
@@ -784,7 +965,7 @@ fn main() -> AppResult<()> {
                                 let toks = if disable_chat_template {
                                     tokenizer.encode(&prompts[0])?
                                 } else {
-                                    tokenizer.encode_single_turn_chat_prompt(&prompts[0])?
+                                    tokenizer.encode_single_turn_chat_prompt_with_kwargs(&prompts[0], tokenizer_template_kwargs.as_ref())?
                                 };
                                 let tokenization_duration = tokenization_start.elapsed();
                                 worker_tx.send(AppEvent::TokenizationComplete(tokenization_duration))?;
@@ -808,11 +989,17 @@ fn main() -> AppResult<()> {
                                             if disable_chat_template {
                                                 tokenizer.encode(turn_prompt)?
                                             } else {
-                                                tokenizer.encode_single_turn_chat_prompt(turn_prompt)?
+                                                tokenizer.encode_single_turn_chat_prompt_with_kwargs(
+                                                    turn_prompt,
+                                                    tokenizer_template_kwargs.as_ref(),
+                                                )?
                                             }
                                         } else {
                                             remove_bos = true;
-                                            tokenizer.encode_chat_continuation_prompt(turn_prompt)?
+                                            tokenizer.encode_chat_continuation_prompt_with_kwargs(
+                                                turn_prompt,
+                                                tokenizer_template_kwargs.as_ref(),
+                                            )?
                                         };
 
                                         // Remove BOS if present to avoid polluting the context in middle of generation
@@ -837,11 +1024,17 @@ fn main() -> AppResult<()> {
                                                 if disable_chat_template {
                                                     tokenizer.encode(&input)?
                                                 } else {
-                                                    tokenizer.encode_single_turn_chat_prompt(&input)?
+                                                    tokenizer.encode_single_turn_chat_prompt_with_kwargs(
+                                                        &input,
+                                                        tokenizer_template_kwargs.as_ref(),
+                                                    )?
                                                 }
                                             } else {
                                                 remove_bos = true;
-                                                tokenizer.encode_chat_continuation_prompt(&input)?
+                                                tokenizer.encode_chat_continuation_prompt_with_kwargs(
+                                                    &input,
+                                                    tokenizer_template_kwargs.as_ref(),
+                                                )?
                                             };
 
                                             // Remove BOS if present to avoid polluting the context in middle of generation
@@ -870,6 +1063,7 @@ fn main() -> AppResult<()> {
                                         &cfg,
                                         &worker_tx,
                                         workflow.clone(),
+                                        Some(&workflow_cli_inputs),
                                     )?;
                                 } else {
                                     let model_id = "llm";
@@ -895,7 +1089,8 @@ fn main() -> AppResult<()> {
                                     // behind (the model will answer this queued prompt next).
                                     worker_tx.send(AppEvent::UserPrompt(turn_prompt.to_string()))?;
                                     worker_tx.send(AppEvent::StatusUpdate("Processing queued prompt...".to_string()))?;
-                                    current_tokens = tokenizer.encode_chat_continuation_prompt(turn_prompt)?;
+                                    current_tokens = tokenizer
+                                        .encode_chat_continuation_prompt_with_kwargs(turn_prompt, tokenizer_template_kwargs.as_ref())?;
 
                                     // Remove BOS if present to avoid polluting the context in middle of generation
                                     if let Some(bos) = tokenizer.special_tokens().bos_token_id
@@ -913,7 +1108,8 @@ fn main() -> AppResult<()> {
                                 match cmd_rx.recv() {
                                     Ok(AppEvent::Input(input)) => {
                                         worker_tx.send(AppEvent::StatusUpdate("Processing input...".to_string()))?;
-                                        current_tokens = tokenizer.encode_chat_continuation_prompt(&input)?;
+                                        current_tokens = tokenizer
+                                            .encode_chat_continuation_prompt_with_kwargs(&input, tokenizer_template_kwargs.as_ref())?;
 
                                         // Remove BOS if present to avoid polluting the context in middle of generation
                                         if let Some(bos) = tokenizer.special_tokens().bos_token_id

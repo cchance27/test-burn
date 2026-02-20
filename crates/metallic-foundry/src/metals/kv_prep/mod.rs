@@ -40,6 +40,25 @@ fn default_rope_mode() -> DynamicValue<u32> {
     DynamicValue::Literal(RopeMode::Normal.as_u32())
 }
 
+fn default_layer_idx() -> DynamicValue<u32> {
+    DynamicValue::Literal(0)
+}
+
+fn default_no_rope_layer_step() -> DynamicValue<u32> {
+    DynamicValue::Literal(0)
+}
+
+fn bind_u32_if_scoped(value: &DynamicValue<u32>, bindings: &TensorBindings) -> DynamicValue<u32> {
+    match value {
+        DynamicValue::Literal(v) => DynamicValue::Literal(*v),
+        DynamicValue::Variable(name) => bindings
+            .get_var(name)
+            .and_then(|v| v.parse::<u32>().ok())
+            .map(DynamicValue::Literal)
+            .unwrap_or_else(|| DynamicValue::Variable(name.clone())),
+    }
+}
+
 fn deserialize_rope_mode<'de, D>(deserializer: D) -> Result<DynamicValue<u32>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -84,9 +103,29 @@ pub struct KvPrepFusedParams {
     /// - "normal": pair adjacent dims: 0<->1, 2<->3, ...
     #[serde(default = "default_rope_mode", deserialize_with = "deserialize_rope_mode")]
     pub rope_mode: DynamicValue<u32>,
+    /// Current layer index (0-based).
+    #[serde(default = "default_layer_idx")]
+    pub layer_idx: DynamicValue<u32>,
+    /// Skip RoPE every Nth layer when >0 (SmolLM3 uses N=4).
+    ///
+    /// Disabled when set to 0.
+    #[serde(default = "default_no_rope_layer_step")]
+    pub no_rope_layer_step: DynamicValue<u32>,
 }
 
 impl KvPrepFusedParams {
+    /// Bind scope-only dynamic fields to literals at compile time.
+    ///
+    /// Repeat variables like `{i}` are unavailable during compiled-step execution,
+    /// so layer-aware controls must be materialized while the repeat scope exists.
+    #[inline]
+    pub fn bind_scope_literals(&self, bindings: &TensorBindings) -> Self {
+        let mut out = self.clone();
+        out.layer_idx = bind_u32_if_scoped(&self.layer_idx, bindings);
+        out.no_rope_layer_step = bind_u32_if_scoped(&self.no_rope_layer_step, bindings);
+        out
+    }
+
     #[inline]
     pub fn resolve(&self, bindings: &TensorBindings) -> KvPrepFusedParamsResolved {
         KvPrepFusedParamsResolved {
@@ -101,6 +140,8 @@ impl KvPrepFusedParams {
             max_seq_len: self.max_seq_len.resolve(bindings),
             total_elements: self.total_elements.resolve(bindings),
             rope_mode: self.rope_mode.resolve(bindings),
+            layer_idx: self.layer_idx.resolve(bindings),
+            no_rope_layer_step: self.no_rope_layer_step.resolve(bindings),
         }
     }
 }
@@ -148,12 +189,18 @@ mod tests {
     struct RopeOnly {
         #[serde(default = "default_rope_mode", deserialize_with = "deserialize_rope_mode")]
         rope_mode: DynamicValue<u32>,
+        #[serde(default = "default_layer_idx")]
+        layer_idx: DynamicValue<u32>,
+        #[serde(default = "default_no_rope_layer_step")]
+        no_rope_layer_step: DynamicValue<u32>,
     }
 
     #[test]
     fn rope_mode_defaults_to_normal() {
         let parsed: RopeOnly = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed.rope_mode, DynamicValue::Literal(ROPE_MODE_NORMAL));
+        assert_eq!(parsed.layer_idx, DynamicValue::Literal(0));
+        assert_eq!(parsed.no_rope_layer_step, DynamicValue::Literal(0));
     }
 
     #[test]
@@ -162,5 +209,27 @@ mod tests {
         assert_eq!(parsed.rope_mode, DynamicValue::Literal(ROPE_MODE_NEOX));
         let parsed: RopeOnly = serde_json::from_str(r#"{"rope_mode":"normal"}"#).unwrap();
         assert_eq!(parsed.rope_mode, DynamicValue::Literal(ROPE_MODE_NORMAL));
+    }
+
+    #[test]
+    fn no_rope_layer_params_accept_literals_and_dynamic_refs() {
+        let parsed: RopeOnly = serde_json::from_str(r#"{"layer_idx":"{i}","no_rope_layer_step":4}"#).unwrap();
+        assert_eq!(parsed.layer_idx, DynamicValue::Variable("i".to_string()));
+        assert_eq!(parsed.no_rope_layer_step, DynamicValue::Literal(4));
+    }
+
+    #[test]
+    fn bind_scope_literals_materializes_repeat_index() {
+        let params = KvPrepFusedParams {
+            layer_idx: DynamicValue::Variable("i".to_string()),
+            no_rope_layer_step: DynamicValue::Literal(4),
+            ..Default::default()
+        };
+        let mut bindings = TensorBindings::new();
+        bindings.push_scope();
+        bindings.set_var("i", "7");
+        let bound = params.bind_scope_literals(&bindings);
+        assert_eq!(bound.layer_idx, DynamicValue::Literal(7));
+        assert_eq!(bound.no_rope_layer_step, DynamicValue::Literal(4));
     }
 }
