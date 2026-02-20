@@ -118,6 +118,7 @@ impl ChatApp {
 impl Render for ChatApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dialog_layer = Root::render_dialog_layer(window, cx);
+        let notification_layer = Root::render_notification_layer(window, cx);
 
         div()
             .flex()
@@ -145,5 +146,6 @@ impl Render for ChatApp {
                     .child(self.chat_view.clone()),
             )
             .children(dialog_layer)
+            .children(notification_layer)
     }
 }

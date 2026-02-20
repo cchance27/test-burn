@@ -5,6 +5,7 @@ use std::{ops::Range, rc::Rc};
 use gpui::{
     App, AppContext, Bounds, Context, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton, Pixels, Point, ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, div, prelude::*, px
 };
+use rustc_hash::FxHashMap;
 use unicode_segmentation::*;
 
 use crate::{
@@ -71,7 +72,7 @@ impl TextInput {
         if let Some(bounds) = self.last_bounds
             && let Some(layout) = &self.last_layout
         {
-            let local_x = event.position.x - bounds.left();
+            let local_x = event.position.x - bounds.left() + self.scroll_offset;
             let offset = layout.index_for_x(local_x).unwrap_or(self.content.len());
 
             // Start selection from this point
@@ -97,7 +98,7 @@ impl TextInput {
         if let Some(bounds) = self.last_bounds
             && let Some(layout) = &self.last_layout
         {
-            let local_x = event.position.x - bounds.left();
+            let local_x = event.position.x - bounds.left() + self.scroll_offset;
             let offset = layout.index_for_x(local_x).unwrap_or(self.content.len());
 
             // Update selection from anchor to current position
@@ -485,7 +486,7 @@ impl EntityInputHandler for TextInput {
     fn character_index_for_point(&mut self, point: Point<Pixels>, _window: &mut Window, _cx: &mut Context<Self>) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        let utf8_index = last_layout.index_for_x(point.x - line_point.x + self.scroll_offset)?;
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -543,18 +544,11 @@ impl gpui::Element for TextInputElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
-        let content = if input.content.is_empty() {
-            input.placeholder.clone()
-        } else {
-            input.content.clone().into()
-        };
+        // Layout/hit-testing must always reflect actual editable content.
+        let content: SharedString = input.content.clone().into();
 
         let style = window.text_style();
-        let text_color = if input.content.is_empty() {
-            colors::text_muted()
-        } else {
-            colors::text_primary()
-        };
+        let text_color = colors::text_primary();
 
         let run = TextRun {
             len: content.len(),
@@ -591,9 +585,15 @@ impl gpui::Element for TextInputElement {
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, input_view.clone()), cx);
 
         if let Some(line) = prepaint.take() {
-            let (selected_range, cursor_offset, scroll_offset) = {
+            let (selected_range, cursor_offset, scroll_offset, is_placeholder, placeholder_text) = {
                 let input = input_view.read(cx);
-                (input.selected_range.clone(), input.cursor_offset(), input.scroll_offset)
+                (
+                    input.selected_range.clone(),
+                    input.cursor_offset(),
+                    input.scroll_offset,
+                    input.content.is_empty(),
+                    input.placeholder.clone(),
+                )
             };
 
             // Calculate vertical centering for cursor/highlight
@@ -650,14 +650,37 @@ impl gpui::Element for TextInputElement {
                 }
 
                 // Paint text with scroll offset
-                line.paint(Point::new(bounds.origin.x - final_scroll_offset, text_top), line_height, window, cx)
-                    .ok();
+                if is_placeholder {
+                    let style = window.text_style();
+                    let run = TextRun {
+                        len: placeholder_text.len(),
+                        font: style.font(),
+                        color: colors::text_muted().into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let font_size = style.font_size.to_pixels(window.rem_size());
+                    let placeholder_line = window.text_system().shape_line(placeholder_text, font_size, &[run], None);
+                    placeholder_line
+                        .paint(Point::new(bounds.left() + px(6.), text_top), line_height, window, cx)
+                        .ok();
+                } else {
+                    line.paint(Point::new(bounds.left() - final_scroll_offset, text_top), line_height, window, cx)
+                        .ok();
+                }
 
                 // Paint cursor
                 if focus_handle.is_focused(window) && selected_range.is_empty() {
                     let cursor_draw_x = cursor_x - final_scroll_offset;
+                    let cursor_inset = px(3.);
+                    let cursor_top = text_top + cursor_inset;
+                    let cursor_height = (line_height - cursor_inset * 2.).max(px(1.));
                     window.paint_quad(gpui::fill(
-                        Bounds::new(Point::new(bounds.left() + cursor_draw_x, text_top), gpui::size(px(2.), line_height)),
+                        Bounds::new(
+                            Point::new(bounds.left() + cursor_draw_x, cursor_top),
+                            gpui::size(px(2.), cursor_height),
+                        ),
                         colors::text_primary(),
                     ));
                 }
@@ -708,6 +731,15 @@ pub struct ChatInput {
     state: Entity<AppState>,
     app: Entity<ChatApp>,
     should_focus_on_render: bool,
+    active_draft_scope: DraftScope,
+    drafts_by_conversation: FxHashMap<u64, String>,
+    draft_without_selection: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DraftScope {
+    Conversation(u64),
+    Unscoped,
 }
 
 impl ChatInput {
@@ -716,6 +748,14 @@ impl ChatInput {
         let input = cx.new(|cx| {
             TextInput::new(cx)
                 .with_placeholder("Type a message...")
+                .on_change({
+                    let entity = entity.clone();
+                    move |content, _window, cx| {
+                        entity.update(cx, |this, _| {
+                            this.record_current_draft(content.to_string());
+                        });
+                    }
+                })
                 .on_submit(move |content, window, cx| {
                     entity.update(cx, |this, cx| {
                         this.do_submit(content.to_string(), window, cx);
@@ -728,7 +768,61 @@ impl ChatInput {
             state,
             app,
             should_focus_on_render: true,
+            active_draft_scope: DraftScope::Unscoped,
+            drafts_by_conversation: FxHashMap::default(),
+            draft_without_selection: String::new(),
         }
+    }
+
+    fn selected_scope(&self, cx: &App) -> DraftScope {
+        self.state
+            .read(cx)
+            .selected_id()
+            .map(DraftScope::Conversation)
+            .unwrap_or(DraftScope::Unscoped)
+    }
+
+    fn record_draft_for_scope(&mut self, scope: DraftScope, content: String) {
+        match scope {
+            DraftScope::Conversation(id) => {
+                if content.is_empty() {
+                    self.drafts_by_conversation.remove(&id);
+                } else {
+                    self.drafts_by_conversation.insert(id, content);
+                }
+            }
+            DraftScope::Unscoped => {
+                self.draft_without_selection = content;
+            }
+        }
+    }
+
+    fn draft_for_scope(&self, scope: DraftScope) -> String {
+        match scope {
+            DraftScope::Conversation(id) => self.drafts_by_conversation.get(&id).cloned().unwrap_or_default(),
+            DraftScope::Unscoped => self.draft_without_selection.clone(),
+        }
+    }
+
+    fn record_current_draft(&mut self, content: String) {
+        self.record_draft_for_scope(self.active_draft_scope, content);
+    }
+
+    fn sync_input_with_selected_scope(&mut self, cx: &mut Context<Self>) {
+        let next_scope = self.selected_scope(cx);
+        if next_scope == self.active_draft_scope {
+            return;
+        }
+
+        let current_content = self.input.read(cx).content().to_string();
+        self.record_draft_for_scope(self.active_draft_scope, current_content);
+
+        let next_content = self.draft_for_scope(next_scope);
+        self.input.update(cx, |input, cx| {
+            input.set_content(next_content, cx);
+        });
+
+        self.active_draft_scope = next_scope;
     }
 
     fn do_submit(&mut self, content: String, _: &mut Window, cx: &mut Context<Self>) {
@@ -738,6 +832,8 @@ impl ChatInput {
         if content.trim().is_empty() {
             return;
         }
+
+        self.record_current_draft(String::new());
 
         let input = self.input.clone();
         cx.defer(move |cx| {
@@ -755,6 +851,8 @@ impl ChatInput {
 
 impl Render for ChatInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_input_with_selected_scope(cx);
+
         let is_generating = self.state.read(cx).is_generating();
 
         let input_disabled = self.input.read(cx).disabled();

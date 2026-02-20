@@ -106,7 +106,7 @@ impl IntoElement for Button {
                 Some(colors::border()),
             ),
             ButtonVariant::Ghost => (colors::transparent(), colors::transparent(), colors::text_muted(), None),
-            ButtonVariant::Danger => (colors::transparent(), colors::danger(), colors::text_muted(), None),
+            ButtonVariant::Danger => (colors::danger_base(), colors::danger(), colors::text_primary(), None),
         };
 
         let hover_text = match self.variant {
@@ -208,7 +208,7 @@ impl IntoElement for IconButton {
             ButtonVariant::Primary => (colors::accent(), colors::accent_hover(), colors::text_primary()),
             ButtonVariant::Secondary => (colors::bg_elevated(), colors::bg_hover(), colors::text_secondary()),
             ButtonVariant::Ghost => (colors::transparent(), colors::transparent(), colors::text_muted()),
-            ButtonVariant::Danger => (colors::transparent(), colors::danger(), colors::text_muted()),
+            ButtonVariant::Danger => (colors::danger_base(), colors::danger(), colors::text_primary()),
         };
 
         let hover_text = match self.variant {

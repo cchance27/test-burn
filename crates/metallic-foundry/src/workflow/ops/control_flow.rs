@@ -66,6 +66,15 @@ impl WorkflowOp for IfOp {
 
         Ok(WorkflowOpOutcome::Continue)
     }
+
+    fn reset(&mut self) {
+        for op in &mut self.then_ops {
+            op.reset();
+        }
+        for op in &mut self.else_ops {
+            op.reset();
+        }
+    }
 }
 
 pub(crate) struct WhileOp {
@@ -158,6 +167,12 @@ impl WorkflowOp for WhileOp {
         }
 
         Ok(WorkflowOpOutcome::Continue)
+    }
+
+    fn reset(&mut self) {
+        for op in &mut self.body_ops {
+            op.reset();
+        }
     }
 }
 
@@ -595,6 +610,12 @@ impl WorkflowOp for WhileBatchedOp {
         ctx.values.remove("_internal.decode_batch_size");
 
         Ok(WorkflowOpOutcome::Continue)
+    }
+
+    fn reset(&mut self) {
+        for op in &mut self.body_ops {
+            op.reset();
+        }
     }
 }
 

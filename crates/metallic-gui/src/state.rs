@@ -354,6 +354,10 @@ impl AppState {
     }
 
     fn reset_session_for_conversation_boundary(&mut self) {
+        // DEBT: We currently run one active model/session for the whole app, so conversation boundaries
+        // must rewind/reset shared state to prevent cross-talk. Move toward per-conversation sessions
+        // (with Foundry support for tensor/KV reuse across sessions) so switching chats doesn't require
+        // blocking UI actions or resetting global session state.
         if let Some(model_state) = &mut self.loaded_model {
             model_state.model.rewind_session();
             if let Ok(mut runner) = model_state.runner.lock() {
@@ -365,6 +369,14 @@ impl AppState {
     }
 
     pub fn select_conversation(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.inference_in_flight {
+            tracing::warn!(
+                "Blocking conversation switch to {} while generation is in flight; stop generation first",
+                id
+            );
+            cx.notify();
+            return;
+        }
         if self.selected_id != Some(id) {
             self.selected_id = Some(id);
             // Clear KV cache and reset workflow state when switching conversations to prevent cross-talk.
@@ -395,6 +407,12 @@ impl AppState {
     }
 
     pub fn create_conversation(&mut self, cx: &mut Context<Self>) -> u64 {
+        if self.inference_in_flight {
+            tracing::warn!("Blocking new conversation creation while generation is in flight");
+            cx.notify();
+            return self.resolved_selected_id().unwrap_or(0);
+        }
+
         let id = self.next_conversation_id;
         self.next_conversation_id += 1;
 
@@ -419,6 +437,14 @@ impl AppState {
     }
 
     pub fn delete_conversation(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.inference_in_flight {
+            tracing::warn!(
+                "Blocking conversation delete for {} while generation is in flight; stop generation first",
+                id
+            );
+            cx.notify();
+            return;
+        }
         self.conversations.retain(|c| c.id != id);
         let previous_selected = self.selected_id;
         if self.selected_id == Some(id) {
@@ -520,6 +546,9 @@ impl AppState {
             return;
         };
         if self.inference_in_flight {
+            // DEBT: Overlap is rejected because we currently operate one shared model/session at a time.
+            // Future direction: per-conversation sessions with Foundry-level tensor/KV reuse to support
+            // concurrent or quickly resumable generations without session cross-talk.
             tracing::warn!("Inference already in flight, rejecting overlapping generation request");
             self.append_message(
                 selected_id,
@@ -900,10 +929,9 @@ impl AppState {
     }
 
     fn ensure_selected_conversation(&mut self, cx: &mut Context<Self>) -> Option<u64> {
-        if self.resolved_selected_id().is_none() {
-            Some(self.create_conversation(cx))
-        } else {
-            self.resolved_selected_id()
+        match self.selected_id {
+            Some(id) if self.conversation(id).is_some() => Some(id),
+            _ => Some(self.create_conversation(cx)),
         }
     }
 
@@ -939,12 +967,6 @@ impl AppState {
                 if let Some(default) = &input.default {
                     if input.name == "system_prompt" {
                         let global_val = self.get_setting("system_prompt").map(|s| serde_json::Value::String(s.clone()));
-
-                        if let Some(g) = &global_val {
-                            tracing::debug!("Using global system prompt override: {:?}", g);
-                        } else {
-                            tracing::debug!("Using workflow default system prompt: {:?}", default);
-                        }
 
                         if let Some(g) = global_val {
                             // Global system prompt is authoritative when set.

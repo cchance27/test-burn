@@ -90,6 +90,10 @@ pub mod colors {
     }
 
     // Danger/destructive action
+    pub fn danger_base() -> Rgba {
+        rgb(0x7f1d1d) // Dark red
+    }
+
     pub fn danger() -> Rgba {
         rgb(0xef4444) // Red
     }

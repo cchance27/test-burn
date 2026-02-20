@@ -1,7 +1,7 @@
 //! Sidebar component showing conversation history.
 
-use gpui::{Context, Entity, MouseButton, SharedString, Window, div, prelude::*, px};
-use gpui_component::WindowExt;
+use gpui::{Context, Entity, MouseButton, SharedString, StatefulInteractiveElement, Window, div, prelude::*, px};
+use gpui_component::{WindowExt, tooltip::Tooltip};
 
 use crate::{
     app::ChatApp, components::{chat::SettingsView, common::Button}, state::AppState, theme::{colors, radius, spacing, typography}
@@ -29,6 +29,7 @@ impl Render for Sidebar {
         let state = self.state.read(cx);
         let conversations = state.conversations();
         let selected_id = state.selected_id();
+        let generation_locked = state.is_generating();
         let hovered_id = self.hovered_id;
         let app = self.app.clone();
 
@@ -51,14 +52,23 @@ impl Render for Sidebar {
                     .border_b_1()
                     .border_color(colors::border())
                     .child(div().text_size(typography::lg()).text_color(colors::text_primary()).child("Chats"))
-                    .child(Button::new("+ New").id("new-chat-btn").on_click({
-                        let app = app.clone();
-                        move |_, cx| {
-                            app.update(cx, |app, cx| {
-                                app.create_new_conversation(cx);
-                            });
-                        }
-                    })),
+                    .child(
+                        div()
+                            .id("new-chat-lock-wrap")
+                            .relative()
+                            .when(generation_locked, |d| d.cursor_not_allowed())
+                            .when(generation_locked, |d| {
+                                d.tooltip(move |window, cx| Tooltip::new("Stop generation to create a new chat").build(window, cx))
+                            })
+                            .child(Button::new("+ New").id("new-chat-btn").disabled(generation_locked).on_click({
+                                let app = app.clone();
+                                move |_, cx| {
+                                    app.update(cx, |app, cx| {
+                                        app.create_new_conversation(cx);
+                                    });
+                                }
+                            })),
+                    ),
             )
             // Conversation list
             .child(
@@ -88,13 +98,18 @@ impl Render for Sidebar {
                             .px(spacing::md())
                             .py(spacing::sm())
                             .rounded(radius::md())
-                            .cursor_pointer()
                             .bg(if is_selected { colors::bg_selected() } else { colors::bg_surface() })
                             .hover(|style| if is_selected { style } else { style.bg(colors::bg_hover()) })
-                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                app_select.update(cx, |app, cx| {
-                                    app.select_conversation(convo_id, cx);
-                                });
+                            .when(generation_locked, |d| d.cursor_not_allowed())
+                            .when(generation_locked, |d| {
+                                d.tooltip(move |window, cx| Tooltip::new("Stop generation to switch or delete chats").build(window, cx))
+                            })
+                            .when(!generation_locked, |d| {
+                                d.cursor_pointer().on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                    app_select.update(cx, |app, cx| {
+                                        app.select_conversation(convo_id, cx);
+                                    });
+                                })
                             })
                             .child(
                                 div()
@@ -152,17 +167,22 @@ impl Render for Sidebar {
                                                             .rounded(radius::sm())
                                                             .text_size(typography::xs())
                                                             .text_color(colors::text_muted())
-                                                            .opacity(0.0)
-                                                            .group_hover("convo-item", |style| style.opacity(1.0))
-                                                            .hover(|style| style.bg(colors::danger()).text_color(colors::text_primary()))
-                                                            .on_mouse_down(MouseButton::Left, {
-                                                                let app = app_delete.clone();
-                                                                move |_ev, _, cx| {
-                                                                    app.update(cx, |app, cx| {
-                                                                        app.delete_conversation(convo_id, cx);
-                                                                    });
-                                                                }
+                                                            .opacity(if generation_locked { 0.35 } else { 0.0 })
+                                                            .when(!generation_locked, |d| {
+                                                                d.group_hover("convo-item", |style| style.opacity(1.0))
+                                                                    .hover(|style| {
+                                                                        style.bg(colors::danger()).text_color(colors::text_primary())
+                                                                    })
+                                                                    .on_mouse_down(MouseButton::Left, {
+                                                                        let app = app_delete.clone();
+                                                                        move |_ev, _, cx| {
+                                                                            app.update(cx, |app, cx| {
+                                                                                app.delete_conversation(convo_id, cx);
+                                                                            });
+                                                                        }
+                                                                    })
                                                             })
+                                                            .when(generation_locked, |d| d.cursor_not_allowed())
                                                             .child("✕"),
                                                     ),
                                             ),

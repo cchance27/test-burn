@@ -2,7 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui::{App, MouseButton, SharedString, div, prelude::*};
+use gpui::{App, ClipboardItem, MouseButton, SharedString, StatefulInteractiveElement, div, prelude::*, px};
+use gpui_component::{WindowExt, notification::Notification, tooltip::Tooltip};
 
 use crate::theme::{colors, radius, spacing, typography};
 
@@ -29,6 +30,7 @@ impl From<crate::types::MessageRole> for MessageStyle {
 
 /// A message bubble component.
 pub struct MessageBubble {
+    message_id: u64,
     content: String,
     style: MessageStyle,
     timestamp: Option<SharedString>,
@@ -42,6 +44,7 @@ impl MessageBubble {
     /// Create a new message bubble with the given content.
     pub fn new(content: impl Into<String>) -> Self {
         Self {
+            message_id: 0,
             content: content.into(),
             style: MessageStyle::Assistant,
             timestamp: None,
@@ -50,6 +53,12 @@ impl MessageBubble {
             expanded: false,
             on_toggle: None,
         }
+    }
+
+    /// Set the message id (used for stable control ids).
+    pub fn message_id(mut self, message_id: u64) -> Self {
+        self.message_id = message_id;
+        self
     }
 
     /// Set the message style (User, Assistant, System).
@@ -138,30 +147,109 @@ impl IntoElement for MessageBubble {
                                     .bg(bg_color)
                                     .text_size(typography::base())
                                     .text_color(colors::text_primary())
-                                    .relative()
-                                    .child(self.content.clone())
-                                    .when_some(metadata, |d, _meta| {
-                                        d.child(
-                                            div()
-                                                .absolute()
-                                                .bottom_1()
-                                                .right_2()
-                                                .cursor_pointer()
-                                                .text_color(if self.expanded {
-                                                    colors::text_primary()
-                                                } else {
-                                                    colors::text_muted()
-                                                })
-                                                .text_size(typography::xs())
-                                                .hover(|s| s.text_color(colors::text_primary()))
-                                                .when_some(self.on_toggle.clone(), |d, on_toggle| {
-                                                    d.on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                                        on_toggle(cx);
-                                                    })
-                                                })
-                                                .child("ⓘ"),
-                                        )
-                                    }),
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(spacing::xs())
+                                            .child(div().child(self.content.clone()))
+                                            .when(self.style == MessageStyle::Assistant, |d| {
+                                                d.child(
+                                                    div()
+                                                        .flex()
+                                                        .justify_end()
+                                                        .items_center()
+                                                        .gap(spacing::xs())
+                                                        .mr(px(-8.0))
+                                                        .mb(px(-6.0))
+                                                        .child(
+                                                            div()
+                                                                .id(("copy-msg-btn", self.message_id))
+                                                                .group("copy-msg-btn")
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .w(px(18.0))
+                                                                .h(px(18.0))
+                                                                .rounded(radius::sm())
+                                                                .cursor_pointer()
+                                                                .text_size(typography::md())
+                                                                .hover(|s| s.bg(colors::bg_hover()))
+                                                                .tooltip(move |window, cx| Tooltip::new("Copy message").build(window, cx))
+                                                                .on_mouse_down(MouseButton::Left, {
+                                                                    let content = self.content.clone();
+                                                                    move |_, window, cx| {
+                                                                        cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
+                                                                        window.push_notification(
+                                                                            Notification::new()
+                                                                                .content(|_note, _window, _cx| {
+                                                                                    div()
+                                                                                        .flex()
+                                                                                        .items_center()
+                                                                                        .gap(spacing::sm())
+                                                                                        .child(
+                                                                                            div()
+                                                                                                .text_size(typography::md())
+                                                                                                .text_color(colors::text_primary())
+                                                                                                .child("⧉"),
+                                                                                        )
+                                                                                        .child(
+                                                                                            div()
+                                                                                                .text_size(typography::sm())
+                                                                                                .text_color(colors::text_primary())
+                                                                                                .child("Copied to Clipboard"),
+                                                                                        )
+                                                                                        .into_any_element()
+                                                                                })
+                                                                                .w(px(220.0)),
+                                                                            cx,
+                                                                        );
+                                                                    }
+                                                                })
+                                                                .child(
+                                                                    div()
+                                                                        .text_color(colors::text_muted())
+                                                                        .group_hover("copy-msg-btn", |s| {
+                                                                            s.text_color(colors::text_primary())
+                                                                        })
+                                                                        .child("⧉"),
+                                                                ),
+                                                        )
+                                                        .when_some(metadata, |d, _meta| {
+                                                            d.child(
+                                                                div()
+                                                                    .id(("meta-msg-btn", self.message_id))
+                                                                    .group("meta-msg-btn")
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .justify_center()
+                                                                    .w(px(18.0))
+                                                                    .h(px(18.0))
+                                                                    .rounded(radius::sm())
+                                                                    .cursor_pointer()
+                                                                    .text_size(typography::md())
+                                                                    .hover(|s| s.bg(colors::bg_hover()))
+                                                                    .tooltip(move |window, cx| {
+                                                                        Tooltip::new("Toggle metadata").build(window, cx)
+                                                                    })
+                                                                    .when_some(self.on_toggle.clone(), |d, on_toggle| {
+                                                                        d.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                                                            on_toggle(cx);
+                                                                        })
+                                                                    })
+                                                                    .child(
+                                                                        div()
+                                                                            .text_color(colors::text_muted())
+                                                                            .group_hover("meta-msg-btn", |s| {
+                                                                                s.text_color(colors::text_primary())
+                                                                            })
+                                                                            .child("ⓘ"),
+                                                                    ),
+                                                            )
+                                                        }),
+                                                )
+                                            }),
+                                    ),
                             )
                             // Expanded Metadata Panel
                             .when(self.expanded && metadata.is_some(), |d| {
@@ -342,6 +430,7 @@ impl IntoElement for MessageBubble {
 /// Convenience function to render a ChatMessage as a MessageBubble.
 pub fn render_message(message: &crate::types::ChatMessage, expanded: bool, on_toggle: impl Fn(&mut App) + 'static) -> impl IntoElement {
     MessageBubble::new(message.content.clone())
+        .message_id(message.id)
         .style(message.role.into())
         .timestamp(message.timestamp.format("%H:%M").to_string())
         .metadata(message.metadata.clone())

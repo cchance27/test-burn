@@ -138,6 +138,11 @@ impl WorkflowOp for MemoizedOp {
         }
         Ok(out)
     }
+
+    fn reset(&mut self) {
+        self.cached = None;
+        self.inner.reset();
+    }
 }
 
 impl WorkflowOp for TimedOp {
