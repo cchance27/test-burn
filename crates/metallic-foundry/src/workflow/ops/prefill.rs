@@ -528,6 +528,7 @@ fn conversation_id_from_ctx(ctx: &WorkflowExecutionContext<'_>) -> String {
     "<default>".to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_delta_cache_hit<'a>(
     prompt_tokens_full: &'a [u32],
     start_pos: &mut usize,

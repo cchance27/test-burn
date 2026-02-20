@@ -180,6 +180,7 @@ pub fn build_gemm_kernel(key: GemmKernelKey) -> CompiledCompoundKernel {
 }
 
 /// Get a cached GEMM kernel for the given configuration.
+#[allow(clippy::too_many_arguments)]
 pub fn get_gemm_kernel(
     a_quant: Arc<dyn MetalPolicy>,
     b_quant: Arc<dyn MetalPolicy>,

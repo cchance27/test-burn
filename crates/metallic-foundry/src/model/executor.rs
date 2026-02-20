@@ -316,7 +316,7 @@ impl CompiledModel {
         {
             let map = self.interned_globals.read();
             if let Some(v) = map.get(key) {
-                return *v;
+                return v;
             }
         }
 
@@ -444,6 +444,7 @@ impl CompiledModel {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn allocate_tensor_from_spec(
         &self,
         foundry: &mut Foundry,
@@ -459,7 +460,7 @@ impl CompiledModel {
         if dims.is_empty() {
             return Err(MetalError::InvalidShape(format!("prepare.tensors '{name}' requires dims.len()>0")));
         }
-        if dims.iter().any(|&d| d == 0) {
+        if dims.contains(&0) {
             return Err(MetalError::InvalidShape(format!(
                 "prepare.tensors '{name}' requires all dims>0, got {dims:?}"
             )));
@@ -695,6 +696,7 @@ impl CompiledModel {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn bind_one_weight_binding(
         &self,
         foundry: &mut Foundry,
@@ -1750,6 +1752,7 @@ impl CompiledModel {
     ///
     /// RoPE caches are hot-read by the GPU every attention step, so we store them in
     /// `StorageModePrivate` by default (with a debug override).
+    #[allow(clippy::too_many_arguments)]
     fn compute_and_bind_rope_caches_named(
         &self,
         bindings: &mut TensorBindings,
@@ -1995,9 +1998,8 @@ impl CompiledModel {
 
                 for p in pos..end {
                     let local_p = p - pos;
-                    for i in 0..dim_half {
+                    for (i, &inv_freq) in inv_freqs.iter().enumerate().take(dim_half) {
                         let idx = local_p * dim_half + i;
-                        let inv_freq = inv_freqs[i];
                         let angle = p as f32 * inv_freq;
                         cos_data[idx] = f16::from_f32(angle.cos());
                         sin_data[idx] = f16::from_f32(angle.sin());

@@ -389,7 +389,7 @@ impl WorkflowOp for SampleOp {
 
         self.step = self.step.wrapping_add(1);
 
-        let in_batched_decode_loop = ctx.values.get("_internal.decode_batch_size").is_some();
+        let in_batched_decode_loop = ctx.values.contains_key("_internal.decode_batch_size");
         let decode_batch_size = ctx
             .values
             .get("_internal.decode_batch_size")

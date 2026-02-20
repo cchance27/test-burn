@@ -103,6 +103,7 @@ pub(crate) struct BlockQuantRuntimeSpec {
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn split_blocks_runtime(
     raw: &[u8],
     blocks_per_k: usize,

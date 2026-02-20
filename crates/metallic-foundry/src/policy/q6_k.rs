@@ -225,7 +225,7 @@ impl MetalPolicyRuntime for PolicyQ6K {
 
                         let valid_values = (source_k_len.saturating_sub(src_block * Q6_K_SOURCE_WPB)).min(Q6_K_SOURCE_WPB);
                         let valid_groups = valid_values.div_ceil(Q6_K_DECODED_WPB);
-                        for g in 0..valid_groups {
+                        for (g, &bits) in scale_bits.iter().enumerate().take(valid_groups) {
                             let src_block16_idx = row * dst_blocks_per_k + src_block * 16 + g;
                             let dst_weight_block_idx = if is_canonical {
                                 canonical_dst_block_idx(src_block16_idx, dst_blocks_per_k, target_n)
@@ -239,7 +239,6 @@ impl MetalPolicyRuntime for PolicyQ6K {
                                 .copy_from_slice(&q_vals[q_src..q_src + Q6_K_DECODED_DATA_BYTES]);
 
                             let s_dst = src_block16_idx * Q6_K_DECODED_SCALE_BYTES;
-                            let bits = scale_bits[g];
                             scales_out[s_dst] = (bits & 0xFF) as u8;
                             scales_out[s_dst + 1] = (bits >> 8) as u8;
                         }

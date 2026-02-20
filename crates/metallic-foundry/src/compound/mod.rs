@@ -434,7 +434,7 @@ impl<S> CompoundKernel<S> {
         let mut out: Vec<BufferArg> = Vec::new();
         let mut seen: std::collections::HashMap<u32, SeenArg> = std::collections::HashMap::new();
 
-        let mut visit_stage = |stage: &Box<dyn Stage>| {
+        let mut visit_stage = |stage: &dyn Stage| {
             let stage_name = stage.debug_name();
             for arg in stage.buffer_args() {
                 if let Some(prev) = seen.get(&arg.buffer_index).copied() {

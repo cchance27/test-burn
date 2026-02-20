@@ -21,12 +21,9 @@ impl ModelLoader {
             "gguf" => {
                 #[cfg(feature = "gguf")]
                 {
-                    let file = GGUFFile::load_mmap_and_get_metadata(path)
-                        .map_err(|e| LoaderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+                    let file = GGUFFile::load_mmap_and_get_metadata(path).map_err(|e| LoaderError::Io(std::io::Error::other(e)))?;
                     let loader = GGUFModelLoader::new(file);
-                    let model = loader
-                        .load_model()
-                        .map_err(|e| LoaderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+                    let model = loader.load_model().map_err(|e| LoaderError::Io(std::io::Error::other(e)))?;
                     Ok(Box::new(model))
                 }
                 #[cfg(not(feature = "gguf"))]

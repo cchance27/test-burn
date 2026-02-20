@@ -137,7 +137,7 @@ fn load_registry_from_disk() -> Result<ArchitectureRegistry, String> {
         if !path.exists() {
             continue;
         }
-        let content = std::fs::read_to_string(&path).map_err(|e| format!("Failed to read architecture registry {:?}: {}", path, e))?;
+        let content = std::fs::read_to_string(path).map_err(|e| format!("Failed to read architecture registry {:?}: {}", path, e))?;
         let registry: ArchitectureRegistry =
             serde_json::from_str(&content).map_err(|e| format!("Failed to parse architecture registry {:?}: {}", path, e))?;
         tracing::debug!("Loaded architecture registry from {:?}", path);

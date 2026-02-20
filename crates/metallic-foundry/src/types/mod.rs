@@ -62,6 +62,8 @@ impl MetalDevice {
     ) -> Option<MetalBuffer> {
         unsafe { self.0.newBufferWithBytes_length_options(bytes, length, options).map(MetalBuffer) }
     }
+
+    #[allow(clippy::type_complexity)]
     pub fn new_buffer_with_bytes_no_copy(
         &self,
         bytes: std::ptr::NonNull<std::ffi::c_void>,
@@ -234,7 +236,7 @@ impl MetalBuffer {
     /// Create a mutable slice of the buffer contents.
     /// # Safety
     /// The caller must ensure exclusive access if mutating.
-    pub unsafe fn as_slice_mut<T>(&self, count: usize) -> &mut [T] {
+    pub unsafe fn as_slice_mut<T>(&mut self, count: usize) -> &mut [T] {
         unsafe { std::slice::from_raw_parts_mut(self.contents() as *mut T, count) }
     }
 

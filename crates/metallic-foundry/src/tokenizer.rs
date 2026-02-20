@@ -27,6 +27,7 @@ const TOKEN_PIECE_RE_LLAMA3: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'
 const TOKEN_PIECE_RE_QWEN2: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 enum PreTokenizerKind {
     Gpt2Like,
     Llama3Like,
@@ -340,9 +341,9 @@ impl BPETokenizer {
         }
         special_literal_tokens.sort_by_key(|t| std::cmp::Reverse(t.len()));
 
-        let special_token_re = Regex::new(r"<\|[^>]*\|>").map_err(|e| BPETokenizerError::RegexError(e))?;
+        let special_token_re = Regex::new(r"<\|[^>]*\|>").map_err(BPETokenizerError::RegexError)?;
         let pre_kind = PreTokenizerKind::from_metadata_name(pre_tokenizer_name);
-        let token_piece_re = Regex::new(pre_kind.token_piece_pattern()).map_err(|e| BPETokenizerError::RegexError(e))?;
+        let token_piece_re = Regex::new(pre_kind.token_piece_pattern()).map_err(BPETokenizerError::RegexError)?;
 
         let chat_template = chat_template.as_deref().filter(|v| !v.trim().is_empty()).map(ChatTemplate::new);
 
@@ -539,7 +540,7 @@ impl BPETokenizer {
                 }
                 if pos + 2 < n {
                     let c2 = chars[pos + 2].to_ascii_lowercase();
-                    if (c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') || (c1 == 'l' && c2 == 'l') {
+                    if ((c1 == 'v' || c1 == 'r') && c2 == 'e') || (c1 == 'l' && c2 == 'l') {
                         pos += 3;
                         emit_piece(start, pos)?;
                         continue;
@@ -641,13 +642,12 @@ impl BPETokenizer {
                         break;
                     }
                 }
-                if matched_special.is_none() {
-                    for mat in self.special_token_re.find_iter(rest) {
-                        let mat = mat?;
-                        if mat.start() == 0 {
-                            matched_special = Some(mat.as_str());
-                        }
-                        break;
+                if matched_special.is_none()
+                    && let Some(mat) = self.special_token_re.find_iter(rest).next()
+                {
+                    let mat = mat?;
+                    if mat.start() == 0 {
+                        matched_special = Some(mat.as_str());
                     }
                 }
             }

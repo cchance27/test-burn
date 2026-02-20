@@ -54,6 +54,7 @@ impl SampleTopK {
     }
 
     /// Create a new SampleTopK kernel.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         logits: &TensorArg,
         output: &TensorArg,
