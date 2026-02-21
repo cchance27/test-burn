@@ -87,6 +87,16 @@ pub trait Stage: Send + Sync {
     fn struct_defs(&self) -> String {
         String::new()
     }
+
+    /// Optional activation metadata for introspection and diagnostics.
+    fn activation_meta(&self) -> Option<crate::policy::activation::Activation> {
+        None
+    }
+
+    /// Optional policy metadata for introspection and diagnostics.
+    fn policy_meta(&self) -> Option<crate::fusion::PolicyMeta> {
+        None
+    }
 }
 
 /// Compile-time metadata for stages (not dyn-compatible).
@@ -119,6 +129,14 @@ impl<S: Stage + ?Sized> Stage for Box<S> {
 
     fn struct_defs(&self) -> String {
         (**self).struct_defs()
+    }
+
+    fn activation_meta(&self) -> Option<crate::policy::activation::Activation> {
+        (**self).activation_meta()
+    }
+
+    fn policy_meta(&self) -> Option<crate::fusion::PolicyMeta> {
+        (**self).policy_meta()
     }
 }
 

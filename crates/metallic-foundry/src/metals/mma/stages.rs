@@ -5,12 +5,10 @@
 
 use std::sync::Arc;
 
+use metallic_macros::Stage as DeriveStage;
 use serde::{Deserialize, Serialize};
 
-use super::{MMA_METAL, TILE_LOADER_METAL};
-use crate::{
-    compound::{BufferArg, Stage}, fusion::MetalPolicy, metals::gemm::step::GemmParams
-};
+use crate::{fusion::MetalPolicy, metals::gemm::step::GemmParams, policy::activation::Activation, types::TensorArg};
 
 // =============================================================================
 // TileConfig - Tile size configuration for GEMM
@@ -77,38 +75,56 @@ impl TileConfig {
 
 /// Stage that sets up tiled layout for GEMM.
 /// Emits tile configuration defines and index calculations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, DeriveStage)]
+#[stage(
+    struct_defs_method = "stage_struct_defs",
+    emit = r#"
+    // Tile indices with optional swizzling for cache locality
+    const int2 tile_idx = BlockSwizzle::swizzle(gid, params.swizzle_log);
+    const int tile_m = tile_idx.y;
+    const int tile_n = tile_idx.x;
+    
+    // Early exit if tile is out of bounds
+    if (tile_m >= params.tiles_m || tile_n >= params.tiles_n) return;
+    
+    // Batch offset
+    const int batch_idx = gid.z;
+    
+    // Thread identifiers
+    const ushort simd_group_id = lid.x / 32;
+    const ushort simd_lane_id = lid.x % 32;
+    
+    // Threadgroup memory allocation
+    threadgroup half As[TGP_MEM_SIZE_A];
+    threadgroup half Bs[TGP_MEM_SIZE_B];
+    
+    // Tile bounds in output
+    const short tgp_bm = min(GEMM_BM, params.m - tile_m * GEMM_BM);
+    const short tgp_bn = min(GEMM_BN, params.n - tile_n * GEMM_BN);
+"#,
+    out_var = "void"
+)]
 pub struct TileLayoutStage {
+    #[arg(buffer = 10, metal_type = "constant GemmParams&")]
+    pub params: GemmParams,
+    #[arg(skip, stage_skip)]
     pub config: TileConfig,
+    #[arg(skip, stage_skip)]
     pub transpose_a: bool,
+    #[arg(skip, stage_skip)]
     pub transpose_b: bool,
 }
 
 impl TileLayoutStage {
     pub fn new(config: TileConfig, transpose_a: bool, transpose_b: bool) -> Self {
         Self {
+            params: GemmParams::default(),
             config,
             transpose_a,
             transpose_b,
         }
     }
-}
-
-impl Stage for TileLayoutStage {
-    fn includes(&self) -> Vec<&'static str> {
-        vec![]
-    }
-
-    fn buffer_args(&self) -> Vec<BufferArg> {
-        // GemmParams passed as a buffer
-        vec![BufferArg {
-            name: "params",
-            metal_type: "constant GemmParams&",
-            buffer_index: 10,
-        }]
-    }
-
-    fn struct_defs(&self) -> String {
+    fn stage_struct_defs(&self) -> String {
         let (bm, bn, bk, wm, wn) = self.config.tile_sizes();
         let tgp_padding = self.config.tgp_padding();
         let tgp_size = self.config.threads_per_tg();
@@ -162,36 +178,6 @@ struct BlockSwizzle {
             tb = self.transpose_b as u32
         )
     }
-
-    fn emit(&self, _prev: &str) -> (String, String) {
-        let code = r#"
-    // Tile indices with optional swizzling for cache locality
-    const int2 tile_idx = BlockSwizzle::swizzle(gid, params.swizzle_log);
-    const int tile_m = tile_idx.y;
-    const int tile_n = tile_idx.x;
-    
-    // Early exit if tile is out of bounds
-    if (tile_m >= params.tiles_m || tile_n >= params.tiles_n) return;
-    
-    // Batch offset
-    const int batch_idx = gid.z;
-    
-    // Thread identifiers
-    const ushort simd_group_id = lid.x / 32;
-    const ushort simd_lane_id = lid.x % 32;
-    
-    // Threadgroup memory allocation
-    threadgroup half As[TGP_MEM_SIZE_A];
-    threadgroup half Bs[TGP_MEM_SIZE_B];
-    
-    // Tile bounds in output
-    const short tgp_bm = min(GEMM_BM, params.m - tile_m * GEMM_BM);
-    const short tgp_bn = min(GEMM_BN, params.n - tile_n * GEMM_BN);
-"#
-        .to_string();
-
-        ("void".to_string(), code)
-    }
 }
 
 // =============================================================================
@@ -200,53 +186,17 @@ struct BlockSwizzle {
 
 /// Stage that loads matrix A (activations) into threadgroup memory.
 /// Uses SimpleTileLoader for F16 (no dequant needed).
-#[derive(Debug, Clone)]
-pub struct TileLoadAStage {
-    /// Policy for A (typically F16 for activations)
-    pub policy: Arc<dyn MetalPolicy>,
-    /// Whether A is transposed
-    pub transpose_a: bool,
-}
-
-impl TileLoadAStage {
-    pub fn new(policy: Arc<dyn MetalPolicy>, transpose_a: bool) -> Self {
-        Self { policy, transpose_a }
-    }
-}
-
-impl Stage for TileLoadAStage {
-    fn includes(&self) -> Vec<&'static str> {
-        vec![self.policy.header()]
-    }
-
-    fn buffer_args(&self) -> Vec<BufferArg> {
-        vec![BufferArg {
-            name: "A",
-            metal_type: "const device half*",
-            buffer_index: 0,
-        }]
-    }
-
-    fn struct_defs(&self) -> String {
-        TILE_LOADER_METAL.to_string()
-    }
-
-    fn emit(&self, _prev: &str) -> (String, String) {
-        // Calculate batch base offset in bytes
-        let batch_offset = self.policy.bytes("batch_idx * params.batch_stride_a");
-
-        // Tile offset within the batch (in elements)
-        let tile_offset_elems = if self.transpose_a {
-            "tile_m * GEMM_BM"
-        } else {
-            "tile_m * GEMM_BM * params.lda"
-        };
-        let tile_offset = self.policy.bytes(tile_offset_elems);
-
-        let code = format!(
-            r#"
+#[derive(Debug, Clone, DeriveStage)]
+#[stage(
+    includes("mma/tile_loader.metal"),
+    policy_field = "policy",
+    template_bindings(
+        batch_offset = "self.policy.bytes(\"batch_idx * params.batch_stride_a\")",
+        tile_offset = "self.policy.bytes(if self.transpose_a { \"tile_m * GEMM_BM\" } else { \"tile_m * GEMM_BM * params.lda\" })"
+    ),
+    emit = r#"
     // Initialize A tile loader (F16 activations)
-    const device uchar* A_batch = (const device uchar*)A + {batch_offset};
+    const device uchar* A_batch = (const device uchar*)a + {batch_offset};
     const device uchar* A_tile = A_batch + {tile_offset};
     
     SimpleTileLoader<half, 
@@ -258,11 +208,26 @@ impl Stage for TileLoadAStage {
         (const device half*)A_tile, params.lda, As, simd_group_id, simd_lane_id
     );
 "#,
-            batch_offset = batch_offset,
-            tile_offset = tile_offset
-        );
+    out_var = "loader_a"
+)]
+pub struct TileLoadAStage {
+    #[arg(buffer = 0, metal_type = "const device half*")]
+    pub a: TensorArg,
+    /// Policy for A (typically F16 for activations)
+    #[arg(skip, stage_skip)]
+    pub policy: Arc<dyn MetalPolicy>,
+    /// Whether A is transposed
+    #[arg(skip, stage_skip)]
+    pub transpose_a: bool,
+}
 
-        ("loader_a".to_string(), code)
+impl TileLoadAStage {
+    pub fn new(policy: Arc<dyn MetalPolicy>, transpose_a: bool) -> Self {
+        Self {
+            a: TensorArg::default(),
+            policy,
+            transpose_a,
+        }
     }
 }
 
@@ -272,76 +237,24 @@ impl Stage for TileLoadAStage {
 
 /// Stage that loads matrix B (weights) into threadgroup memory.
 /// Uses Policy templates for transparent F16/Q8/Q4 dequantization.
-#[derive(Debug, Clone)]
-pub struct TileLoadBStage {
-    /// Policy for B (F16, Q8, etc.)
-    pub policy: Arc<dyn MetalPolicy>,
-    /// Whether B is transposed
-    pub transpose_b: bool,
-}
-
-impl TileLoadBStage {
-    pub fn new(policy: Arc<dyn MetalPolicy>, transpose_b: bool) -> Self {
-        Self { policy, transpose_b }
-    }
-}
-
-impl Stage for TileLoadBStage {
-    fn includes(&self) -> Vec<&'static str> {
-        vec![self.policy.header()]
-    }
-
-    fn buffer_args(&self) -> Vec<BufferArg> {
-        vec![
-            BufferArg {
-                name: "B",
-                metal_type: "const device uchar*", // Policy handles casting
-                buffer_index: 1,
-            },
-            BufferArg {
-                name: "B_scales",
-                metal_type: "const device uchar*",
-                buffer_index: 5,
-            },
-            BufferArg {
-                name: "weights_per_block",
-                metal_type: "constant uint&",
-                buffer_index: 6,
-            },
-            BufferArg {
-                name: "b_is_canonical",
-                metal_type: "constant uint&",
-                buffer_index: 9,
-            },
-        ]
-    }
-
-    fn struct_defs(&self) -> String {
-        // TileLoader already included by TileLoadAStage
-        String::new()
-    }
-
-    fn emit(&self, _prev: &str) -> (String, String) {
-        let policy = self.policy.struct_name();
-
-        // Calculate batch base offset in bytes
-        let batch_offset = self.policy.bytes("batch_idx * params.batch_stride_b");
-
-        let code = format!(
-            r#"
-    // Initialize B tile loader with {policy} dequantization
+#[derive(Debug, Clone, DeriveStage)]
+#[stage(
+    policy_field = "policy",
+    template_bindings(batch_offset = "self.policy.bytes(\"batch_idx * params.batch_stride_b\")"),
+    emit = r#"
+    // Initialize B tile loader with {policy_struct} dequantization
     // Use batch-base and tile-offset for correct global scale indexing
-    const device uchar* B_batch = B + {batch_offset};
+    const device uchar* B_batch = b + {batch_offset};
     const uint blocks_per_k = (params.k + weights_per_block - 1) / weights_per_block;
     
-    TileLoader<{policy}, half,
+    TileLoader<{policy_struct}, half,
                GEMM_TRANSPOSE_B ? GEMM_BN : GEMM_BK,
                GEMM_TRANSPOSE_B ? GEMM_BK : GEMM_BN,
                GEMM_TRANSPOSE_B ? GEMM_BK + GEMM_TGP_PADDING : GEMM_BN + GEMM_TGP_PADDING,
                GEMM_TRANSPOSE_B,
                GEMM_TGP_SIZE> loader_b(
         B_batch, params.ldb, Bs,
-        B_scales, weights_per_block,
+        b_scales, weights_per_block,
         b_is_canonical,
         tile_n * GEMM_BN,  // row_idx_offset
         blocks_per_k,
@@ -349,11 +262,35 @@ impl Stage for TileLoadBStage {
         simd_group_id, simd_lane_id
     );
 "#,
-            policy = policy,
-            batch_offset = batch_offset
-        );
+    out_var = "loader_b"
+)]
+pub struct TileLoadBStage {
+    #[arg(buffer = 1, metal_type = "const device uchar*")]
+    pub b: TensorArg,
+    #[arg(buffer = 5, metal_type = "const device uchar*")]
+    pub b_scales: TensorArg,
+    #[arg(buffer = 6, metal_type = "constant uint&")]
+    pub weights_per_block: u32,
+    #[arg(buffer = 9, metal_type = "constant uint&")]
+    pub b_is_canonical: u32,
+    /// Policy for B (F16, Q8, etc.)
+    #[arg(skip, stage_skip)]
+    pub policy: Arc<dyn MetalPolicy>,
+    /// Whether B is transposed
+    #[arg(skip, stage_skip)]
+    pub transpose_b: bool,
+}
 
-        ("loader_b".to_string(), code)
+impl TileLoadBStage {
+    pub fn new(policy: Arc<dyn MetalPolicy>, transpose_b: bool) -> Self {
+        Self {
+            b: TensorArg::default(),
+            b_scales: TensorArg::default(),
+            weights_per_block: 0,
+            b_is_canonical: 0,
+            policy,
+            transpose_b,
+        }
     }
 }
 
@@ -366,9 +303,66 @@ impl Stage for TileLoadBStage {
 ///
 /// This stage is POLICY-AGNOSTIC - it operates on already-dequantized
 /// tiles in threadgroup memory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, DeriveStage)]
+#[stage(
+    includes("mma/mma.metal", "policies/activations.metal"),
+    template_bindings(k_remainder = "if !self.k_aligned { r#\"
+    // Handle K remainder
+    if (params.gemm_k_remainder > 0) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        short2 tile_dims_a = GEMM_TRANSPOSE_A 
+            ? short2(tgp_bm, params.gemm_k_remainder) 
+            : short2(params.gemm_k_remainder, tgp_bm);
+        short2 tile_dims_b = GEMM_TRANSPOSE_B 
+            ? short2(params.gemm_k_remainder, tgp_bn) 
+            : short2(tgp_bn, params.gemm_k_remainder);
+        
+        loader_a.load_safe(tile_dims_a);
+        loader_b.load_safe(tile_dims_b);
+        
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        mma_op.mma(As, Bs);
+    }
+\"# } else { \"\" }"),
+    emit = r#"
+    // Initialize simdgroup MMA operator
+    SimdgroupMma<half, half, GEMM_BM, GEMM_BN, GEMM_BK, GEMM_WM, GEMM_WN,
+                 GEMM_TRANSPOSE_A, GEMM_TRANSPOSE_B,
+                 GEMM_TRANSPOSE_A ? GEMM_BM + GEMM_TGP_PADDING : GEMM_BK + GEMM_TGP_PADDING,
+                 GEMM_TRANSPOSE_B ? GEMM_BK + GEMM_TGP_PADDING : GEMM_BN + GEMM_TGP_PADDING> mma_op(
+        simd_group_id, simd_lane_id
+    );
+    
+    // Main GEMM loop over K dimension
+    for (int k = 0; k < params.gemm_k_iterations; k++) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Load A and B tiles to threadgroup memory
+        if (tgp_bm == GEMM_BM && tgp_bn == GEMM_BN) {
+            loader_a.load_unsafe();
+            loader_b.load_unsafe();
+        } else {
+            loader_a.load_safe(GEMM_TRANSPOSE_A ? short2(tgp_bm, GEMM_BK) : short2(GEMM_BK, tgp_bm));
+            loader_b.load_safe(GEMM_TRANSPOSE_B ? short2(GEMM_BK, tgp_bn) : short2(tgp_bn, GEMM_BK));
+        }
+        
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Multiply-accumulate
+        mma_op.mma(As, Bs);
+        
+        // Advance to next K tile
+        loader_a.next();
+        loader_b.next();
+    }
+    {k_remainder}
+"#,
+    out_var = "mma_op"
+)]
 pub struct MmaLoopStage {
     /// Whether K is aligned to BK
+    #[arg(skip, stage_skip)]
     pub k_aligned: bool,
 }
 
@@ -389,106 +383,87 @@ impl Default for MmaLoopStage {
     }
 }
 
-impl Stage for MmaLoopStage {
-    fn includes(&self) -> Vec<&'static str> {
-        vec!["policies/activations.metal"]
-    }
-
-    fn buffer_args(&self) -> Vec<BufferArg> {
-        vec![] // Uses threadgroup memory from loaders
-    }
-
-    fn struct_defs(&self) -> String {
-        MMA_METAL.to_string()
-    }
-
-    fn emit(&self, _prev: &str) -> (String, String) {
-        let k_remainder_code = if !self.k_aligned {
-            r#"
-    // Handle K remainder
-    if (params.gemm_k_remainder > 0) {
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        
-        short2 tile_dims_a = GEMM_TRANSPOSE_A 
-            ? short2(tgp_bm, params.gemm_k_remainder) 
-            : short2(params.gemm_k_remainder, tgp_bm);
-        short2 tile_dims_b = GEMM_TRANSPOSE_B 
-            ? short2(params.gemm_k_remainder, tgp_bn) 
-            : short2(tgp_bn, params.gemm_k_remainder);
-        
-        loader_a.load_safe(tile_dims_a);
-        loader_b.load_safe(tile_dims_b);
-        
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        mma_op.mma(As, Bs);
-    }
-"#
-        } else {
-            ""
-        };
-
-        let code = format!(
-            r#"
-    // Initialize simdgroup MMA operator
-    SimdgroupMma<half, half, GEMM_BM, GEMM_BN, GEMM_BK, GEMM_WM, GEMM_WN,
-                 GEMM_TRANSPOSE_A, GEMM_TRANSPOSE_B,
-                 GEMM_TRANSPOSE_A ? GEMM_BM + GEMM_TGP_PADDING : GEMM_BK + GEMM_TGP_PADDING,
-                 GEMM_TRANSPOSE_B ? GEMM_BK + GEMM_TGP_PADDING : GEMM_BN + GEMM_TGP_PADDING> mma_op(
-        simd_group_id, simd_lane_id
-    );
-    
-    // Main GEMM loop over K dimension
-    for (int k = 0; k < params.gemm_k_iterations; k++) {{
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        
-        // Load A and B tiles to threadgroup memory
-        if (tgp_bm == GEMM_BM && tgp_bn == GEMM_BN) {{
-            loader_a.load_unsafe();
-            loader_b.load_unsafe();
-        }} else {{
-            loader_a.load_safe(GEMM_TRANSPOSE_A ? short2(tgp_bm, GEMM_BK) : short2(GEMM_BK, tgp_bm));
-            loader_b.load_safe(GEMM_TRANSPOSE_B ? short2(GEMM_BK, tgp_bn) : short2(tgp_bn, GEMM_BK));
-        }}
-        
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        
-        // Multiply-accumulate
-        mma_op.mma(As, Bs);
-        
-        // Advance to next K tile
-        loader_a.next();
-        loader_b.next();
-    }}
-    {k_remainder}
-"#,
-            k_remainder = k_remainder_code
-        );
-
-        ("mma_op".to_string(), code)
-    }
-}
-
 // =============================================================================
 // GemmEpilogueStage - Alpha/beta scaling and output write
 // =============================================================================
 
 /// Stage that applies epilogue (alpha*result + beta*C) and writes output.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, DeriveStage)]
+#[stage(
+    activation_field = "activation",
+    template_bindings(
+        has_alpha_beta = "if self.has_alpha_beta { \"true\" } else { \"false\" }",
+        has_bias = "if self.has_bias { \"true\" } else { \"false\" }",
+        has_activation = "if self.activation != Activation::None { \"true\" } else { \"false\" }"
+    ),
+    emit = r#"
+    if ({has_alpha_beta}) {
+        // Apply alpha/beta epilogue
+        const device half* C_tile = c + batch_idx * params.batch_stride_c
+                                   + tile_m * GEMM_BM * params.ldc + tile_n * GEMM_BN;
+        if (tgp_bm == GEMM_BM && tgp_bn == GEMM_BN) {
+            mma_op.apply_epilogue(C_tile, params.ldc, alpha, beta);
+        } else {
+            mma_op.apply_epilogue_safe(C_tile, params.ldc, alpha, beta, short2(tgp_bn, tgp_bm));
+        }
+    }
+
+    if ({has_bias}) {
+        // Apply bias
+        mma_op.apply_bias(bias, tile_n * GEMM_BN);
+    }
+
+    if ({has_activation}) {
+        // Apply activation
+        mma_op.apply_activation<{activation_struct}>();
+    }
+
+    // Write output
+    device half* D_tile = d + batch_idx * params.batch_stride_d
+                         + tile_m * GEMM_BM * params.ldd + tile_n * GEMM_BN;
+    
+    // Use safe store for edge tiles
+    if (tgp_bm == GEMM_BM && tgp_bn == GEMM_BN) {
+        mma_op.store_result(D_tile, params.ldd);
+    } else {
+        mma_op.store_result_safe(D_tile, params.ldd, short2(tgp_bn, tgp_bm));
+    }
+"#,
+    out_var = "void"
+)]
 pub struct GemmEpilogueStage {
+    #[arg(buffer = 2, output)]
+    pub d: TensorArg,
+    #[arg(buffer = 3, metal_type = "const device half*")]
+    pub c: TensorArg,
+    #[arg(buffer = 7, metal_type = "constant float&")]
+    pub alpha: f32,
+    #[arg(buffer = 8, metal_type = "constant float&")]
+    pub beta: f32,
+    #[arg(buffer = 4, metal_type = "const device half*")]
+    pub bias: TensorArg,
     /// Whether to apply alpha/beta scaling
+    #[arg(skip, stage_skip)]
     pub has_alpha_beta: bool,
     /// Whether to apply bias
+    #[arg(skip, stage_skip)]
     pub has_bias: bool,
     /// Activation to apply
-    pub activation: crate::policy::activation::Activation,
+    #[arg(skip, stage_skip)]
+    pub activation: Activation,
 }
 
 impl GemmEpilogueStage {
     pub fn new() -> Self {
         Self {
+            d: TensorArg::default(),
+            c: TensorArg::default(),
+            alpha: 1.0,
+            beta: 0.0,
+            bias: TensorArg::default(),
             has_alpha_beta: false,
             has_bias: false,
-            activation: crate::policy::activation::Activation::None,
+            activation: Activation::None,
         }
     }
 
@@ -502,7 +477,7 @@ impl GemmEpilogueStage {
         self
     }
 
-    pub fn with_activation(mut self, activation: crate::policy::activation::Activation) -> Self {
+    pub fn with_activation(mut self, activation: Activation) -> Self {
         self.activation = activation;
         self
     }
@@ -511,113 +486,6 @@ impl GemmEpilogueStage {
 impl Default for GemmEpilogueStage {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Stage for GemmEpilogueStage {
-    fn includes(&self) -> Vec<&'static str> {
-        vec![self.activation.header()]
-    }
-
-    fn buffer_args(&self) -> Vec<BufferArg> {
-        let mut args = vec![BufferArg {
-            name: "D",
-            metal_type: "device half*",
-            buffer_index: 2,
-        }];
-
-        if self.has_alpha_beta {
-            args.push(BufferArg {
-                name: "C",
-                metal_type: "const device half*",
-                buffer_index: 3,
-            });
-            args.push(BufferArg {
-                name: "alpha",
-                metal_type: "constant float&",
-                buffer_index: 7,
-            });
-            args.push(BufferArg {
-                name: "beta",
-                metal_type: "constant float&",
-                buffer_index: 8,
-            });
-        }
-
-        if self.has_bias {
-            args.push(BufferArg {
-                name: "bias",
-                metal_type: "const device half*",
-                buffer_index: 4,
-            });
-        }
-
-        args
-    }
-
-    fn struct_defs(&self) -> String {
-        String::new()
-    }
-
-    fn emit(&self, _prev: &str) -> (String, String) {
-        let activation = self.activation.struct_name();
-        let activation_code = if self.activation != crate::policy::activation::Activation::None {
-            r#"
-    // Apply activation
-    mma_op.apply_activation<{activation}>();
-"#
-            .replace("{activation}", activation)
-        } else {
-            String::new()
-        };
-        let epilogue_code = if self.has_alpha_beta {
-            r#"
-    // Apply alpha/beta epilogue
-    const device half* C_tile = C + batch_idx * params.batch_stride_c
-                               + tile_m * GEMM_BM * params.ldc + tile_n * GEMM_BN;
-    if (tgp_bm == GEMM_BM && tgp_bn == GEMM_BN) {
-        mma_op.apply_epilogue(C_tile, params.ldc, alpha, beta);
-    } else {
-        mma_op.apply_epilogue_safe(C_tile, params.ldc, alpha, beta, short2(tgp_bn, tgp_bm));
-    }
-"#
-            .replace("{activation}", activation)
-        } else {
-            String::new()
-        };
-
-        let bias_code = if self.has_bias {
-            r#"
-    // Apply bias
-    mma_op.apply_bias(bias, tile_n * GEMM_BN);
-"#
-            .to_string()
-        } else {
-            String::new()
-        };
-
-        let code = format!(
-            r#"
-    {epilogue}
-    {bias}
-    {activation}
-    // Write output
-    device half* D_tile = D + batch_idx * params.batch_stride_d
-                         + tile_m * GEMM_BM * params.ldd + tile_n * GEMM_BN;
-    
-    // Use safe store for edge tiles
-    if (tgp_bm == GEMM_BM && tgp_bn == GEMM_BN) {{
-        mma_op.store_result(D_tile, params.ldd);
-    }} else {{
-        mma_op.store_result_safe(D_tile, params.ldd, short2(tgp_bn, tgp_bm));
-    }}
-"#,
-            epilogue = epilogue_code,
-            bias = bias_code,
-            activation = activation_code
-        );
-
-        ("void".to_string(), code)
     }
 }
 

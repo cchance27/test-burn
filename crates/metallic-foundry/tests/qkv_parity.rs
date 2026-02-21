@@ -313,9 +313,9 @@ fn test_qkv_parity() {
             // FusedQkvArgs buffer indices:
             // input=6, k_dim=7, gamma=18, epsilon=19
             .prologue(RmsNormComputeStage::new(6, 7, 19))
-            .main(ParallelProjectStage::new(Arc::new(PolicyQ8)).with_norm(18, "inv_rms"))
+            .main(ParallelProjectStage::new(Arc::new(PolicyQ8)).with_norm("inv_rms"))
             .epilogue(MultiWarpReduceStage)
-            .epilogue(MultiWriteOutputStage)
+            .epilogue(MultiWriteOutputStage::new())
             .compile(),
     );
 

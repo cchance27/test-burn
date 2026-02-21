@@ -12,12 +12,9 @@ This document provides an overview of the derive macros in `metallic-macros` for
 | `MetalPolicy` | Implement `MetalPolicy` trait for dtype handling | `#[policy(...)]`, `#[param(...)]` |
 | `KernelArgs` | Generate buffer binding + Metal signature | `#[arg(...)]` |
 | `Kernel` | Implement `Kernel` trait for standalone kernels | `#[kernel(...)]` |
+| `Stage` | Implement `Stage` trait from stage templates + bindings | `#[stage(...)]`, `#[arg(...)]` |
 | `CompoundKernel` | Compose stages into fused kernel | `#[compound(...)]`, `#[prologue]`, `#[main]`, `#[epilogue]` |
 | `Epilogue` | Implement `Epilogue` and `Stage` for manual fusion | `#[epilogue(...)]` |
-| `GemvConfig` | Describe SIMD GEMV pointer + shape wiring | `#[gemv_kernel(...)]` |
-| `GemvHook` | Bind SIMD GEMV policy + params | `#[gemv_hook(...)]` |
-| `GemvPrologue` | **Pre-main setup** (e.g., RMSNorm `inv_rms` computation) | `#[gemv_prologue(...)]` |
-| `GemvKernel` | **Unified** GEMV kernel (Prologue + Config + Hook + Epilogue) | `#[gemv_kernel(...)]` |
 | `ConditionalKernel` | Dispatch to kernel variants based on runtime conditions | `#[conditional(...)]`, `#[when(...)]` |
 
 ---
@@ -361,6 +358,53 @@ struct PolicyF16 { /* inline load helpers */ };
 
 ---
 
+## 4.5 `#[derive(Stage)]`
+
+Generates a `compound::Stage` implementation directly from a Rust struct.
+
+Use this when stage wiring should stay declarative but you still need dynamic policy/activation parameterization.
+
+### `#[stage(...)]` attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `include = "path.metal"` | Legacy single include (still supported). |
+| `includes("a.metal", "b.metal")` | Static include list. |
+| `include_exprs("self.activation.header()")` | Dynamic include expressions evaluated on `self`. |
+| `emit = "..."` | Metal code template. |
+| `out_var = "name"` | Output variable from `emit()`. |
+| `template_bindings(name = "expr", ...)` | Bind template placeholders to Rust expressions. |
+| `activation_field = "activation"` | Adds activation placeholders and `activation_meta()`. |
+| `policy_field = "policy"` | Adds policy placeholders and `policy_meta()`. |
+| `buffer_args_fn = "method"` | Delegate buffer signature construction to an instance method. |
+| `struct_defs_method = "method"` | Delegate struct-def generation to an instance method. |
+| `struct_defs = "TypeName"` | Inject `TypeName::METAL_STRUCT_DEF`. |
+| `struct_defs("TypeA", "TypeB")` | Inject multiple MetalStruct definitions in order. |
+| `struct_defs = ["TypeA", "TypeB"]` | Inject multiple MetalStruct definitions (array form). |
+| `struct_defs_fn = "method"` | Call an associated function for struct defs. |
+
+`#[derive(Stage)]` now auto-wraps non-empty `struct_defs()` output in a per-stage `#ifndef/#define` guard, so manual guarding is no longer required in stage helpers.
+
+### Template placeholders
+
+Built-ins:
+- `{input_var}`
+- `{out_var}`
+
+Activation adapter placeholders:
+- `{activation_header}`
+- `{activation_struct}`
+
+Policy adapter placeholders:
+- `{policy_header}`
+- `{policy_struct}`
+- `{policy_short}`
+
+Unknown placeholders fail at compile-time.
+Generated `emit()` output always appends a trailing newline automatically.
+
+---
+
 ## 5. `#[derive(Epilogue)]`
 
 Implements both `Stage` and `Epilogue` traits for stages that are fused after a main operation.
@@ -565,69 +609,6 @@ impl Kernel for MatmulDispatch {
 ```
 
 ---
-
-## 8. SIMD GEMV Macros (`GemvConfig`, `GemvHook`)
-
-These macros exist to keep the **decode-time SIMD GEMV template** fully reusable while avoiding “quant logic spread” across kernels.
-
-### `#[derive(GemvConfig)]`
-
-Defines how a particular fused SIMD GEMV kernel wires its pointers/dims (per-head arrays, N expressions, bias flags, optional scales).
-
-```rust
-use metallic_macros::GemvConfig;
-
-#[derive(GemvConfig)]
-#[gemv_simd(
-    args = "MyArgs",
-    heads = 3,
-    cols_per_tg = 8,
-    fast_path = true,
-    gemv_n0 = "params->Nq",
-    data_ptrs("data_q", "data_k", "data_v"),
-    result_ptrs("out_q", "out_k", "out_v"),
-    n_exprs("params->Nq", "params->Nk", "params->Nv"),
-    bias_ptrs("bias_q", "bias_k", "bias_v"),
-    has_bias_flags("params->has_bias_q", "params->has_bias_k", "params->has_bias_v")
-)]
-struct QkvFusedCfg;
-```
-
-**Generated Behavior:**
-- `struct_defs()` automatically includes `GemvParams::METAL_STRUCT_DEF` for all compound GEMV kernels
-- If `struct_defs_type(MyParams)` is specified, that struct's `METAL_STRUCT_DEF` is also included
-- No hardcoded Metal struct definitions needed in `.metal` files
-
-Notes:
-- `scale_ptrs(...)` is optional; it enables a `scale_arr[HEADS]` local pointer array for quant formats that need per-head scale buffers (e.g. Q8 canonical).
-
-### `#[derive(GemvHook)]`
-
-Selects the policy struct + includes, and injects:
-- optional `preamble` (commonly used to compute `inv_rms` for fused RMSNorm)
-- required `policy_params` initializer snippet, which must define `Params p = { ... }` for the selected policy.
-
-```rust
-use metallic_macros::GemvHook;
-
-#[derive(GemvHook, Clone, Copy, Default)]
-#[gemv_simd_hook(
-    id = "f16_canonical",
-    policy_struct = "SimdGemvPolicyF16Canonical",
-    includes("policies/simd_gemv_f16_canonical.metal"),
-    policy_params = r#"    SimdGemvPolicyF16Canonical::Params p = {
-        (const device half**)data_arr,
-        params->weights_per_block
-    };
-"#
-)]
-pub struct F16CanonicalHook;
-```
-
-**Key convention**
-- SIMD GEMV stages always declare `data_arr` as `const device uchar*[]`. Hooks/policies must cast to the appropriate view.
-
-For more context and the template contract, see `docs-in-progress/KERNELS.md` and `docs-in-progress/QUANT.md`.
 
 ### Attributes
 

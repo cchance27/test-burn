@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use metallic_foundry::{
     Foundry, metals::{
-        flashattention::{stages::SdpaParamsResolved, step::RopeFlashDecodeStep}, rope::{Rope, RopeParamsResolved}
+        flashattention::{stages::SdpaParams, step::RopeFlashDecodeStep}, rope::{Rope, RopeParamsResolved}
     }, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 
@@ -39,7 +39,7 @@ fn run_benchmark_case(foundry: &mut Foundry, batch: usize, heads: usize, kv_len:
         position_offset: (kv_len - 1) as u32,
         total_elements: (total_batch * head_dim) as u32,
     };
-    let sdpa_params = SdpaParamsResolved {
+    let sdpa_params = SdpaParams {
         kv_len: kv_len as u32,
         head_dim: head_dim as u32,
         scale: 1.0 / (head_dim as f32).sqrt(),

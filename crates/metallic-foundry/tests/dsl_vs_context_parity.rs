@@ -2271,7 +2271,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
 
     // Run DSL RmsNorm kernel on Legacy's residual_1 data
     use metallic_foundry::{
-        metals::rmsnorm::{RmsNorm as RmsNormKernel, RmsNormParamsResolved}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor}
+        metals::rmsnorm::{RmsNormParamsResolved, step::run_rmsnorm}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor}
     };
 
     let legacy_res1_tensor = FoundryTensor::<F16, Pooled>::new(
@@ -2288,14 +2288,15 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
         total_elements: d_model as u32,
         epsilon: 1e-6,
     };
-    let cross_kernel = RmsNormKernel::new(
+    run_rmsnorm(
+        &mut foundry,
         &metallic_foundry::types::TensorArg::from_tensor(&legacy_res1_tensor),
         None,
         &metallic_foundry::types::TensorArg::from_tensor(&cross_output),
         &bindings.get("layer.ffn_norm_0").unwrap(),
         cross_params,
-    );
-    foundry.run(&cross_kernel).unwrap();
+    )
+    .unwrap();
 
     let cross_result = FoundryTensor::to_vec(&cross_output, &foundry);
     let cross_f16: Vec<f16> = cross_result.into_iter().collect();

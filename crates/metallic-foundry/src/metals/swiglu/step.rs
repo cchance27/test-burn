@@ -242,7 +242,8 @@ impl CompiledStep for CompiledFusedSwigluStep {
                 .and_then(|v| v.parse::<f32>().ok())
                 .or(Some(self.step.epsilon))
                 .unwrap_or(1e-6);
-            let rmsnorm = crate::metals::rmsnorm::RmsNorm::new(
+            crate::metals::rmsnorm::step::run_rmsnorm(
+                foundry,
                 &input_arg,
                 None,
                 &normalized,
@@ -252,8 +253,7 @@ impl CompiledStep for CompiledFusedSwigluStep {
                     total_elements: input_elems as u32,
                     epsilon,
                 },
-            );
-            foundry.run(&rmsnorm)?;
+            )?;
 
             let output_elems = output.dims.iter().product::<usize>();
             let gate_out_buf = foundry
@@ -591,7 +591,8 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
                 .and_then(|v| v.parse::<f32>().ok())
                 .or(self.epsilon)
                 .unwrap_or(1e-6);
-            let rmsnorm = crate::metals::rmsnorm::RmsNorm::new(
+            crate::metals::rmsnorm::step::run_rmsnorm(
+                foundry,
                 &TensorArg::from_tensor(input),
                 None,
                 &normalized,
@@ -601,8 +602,7 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
                     total_elements: input_elems as u32,
                     epsilon,
                 },
-            );
-            foundry.run(&rmsnorm)?;
+            )?;
 
             let output_elems = output.dims.iter().product::<usize>();
             let gate_out_buf = foundry
@@ -767,7 +767,7 @@ fn get_fused_ffn_kernel(policy: std::sync::Arc<dyn MetalPolicy>) -> std::sync::A
             .prologue(WarpLayoutStage::row_major().with_warps(8))
             // Activation input is always F16; quantization only applies to weight loading stages.
             .prologue(RmsNormComputeStage::new(4, 6, 14))
-            .main(FfnDualProjectStage::new(policy_clone.clone()).with_norm(9, "inv_rms"))
+            .main(FfnDualProjectStage::new(policy_clone.clone()).with_norm("inv_rms"))
             .epilogue(FfnWarpReduceStage)
             .epilogue(FfnSwigluWriteStage::new())
             .compile()

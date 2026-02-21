@@ -167,7 +167,7 @@ fn run_fused_gemv_test(cfg: FusedTestConfig) {
 
     let mut dot_stage = VectorizedDotStage::new(std::sync::Arc::new(PolicyQ8));
     if cfg.with_norm {
-        dot_stage = dot_stage.with_norm(10, "inv_rms");
+        dot_stage = dot_stage.with_norm("inv_rms");
     }
 
     let kernel = Arc::new(

@@ -26,7 +26,7 @@ fn flashattention_includes_flash_decode_metal() {
 fn flashattention_source_mentions_streaming_softmax() {
     let src = RopeFlashDecodeStep::source();
     assert!(
-        src.contains("flash_decode_warp_tiled_m1_half2") || src.contains("flash_decode_warp_tiled_m1_half4"),
+        src.contains("run_flash_decode_fused_half2_stage") || src.contains("run_flash_decode_fused_half4_stage"),
         "expected flash decode function in generated source"
     );
     assert!(!src.contains("sdpa_decode_vectorized"), "legacy decode symbol unexpectedly present");

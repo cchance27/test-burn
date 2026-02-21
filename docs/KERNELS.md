@@ -283,32 +283,16 @@ Most user-facing entry points expose `activation: Activation` directly (e.g. `Ma
 
 For the ultra-critical decode path (Batch Size = 1), Foundry uses a specialized, highly fused GEMV system.
 
-### 4.1 Unified `GemvKernel` Macro (Preferred for New Kernels)
+### 4.1 Manual Stage Implementation (Advanced/Legacy)
 
-The `#[derive(GemvKernel)]` macro generates a fully fused kernel configuration.
-
-```rust
-#[derive(GemvKernel)]
-#[gemv_kernel(
-    args = "SwiGluParams",
-    heads = 2,
-    cols_per_tg = 8,
-    // Configuration
-    gemv_n0 = "params->N",
-    data_ptrs("data_gate", "data_up"),
-    result_ptrs("out_gate", "nullptr"),
-    // Components
-    hook = F16CanonicalRmsnormHook, // F16 Weights + Fused RMSNorm
-    epilogue = SwiGluEpilogue,      // SwiGLU Activation
-)]
-pub struct SwiGluFused;
-```
-
-### 4.2 Manual Stage Implementation (Advanced/Legacy)
-
-Some complex kernels, such as **FusedQKV** (`qkv_stages.rs`), currently use manual `Stage` implementations instead of the `GemvKernel` macro. This is necessary when:
+Some complex kernels, such as **FusedQKV** (`qkv_stages.rs`), currently use manual `Stage` implementations. This is necessary when:
 *   Binding complex argument sets that exceed standard patterns (e.g., Q, K, V weights + scales = 6 buffers).
 *   Implementing custom emit logic that doesn't fit the standard template.
+
+For new stage work, prefer `#[derive(Stage)]` with declarative adapters:
+- `policy_field = "policy"` / `activation_field = "activation"` for policy/activation-aware emit templates.
+- `template_bindings(...)` for structured per-stage parameterization.
+- `buffer_args_fn = "..."` when signature shape is dynamic (for example, optional gamma buffers).
 
 **Manual Implementation Pattern:**
 1.  Implement the `Stage` trait manually.

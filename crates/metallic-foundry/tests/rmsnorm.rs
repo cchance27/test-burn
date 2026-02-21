@@ -7,7 +7,7 @@ use metallic_context::{
     Context, F16Element, kernels::rmsnorm::RMSNormOp, tensor::{F16 as LegacyF16, Tensor as LegacyTensor, TensorInit as LegacyInit, TensorStorage as LegacyStorage}
 };
 use metallic_foundry::{
-    Foundry, metals::rmsnorm::{RmsNorm, RmsNormParamsResolved}, storage::Pooled, tensor::{F16 as FoundryF16, Q8_0, Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    Foundry, metals::rmsnorm::{RmsNormParamsResolved, step::run_rmsnorm}, storage::Pooled, tensor::{F16 as FoundryF16, Q8_0, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -107,14 +107,15 @@ fn run_f16_parity_test(cfg: TestConfig) {
         total_elements: total_elements as u32,
         epsilon: 1e-6,
     };
-    let kernel = RmsNorm::new(
+    run_rmsnorm(
+        &mut foundry,
         &TensorArg::from_tensor(&input),
         None,
         &TensorArg::from_tensor(&output),
         &TensorArg::from_tensor(&gamma),
         params,
-    );
-    foundry.run(&kernel).unwrap();
+    )
+    .unwrap();
 
     let gpu_output = FoundryTensor::to_vec(&output, &foundry);
     let gpu_f32: Vec<f32> = gpu_output.iter().map(|x| x.to_f32()).collect();
@@ -168,14 +169,15 @@ fn run_cpu_test(cfg: TestConfig) {
         total_elements: total_elements as u32,
         epsilon: 1e-6,
     };
-    let kernel = RmsNorm::new(
+    run_rmsnorm(
+        &mut foundry,
         &TensorArg::from_tensor(&input),
         None,
         &TensorArg::from_tensor(&output),
         &TensorArg::from_tensor(&gamma),
         params,
-    );
-    foundry.run(&kernel).unwrap();
+    )
+    .unwrap();
 
     let gpu_output = FoundryTensor::to_vec(&output, &foundry);
     let gpu_f32: Vec<f32> = gpu_output.iter().map(|x| x.to_f32()).collect();
@@ -431,13 +433,8 @@ fn run_q8_policy_test(cfg: TestConfig) {
     let gamma_arg = TensorArg::from_tensor(&gamma);
     let _scale_arg = TensorArg::from_tensor(&scales);
 
-    // For now, just test that run_with_policy doesn't crash
-    // Full Q8 integration would require kernel buffer layout changes
-    let _kernel = RmsNorm::new(&input_arg, Some(_scale_arg.clone()), &output_arg, &gamma_arg, params);
-
-    // Test run_with_policy call works (doesn't crash)
-    // let result = foundry.run_with_policy::<metallic_foundry::policy::q8::PolicyQ8, _>(&kernel);
-    // result.expect("run_with_policy should not crash");
+    // For now, just test that dispatch path binds Q8 scale bytes without crashing.
+    let _ = run_rmsnorm(&mut foundry, &input_arg, Some(&_scale_arg), &output_arg, &gamma_arg, params);
 }
 
 #[test]

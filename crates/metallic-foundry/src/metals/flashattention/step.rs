@@ -6,9 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::variants::{FlashDecodeVariant, flash_decode_variant_from_env, select_flash_decode_variant_m2m3};
 use crate::{
     Foundry, MetalError, compound::{CompiledCompoundKernel, CompoundKernel}, metals::{
-        flashattention::stages::{
-            FlashDecodeFusedStage, FlashDecodeStage, HeadLayoutStage, SdpaParams, SdpaParamsResolved, SdpaPrefillSplitKParams
-        }, rope::{RopeParams, RopeParamsResolved, stage::RopeStage}
+        flashattention::stages::{FlashDecodeFusedStage, FlashDecodeStage, HeadLayoutStage, SdpaParams, SdpaPrefillSplitKParams}, rope::{RopeParams, RopeParamsResolved, stage::RopeStage}
     }, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F32}, types::{
         TensorArg, dispatch::{DispatchConfig, GridSize, ThreadgroupSize}
     }
@@ -84,7 +82,7 @@ impl RopeFlashDecodeStep {
         sin: &TensorArg,
         output: &TensorArg,
         rope_params: RopeParamsResolved,
-        sdpa_params: SdpaParamsResolved,
+        sdpa_params: SdpaParams,
         batch: u32,
         heads: u32,
         head_dim: u32,
@@ -126,7 +124,7 @@ impl RopeFlashDecodeStep {
         sin: &TensorArg,
         output: &TensorArg,
         rope_params: RopeParamsResolved,
-        sdpa_params: SdpaParamsResolved,
+        sdpa_params: SdpaParams,
         batch: u32,
         heads: u32,
         head_dim: u32,
@@ -193,7 +191,7 @@ struct RopeFlashDecodeArgs {
     params_rope: RopeParamsResolved,
 
     // Core Stage
-    sdpa_params: SdpaParamsResolved,
+    sdpa_params: SdpaParams,
 }
 
 #[derive(Debug)]
@@ -207,7 +205,7 @@ pub struct CompiledRopeFlashDecodeStep {
     output: TensorArg,
 
     params_rope: RopeParamsResolved,
-    sdpa_params: SdpaParamsResolved,
+    sdpa_params: SdpaParams,
 
     variant: FlashDecodeVariant,
 
@@ -231,7 +229,7 @@ impl CompiledRopeFlashDecodeStep {
         sin: TensorArg,
         output: TensorArg,
         params_rope: RopeParamsResolved,
-        sdpa_params: SdpaParamsResolved,
+        sdpa_params: SdpaParams,
         variant: FlashDecodeVariant,
         batch: u32,
         heads: u32,
@@ -425,7 +423,7 @@ struct FlashDecodeArgs {
     v_stride_h: u32,
     out_stride_b: u32,
     out_stride_h: u32,
-    sdpa_params: SdpaParamsResolved,
+    sdpa_params: SdpaParams,
 }
 
 fn parse_env_u32(key: &'static str) -> Option<u32> {
@@ -453,52 +451,48 @@ fn infer_n_kv_heads(k: &TensorArg, kv_head_major: bool, head_dim: u32) -> u32 {
 
 /// Get or create the SDPA prefill kernel (tiled, WARPS in {4,8}).
 fn get_sdpa_prefill_kernel(prefill_warps: u32) -> Arc<CompiledCompoundKernel> {
-    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
+    use crate::{
+        kernel_registry::{KernelCacheKey, kernel_registry}, metals::flashattention::stages::{SdpaPrefillParams, SdpaPrefillStage, SdpaPrefillVariant}
+    };
+
     let key = KernelCacheKey::new("sdpa_prefill", format!("w{}", prefill_warps));
-
     kernel_registry().get_or_build(key, || {
-        use crate::metals::flashattention::stages::{SdpaPrefillParams, SdpaPrefillStage, SdpaPrefillVariant};
-
-        // Prefill is implemented as a standalone stage with explicit buffer bindings (Q/K/V/Out/Params).
-        // We intentionally do not use `HeadLayoutStage` here: the stage performs its own pointer math
-        // based on the precomputed strides in `SdpaPrefillParams`.
-        let mut dummy_core = SdpaPrefillStage::new(SdpaPrefillParams::default());
-        dummy_core.variant = SdpaPrefillVariant { warps: prefill_warps };
-
+        let mut stage = SdpaPrefillStage::new(SdpaPrefillParams::default());
+        stage.variant = SdpaPrefillVariant { warps: prefill_warps };
         CompoundKernel::new(&format!("sdpa_prefill_w{}", prefill_warps))
-            .main(dummy_core)
+            .main(stage)
             .with_manual_output(true)
             .compile()
     })
 }
 
 fn get_sdpa_prefill_splitk_part_kernel(prefill_warps: u32) -> Arc<CompiledCompoundKernel> {
-    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
+    use crate::{
+        kernel_registry::{KernelCacheKey, kernel_registry}, metals::flashattention::stages::{SdpaPrefillSplitKParams, SdpaPrefillSplitKPartStage, SdpaPrefillVariant}
+    };
+
     let key = KernelCacheKey::new("sdpa_prefill_splitk_part", format!("w{}", prefill_warps));
-
     kernel_registry().get_or_build(key, || {
-        use crate::metals::flashattention::stages::{SdpaPrefillSplitKParams, SdpaPrefillSplitKPartStage, SdpaPrefillVariant};
-        let mut dummy_core = SdpaPrefillSplitKPartStage::new(SdpaPrefillSplitKParams::default());
-        dummy_core.variant = SdpaPrefillVariant { warps: prefill_warps };
-
+        let mut stage = SdpaPrefillSplitKPartStage::new(SdpaPrefillSplitKParams::default());
+        stage.variant = SdpaPrefillVariant { warps: prefill_warps };
         CompoundKernel::new(&format!("sdpa_prefill_splitk_part_w{}", prefill_warps))
-            .main(dummy_core)
+            .main(stage)
             .with_manual_output(true)
             .compile()
     })
 }
 
 fn get_sdpa_prefill_splitk_reduce_kernel(prefill_warps: u32) -> Arc<CompiledCompoundKernel> {
-    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
+    use crate::{
+        kernel_registry::{KernelCacheKey, kernel_registry}, metals::flashattention::stages::{SdpaPrefillSplitKParams, SdpaPrefillSplitKReduceStage, SdpaPrefillVariant}
+    };
+
     let key = KernelCacheKey::new("sdpa_prefill_splitk_reduce", format!("w{}", prefill_warps));
-
     kernel_registry().get_or_build(key, || {
-        use crate::metals::flashattention::stages::{SdpaPrefillSplitKParams, SdpaPrefillSplitKReduceStage, SdpaPrefillVariant};
-        let mut dummy_core = SdpaPrefillSplitKReduceStage::new(SdpaPrefillSplitKParams::default());
-        dummy_core.variant = SdpaPrefillVariant { warps: prefill_warps };
-
+        let mut stage = SdpaPrefillSplitKReduceStage::new(SdpaPrefillSplitKParams::default());
+        stage.variant = SdpaPrefillVariant { warps: prefill_warps };
         CompoundKernel::new(&format!("sdpa_prefill_splitk_reduce_w{}", prefill_warps))
-            .main(dummy_core)
+            .main(stage)
             .with_manual_output(true)
             .compile()
     })
@@ -1051,7 +1045,7 @@ fn run_flash_decode_impl(
 
     let scale = 1.0 / (head_dim as f32).sqrt();
 
-    let sdpa_params = SdpaParamsResolved {
+    let sdpa_params = SdpaParams {
         kv_len: kv_seq_len,
         head_dim,
         scale,

@@ -4,7 +4,7 @@ use metallic_context::{
 };
 use metallic_foundry::{
     self, Foundry, MetalError, metals::{
-        flashattention::{stages::SdpaParamsResolved, step::RopeFlashDecodeStep}, rope::RopeParamsResolved
+        flashattention::{stages::SdpaParams, step::RopeFlashDecodeStep}, rope::RopeParamsResolved
     }, storage::Pooled, tensor::{F16 as FoundryF16, Tensor as FoundryTensor, TensorInit}
 };
 use rand::{Rng, rng};
@@ -88,7 +88,7 @@ fn test_sdpa_v2_context_parity() -> Result<(), MetalError> {
         position_offset: (kv_len - 1) as u32,
         total_elements: (total_batch * head_dim) as u32,
     };
-    let sdpa_params = SdpaParamsResolved {
+    let sdpa_params = SdpaParams {
         kv_len: kv_len as u32,
         head_dim: head_dim as u32,
         scale: 1.0 / (head_dim as f32).sqrt(),

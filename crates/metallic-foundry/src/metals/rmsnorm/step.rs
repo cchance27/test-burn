@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use metallic_macros::KernelArgs;
+use metallic_macros::{KernelArgs, Stage as DeriveStage};
 use serde::{Deserialize, Serialize};
 
-use super::RmsNormParamsResolved;
+use super::{RmsNormParams, RmsNormParamsResolved};
 use crate::{
-    Foundry, MetalError, ResolvedSymbols, compound::BufferArg, fusion::MetalPolicy, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::TensorArg
+    Foundry, MetalError, ResolvedSymbols, compound::{CompiledCompoundKernel, CompoundKernel}, fusion::MetalPolicy, policy::f16::PolicyF16, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 /// RMSNorm Step
@@ -121,15 +121,14 @@ impl CompiledStep for CompiledRmsNormStep {
             epsilon,
         };
 
-        let args = super::RmsNorm::new(
+        run_rmsnorm(
+            foundry,
             &input_args[0].clone(),
-            if input_args.len() > 1 { Some(input_args[1].clone()) } else { None },
+            if input_args.len() > 1 { Some(&input_args[1]) } else { None },
             &TensorArg::from_tensor(output),
             &TensorArg::from_tensor(gamma),
             params,
-        );
-
-        foundry.run(&args)
+        )
     }
 
     fn name(&self) -> &'static str {
@@ -141,80 +140,89 @@ impl CompiledStep for CompiledRmsNormStep {
 // Standalone Stage Implementation
 // =============================================================================
 
-#[derive(Debug, Clone, KernelArgs)]
+#[derive(Debug, Clone, KernelArgs, DeriveStage)]
+#[stage(
+    includes("rmsnorm/rmsnorm.metal"),
+    struct_defs = "RmsNormParams",
+    policy_field = "policy",
+    template_bindings(policy_struct = "self.policy.struct_name()"),
+    emit = r#"
+    RMSNORM_RUN_CORE_STAGE({policy_struct}, input, output, gamma, params, scale_bytes, gid, lid);
+"#,
+    out_var = "output_ptr"
+)]
 pub struct RmsNormStandaloneStage {
+    #[arg(buffer = 0, metal_type = "const device uchar*")]
+    pub input: TensorArg,
+    #[arg(buffer = 1, metal_type = "const device uchar*")]
+    pub scale_bytes: TensorArg,
+    #[arg(buffer = 2, output)]
+    pub output: TensorArg,
+    #[arg(buffer = 3, metal_type = "const device half*")]
+    pub gamma: TensorArg,
+    #[arg(buffer = 4, metal_type = "constant RmsNormParams*")]
     pub params: RmsNormParamsResolved,
-    #[arg(skip)]
+    #[arg(skip, stage_skip)]
     pub policy: Arc<dyn MetalPolicy>,
 }
 
-impl crate::compound::Stage for RmsNormStandaloneStage {
-    fn includes(&self) -> Vec<&'static str> {
-        vec!["rmsnorm/rmsnorm.metal", self.policy.header()]
+impl Default for RmsNormStandaloneStage {
+    fn default() -> Self {
+        Self {
+            input: TensorArg::default(),
+            scale_bytes: TensorArg::default(),
+            output: TensorArg::default(),
+            gamma: TensorArg::default(),
+            params: RmsNormParamsResolved::default(),
+            policy: Arc::new(PolicyF16),
+        }
     }
+}
 
-    fn buffer_args(&self) -> Vec<BufferArg> {
-        vec![
-            BufferArg {
-                name: "input",
-                metal_type: "const device uchar*",
-                buffer_index: 0,
-            },
-            BufferArg {
-                name: "scale_bytes",
-                metal_type: "const device uchar*",
-                buffer_index: 1,
-            },
-            BufferArg {
-                name: "output",
-                metal_type: "device half*",
-                buffer_index: 2,
-            },
-            BufferArg {
-                name: "gamma",
-                metal_type: "const device half*",
-                buffer_index: 3,
-            },
-            BufferArg {
-                name: "params",
-                metal_type: "constant RmsNormParams*",
-                buffer_index: 4,
-            },
-        ]
-    }
+fn get_rmsnorm_kernel(policy: Arc<dyn MetalPolicy>) -> Arc<CompiledCompoundKernel> {
+    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
 
-    fn emit(&self, _input_var: &str) -> (String, String) {
-        let policy_name = self.policy.struct_name();
-        (
-            "output_ptr".to_string(),
-            format!(
-                r#"
-    // RmsNormStandaloneStage
-    threadgroup float tg_inv_rms;
-    
-    run_rmsnorm_core<{policy_name}>(
-        input,
-        output,
-        gamma,
+    let key = KernelCacheKey::new("rmsnorm_standalone", policy.short_name().to_string());
+    kernel_registry().get_or_build(key, || {
+        let stage = RmsNormStandaloneStage {
+            policy: policy.clone(),
+            ..Default::default()
+        };
+        CompoundKernel::new(&format!("rmsnorm_standalone_{}", policy.short_name()))
+            .main(stage)
+            .with_manual_output(true)
+            .compile()
+    })
+}
+
+pub fn run_rmsnorm(
+    foundry: &mut Foundry,
+    input: &TensorArg,
+    scale_bytes: Option<&TensorArg>,
+    output: &TensorArg,
+    gamma: &TensorArg,
+    params: RmsNormParamsResolved,
+) -> Result<(), MetalError> {
+    let policy = crate::policy::resolve_policy(input.dtype);
+    let kernel = get_rmsnorm_kernel(policy.clone());
+    let args = RmsNormStandaloneStage {
+        input: input.clone(),
+        scale_bytes: scale_bytes.cloned().unwrap_or_else(|| input.clone()),
+        output: output.clone(),
+        gamma: gamma.clone(),
         params,
-        scale_bytes,
-        gid,
-        lid,
-        &tg_inv_rms
-    );
-            "#
-            ),
-        )
-    }
+        policy,
+    };
 
-    fn struct_defs(&self) -> String {
-        r#"
-struct RmsNormParams {
-    uint feature_dim;
-    uint total_elements;
-    float epsilon;
-};
-"#
-        .to_string()
-    }
+    let rows = if params.feature_dim == 0 {
+        0
+    } else {
+        params.total_elements / params.feature_dim
+    };
+    let dispatch = DispatchConfig {
+        grid: GridSize::d1(rows as usize),
+        group: ThreadgroupSize::d1(256),
+    };
+
+    foundry.run(&kernel.bind_arc(args, dispatch))
 }

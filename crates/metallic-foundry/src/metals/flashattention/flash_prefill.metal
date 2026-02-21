@@ -72,64 +72,8 @@ inline void load_tile_d128(
     }
 }
 
-// NOTE: This struct must match the Rust `SdpaPrefillParams` layout exactly.
-#ifndef METALLIC_SDPA_PREFILL_PARAMS_DEFINED
-#define METALLIC_SDPA_PREFILL_PARAMS_DEFINED
-struct SdpaPrefillParams {
-    uint kv_len;
-    uint head_dim;
-    float scale;
-    uint stride_k_s;
-    uint stride_v_s;
-    uint query_offset;
-    
-    // Strides
-    uint q_stride_b;
-    uint q_stride_h;
-    uint k_stride_b;
-    uint k_stride_h;
-    uint v_stride_b;
-    uint v_stride_h;
-    uint out_stride_b;
-    uint out_stride_h;
-    
-    uint q_stride_m;
-    uint out_stride_m;
-    uint group_size;
-    uint q_len; // Query sequence length (M)
-};
-#endif
-
-// Split-K prefill params (used only by the Split-K kernels below).
-// NOTE: This struct must match the Rust `SdpaPrefillSplitKParams` layout exactly.
-#ifndef METALLIC_SDPA_PREFILL_SPLITK_PARAMS_DEFINED
-#define METALLIC_SDPA_PREFILL_SPLITK_PARAMS_DEFINED
-struct SdpaPrefillSplitKParams {
-    uint kv_len;
-    uint head_dim;
-    float scale;
-    uint stride_k_s;
-    uint stride_v_s;
-    uint query_offset;
-
-    uint q_stride_b;
-    uint q_stride_h;
-    uint k_stride_b;
-    uint k_stride_h;
-    uint v_stride_b;
-    uint v_stride_h;
-    uint out_stride_b;
-    uint out_stride_h;
-
-    uint q_stride_m;
-    uint out_stride_m;
-    uint group_size;
-    uint q_len;
-
-    uint n_heads;
-    uint split_k;
-};
-#endif
+// NOTE: SdpaPrefillParams / SdpaPrefillSplitKParams are injected from Rust
+// (`#[derive(MetalStruct)]`) through stage `struct_defs` for a single source of truth.
 
 
 // Tiled prefill SDPA kernel for head_dim=64.
@@ -1037,5 +981,114 @@ inline void flash_prefill_splitk_reduce_d128(
         out_ptr[lane + 96] = (half)res[3];
     }
 }
+
+template<uint WARPS>
+ALWAYS_INLINE void run_sdpa_prefill_stage(
+    const device half* q,
+    const device half* k,
+    const device half* v,
+    device half* output,
+    constant SdpaPrefillParams& params,
+    uint3 gid,
+    uint3 lid,
+    uint3 tptg,
+    uint simd_lane_id,
+    uint simd_group_id,
+    threadgroup half* k_shared,
+    threadgroup half* v_shared
+) {
+    uint head_idx = gid.y;
+    uint batch_idx = gid.z;
+    uint kv_head_idx = head_idx / params.group_size;
+
+    ulong q_offset = batch_idx * params.q_stride_b + head_idx * params.q_stride_h;
+    const device half* q_ptr = q + q_offset;
+
+    ulong k_offset = batch_idx * params.k_stride_b + kv_head_idx * params.k_stride_h;
+    const device half* k_ptr = k + k_offset;
+
+    ulong v_offset = batch_idx * params.v_stride_b + kv_head_idx * params.v_stride_h;
+    const device half* v_ptr = v + v_offset;
+
+    ulong out_offset = batch_idx * params.out_stride_b + head_idx * params.out_stride_h;
+    device half* output_ptr = output + out_offset;
+
+    if (params.head_dim == 64) {
+        flash_prefill_tiled_d64<WARPS>(q_ptr, k_ptr, v_ptr, output_ptr, params, k_shared, v_shared, gid, lid, tptg, simd_lane_id, simd_group_id);
+    } else if (params.head_dim == 128) {
+        flash_prefill_tiled_d128<WARPS>(q_ptr, k_ptr, v_ptr, output_ptr, params, k_shared, v_shared, gid, lid, tptg, simd_lane_id, simd_group_id);
+    }
+}
+
+template<uint WARPS>
+ALWAYS_INLINE void run_sdpa_prefill_splitk_part_stage(
+    const device half* q,
+    const device half* k,
+    const device half* v,
+    device float* partial_acc,
+    device float* partial_m,
+    device float* partial_l,
+    constant SdpaPrefillSplitKParams& params,
+    uint3 gid,
+    uint3 lid,
+    uint3 tptg,
+    uint simd_lane_id,
+    uint simd_group_id,
+    threadgroup half* k_shared,
+    threadgroup half* v_shared
+) {
+    uint head_idx = gid.y;
+    uint kv_head_idx = head_idx / params.group_size;
+    const uint batch_idx = 0;
+
+    ulong q_offset = batch_idx * params.q_stride_b + head_idx * params.q_stride_h;
+    const device half* q_ptr = q + q_offset;
+
+    ulong k_offset = batch_idx * params.k_stride_b + kv_head_idx * params.k_stride_h;
+    const device half* k_ptr = k + k_offset;
+
+    ulong v_offset = batch_idx * params.v_stride_b + kv_head_idx * params.v_stride_h;
+    const device half* v_ptr = v + v_offset;
+
+    if (params.head_dim == 64) {
+        flash_prefill_splitk_part_d64<WARPS>(
+            q_ptr, k_ptr, v_ptr, partial_acc, partial_m, partial_l, params, k_shared, v_shared, gid, lid, tptg, simd_lane_id, simd_group_id
+        );
+    } else if (params.head_dim == 128) {
+        flash_prefill_splitk_part_d128<WARPS>(
+            q_ptr, k_ptr, v_ptr, partial_acc, partial_m, partial_l, params, k_shared, v_shared, gid, lid, tptg, simd_lane_id, simd_group_id
+        );
+    }
+}
+
+template<uint WARPS>
+ALWAYS_INLINE void run_sdpa_prefill_splitk_reduce_stage(
+    const device float* partial_acc,
+    const device float* partial_m,
+    const device float* partial_l,
+    device half* output,
+    constant SdpaPrefillSplitKParams& params,
+    uint3 gid,
+    uint3 lid,
+    uint3 tptg,
+    uint simd_lane_id,
+    uint simd_group_id
+) {
+    uint head_idx = gid.y;
+    const uint batch_idx = 0;
+
+    ulong out_offset = batch_idx * params.out_stride_b + head_idx * params.out_stride_h;
+    device half* output_ptr = output + out_offset;
+
+    if (params.head_dim == 64) {
+        flash_prefill_splitk_reduce_d64<WARPS>(partial_acc, partial_m, partial_l, output_ptr, params, gid, lid, tptg, simd_lane_id, simd_group_id);
+    } else if (params.head_dim == 128) {
+        flash_prefill_splitk_reduce_d128<WARPS>(partial_acc, partial_m, partial_l, output_ptr, params, gid, lid, tptg, simd_lane_id, simd_group_id);
+    }
+}
+
+#define SDPA_PREFILL_DECLARE_SHARED(NAME_K, NAME_V) \
+    threadgroup half NAME_K[32 * 128];              \
+    threadgroup half NAME_V[32 * 128]
 
 #endif

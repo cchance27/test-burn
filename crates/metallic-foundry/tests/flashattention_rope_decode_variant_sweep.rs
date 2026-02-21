@@ -3,7 +3,7 @@ use std::time::Instant;
 use half::f16;
 use metallic_foundry::{
     Foundry, MetalError, metals::{
-        flashattention::{FlashDecodeScalar, FlashDecodeTgOut, FlashDecodeVariant, stages::SdpaParamsResolved, step::RopeFlashDecodeStep}, rope::RopeParamsResolved
+        flashattention::{FlashDecodeScalar, FlashDecodeTgOut, FlashDecodeVariant, stages::SdpaParams, step::RopeFlashDecodeStep}, rope::RopeParamsResolved
     }, spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 use objc2_metal::MTLCommandBuffer as _;
@@ -303,7 +303,7 @@ fn flashattention_rope_decode_variant_sweep() -> Result<(), MetalError> {
                 position_offset: kv_len.saturating_sub(1),
                 total_elements: (n_heads as u32) * head_dim,
             };
-            let sdpa_params = SdpaParamsResolved {
+            let sdpa_params = SdpaParams {
                 kv_len,
                 head_dim,
                 scale: 1.0 / (head_dim as f32).sqrt(),

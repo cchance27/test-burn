@@ -1,7 +1,7 @@
 use half::f16;
 use metallic_foundry::{
     Foundry, metals::{
-        flashattention::{stages::SdpaParamsResolved, step::RopeFlashDecodeStep}, rope::RopeParamsResolved
+        flashattention::{stages::SdpaParams, step::RopeFlashDecodeStep}, rope::RopeParamsResolved
     }, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 use rand::Rng;
@@ -177,7 +177,7 @@ fn run_parity_test_case(batch: usize, heads: usize, kv_len: usize, head_dim: usi
         total_elements: (total_batch * head_dim) as u32,
     };
 
-    let sdpa_params = SdpaParamsResolved {
+    let sdpa_params = SdpaParams {
         kv_len: kv_len as u32,
         head_dim: head_dim as u32,
         scale: 1.0 / (head_dim as f32).sqrt(),

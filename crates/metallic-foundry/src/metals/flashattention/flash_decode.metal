@@ -96,6 +96,53 @@ METAL_FUNC float4 half4_to_float4(half4 v) {
     return float4((float)v[0], (float)v[1], (float)v[2], (float)v[3]);
 }
 
+template<typename TQ, typename TK, typename TV, typename TO>
+struct FlashHeadLayoutPtrs {
+    const device TQ* q_ptr;
+    const device TK* k_ptr;
+    const device TV* v_ptr;
+    device TO* output_ptr;
+};
+
+template<typename TQ, typename TK, typename TV, typename TO>
+ALWAYS_INLINE FlashHeadLayoutPtrs<TQ, TK, TV, TO> run_flash_head_layout_stage(
+    const device TQ* q,
+    const device TK* k,
+    const device TV* v,
+    device TO* output,
+    constant uint& q_stride_b,
+    constant uint& q_stride_h,
+    constant uint& k_stride_b,
+    constant uint& k_stride_h,
+    constant uint& v_stride_b,
+    constant uint& v_stride_h,
+    constant uint& out_stride_b,
+    constant uint& out_stride_h,
+    uint3 gid
+) {
+    uint head_idx = gid.y;
+    uint batch_idx = gid.z;
+
+    ulong q_offset = batch_idx * q_stride_b + head_idx * q_stride_h;
+
+    // Decode supports expanded KV cache and compact GQA cache from the same path.
+    uint q_heads = (q_stride_h > 0u) ? max(1u, q_stride_b / q_stride_h) : 1u;
+    uint k_heads = (k_stride_h > 0u) ? max(1u, k_stride_b / k_stride_h) : q_heads;
+    uint group_size = max(1u, q_heads / max(1u, k_heads));
+    uint kv_head_idx = head_idx / group_size;
+
+    ulong k_offset = batch_idx * k_stride_b + kv_head_idx * k_stride_h;
+    ulong v_offset = batch_idx * v_stride_b + kv_head_idx * v_stride_h;
+    ulong out_offset = batch_idx * out_stride_b + head_idx * out_stride_h;
+
+    FlashHeadLayoutPtrs<TQ, TK, TV, TO> out;
+    out.q_ptr = q + q_offset;
+    out.k_ptr = k + k_offset;
+    out.v_ptr = v + v_offset;
+    out.output_ptr = output + out_offset;
+    return out;
+}
+
 template<uint WARPS, uint KEYS_PER_WARP, bool TG_OUT_HALF>
 inline void flash_decode_warp_tiled_m1_half2(
     const threadgroup half2* q2_shared,
@@ -441,5 +488,136 @@ inline void flash_decode_warp_tiled_m1_half4(
         out4[lane] = half4((half)out[0], (half)out[1], (half)out[2], (half)out[3]);
     }
 }
+
+template<uint WARPS, uint KEYS_PER_WARP, bool TG_OUT_HALF>
+ALWAYS_INLINE void run_flash_decode_fused_half2_stage(
+    const threadgroup half2* q_vec,
+    const device half* k_ptr,
+    const device half* v_ptr,
+    device half* output_ptr,
+    constant SdpaParams& params,
+    uint warp,
+    uint lane,
+    threadgroup float* shared_warp_max,
+    threadgroup float* shared_warp_sums,
+    threadgroup typename FlashTgOut2<TG_OUT_HALF>::type* shared_warp_out
+) {
+    flash_decode_warp_tiled_m1_half2<WARPS, KEYS_PER_WARP, TG_OUT_HALF>(
+        q_vec,
+        k_ptr,
+        v_ptr,
+        output_ptr,
+        warp,
+        lane,
+        params,
+        shared_warp_max,
+        shared_warp_sums,
+        shared_warp_out
+    );
+}
+
+template<uint WARPS, uint KEYS_PER_WARP, bool TG_OUT_HALF>
+ALWAYS_INLINE void run_flash_decode_fused_half4_stage(
+    const threadgroup half4* q_vec,
+    const device half* k_ptr,
+    const device half* v_ptr,
+    device half* output_ptr,
+    constant SdpaParams& params,
+    uint warp,
+    uint lane,
+    threadgroup float* shared_warp_max,
+    threadgroup float* shared_warp_sums,
+    threadgroup typename FlashTgOut4<TG_OUT_HALF>::type* shared_warp_out
+) {
+    flash_decode_warp_tiled_m1_half4<WARPS, KEYS_PER_WARP, TG_OUT_HALF>(
+        q_vec,
+        k_ptr,
+        v_ptr,
+        output_ptr,
+        warp,
+        lane,
+        params,
+        shared_warp_max,
+        shared_warp_sums,
+        shared_warp_out
+    );
+}
+
+template<uint WARPS, uint KEYS_PER_WARP, bool TG_OUT_HALF>
+ALWAYS_INLINE void run_flash_decode_standalone_half2_stage(
+    const device half* q_ptr,
+    const device half* k_ptr,
+    const device half* v_ptr,
+    device half* output_ptr,
+    constant SdpaParams& params,
+    uint warp,
+    uint lane,
+    threadgroup half2* q_shared,
+    threadgroup float* shared_warp_max,
+    threadgroup float* shared_warp_sums,
+    threadgroup typename FlashTgOut2<TG_OUT_HALF>::type* shared_warp_out
+) {
+    if (warp == 0) {
+        q_shared[lane] = ((const device half2*)q_ptr)[lane];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    run_flash_decode_fused_half2_stage<WARPS, KEYS_PER_WARP, TG_OUT_HALF>(
+        q_shared,
+        k_ptr,
+        v_ptr,
+        output_ptr,
+        params,
+        warp,
+        lane,
+        shared_warp_max,
+        shared_warp_sums,
+        shared_warp_out
+    );
+}
+
+template<uint WARPS, uint KEYS_PER_WARP, bool TG_OUT_HALF, uint Q_VEC4>
+ALWAYS_INLINE void run_flash_decode_standalone_half4_stage(
+    const device half* q_ptr,
+    const device half* k_ptr,
+    const device half* v_ptr,
+    device half* output_ptr,
+    constant SdpaParams& params,
+    uint warp,
+    uint lane,
+    threadgroup half4* q_shared,
+    threadgroup float* shared_warp_max,
+    threadgroup float* shared_warp_sums,
+    threadgroup typename FlashTgOut4<TG_OUT_HALF>::type* shared_warp_out
+) {
+    if (warp == 0 && lane < Q_VEC4) {
+        q_shared[lane] = ((const device half4*)q_ptr)[lane];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    run_flash_decode_fused_half4_stage<WARPS, KEYS_PER_WARP, TG_OUT_HALF>(
+        q_shared,
+        k_ptr,
+        v_ptr,
+        output_ptr,
+        params,
+        warp,
+        lane,
+        shared_warp_max,
+        shared_warp_sums,
+        shared_warp_out
+    );
+}
+
+#define FLASH_DECODE_DECLARE_REDUCE_SHARED_HALF2(WARPS, TG_OUT_HALF, MAX_NAME, SUMS_NAME, OUT_NAME) \
+    threadgroup float MAX_NAME[WARPS];                                                                  \
+    threadgroup float SUMS_NAME[WARPS];                                                                 \
+    threadgroup typename FlashTgOut2<TG_OUT_HALF>::type OUT_NAME[WARPS * 32]
+
+#define FLASH_DECODE_DECLARE_REDUCE_SHARED_HALF4(WARPS, TG_OUT_HALF, MAX_NAME, SUMS_NAME, OUT_NAME) \
+    threadgroup float MAX_NAME[WARPS];                                                                  \
+    threadgroup float SUMS_NAME[WARPS];                                                                 \
+    threadgroup typename FlashTgOut4<TG_OUT_HALF>::type OUT_NAME[WARPS * 32]
+
+#define FLASH_DECODE_DECLARE_Q_SHARED_HALF2(NAME) threadgroup half2 NAME[32]
+#define FLASH_DECODE_DECLARE_Q_SHARED_HALF4(NAME) threadgroup half4 NAME[32]
 
 #endif // METALLIC_FLASH_DECODE_METAL

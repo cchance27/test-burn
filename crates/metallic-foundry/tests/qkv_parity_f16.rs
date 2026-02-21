@@ -155,9 +155,9 @@ fn test_qkv_parity_f16() {
             // FusedQkvArgs buffer indices:
             // input=6, k_dim=7, gamma=18, epsilon=19
             .prologue(RmsNormComputeStage::new(6, 7, 19))
-            .main(ParallelProjectStage::new(std::sync::Arc::new(PolicyF16)).with_norm(18, "inv_rms"))
+            .main(ParallelProjectStage::new(std::sync::Arc::new(PolicyF16)).with_norm("inv_rms"))
             .epilogue(MultiWarpReduceStage)
-            .epilogue(MultiWriteOutputStage)
+            .epilogue(MultiWriteOutputStage::new())
             .compile(),
     );
 
@@ -282,9 +282,9 @@ fn test_qkv_parity_f16_batched() {
             // FusedQkvArgs buffer indices:
             // input=6, k_dim=7, gamma=18, epsilon=19
             .prologue(RmsNormComputeStage::new(6, 7, 19))
-            .main(ParallelProjectStage::new(std::sync::Arc::new(PolicyF16)).with_norm(18, "inv_rms"))
+            .main(ParallelProjectStage::new(std::sync::Arc::new(PolicyF16)).with_norm("inv_rms"))
             .epilogue(MultiWarpReduceStage)
-            .epilogue(MultiWriteOutputStage)
+            .epilogue(MultiWriteOutputStage::new())
             .compile(),
     );
 

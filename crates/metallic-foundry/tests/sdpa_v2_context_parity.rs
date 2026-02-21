@@ -11,7 +11,7 @@ use metallic_context::{
 };
 use metallic_foundry::{
     Foundry, MetalError, metals::{
-        flashattention::{stages::SdpaParamsResolved, step::RopeFlashDecodeStep}, rope::RopeParamsResolved
+        flashattention::{stages::SdpaParams, step::RopeFlashDecodeStep}, rope::RopeParamsResolved
     }, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F16 as F16Type}, types::TensorArg
 };
 use rand::{Rng, rng};
@@ -124,7 +124,7 @@ fn test_sdpa_v2_vs_context_rope_sdpa() -> Result<(), MetalError> {
         position_offset: (kv_len - 1) as u32, // Q position
         total_elements: (total_batch * head_dim) as u32,
     };
-    let sdpa_params = SdpaParamsResolved {
+    let sdpa_params = SdpaParams {
         kv_len: kv_len as u32,
         head_dim: head_dim as u32,
         scale: 1.0 / (head_dim as f32).sqrt(),
@@ -295,7 +295,7 @@ fn test_sdpa_v2_vs_context_larger() -> Result<(), MetalError> {
             position_offset: (kv_len - 1) as u32,
             total_elements: (total_batch * head_dim) as u32,
         },
-        SdpaParamsResolved {
+        SdpaParams {
             kv_len: kv_len as u32,
             head_dim: head_dim as u32,
             scale: 1.0 / (head_dim as f32).sqrt(),
