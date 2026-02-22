@@ -31,17 +31,26 @@ const BLOCK_STAGE_PREFIXES: &[(&str, &str)] = &[
 /// Convert a metric event to latency rows for display in the TUI
 pub fn metric_event_to_latency_rows(event: &MetricEvent) -> Vec<LatencyRow> {
     match event {
-        MetricEvent::GpuOpCompleted { op_name, duration_us, .. } => map_gpu_op_completed(op_name)
-            .into_iter()
-            .map(|segments| build_latency_row(segments, *duration_us))
-            .collect(),
+        MetricEvent::GpuOpCompleted {
+            op_name,
+            duration_us,
+            data,
+            ..
+        } => {
+            // Convert FxHashMap to std::collections::HashMap for LatencyRow
+            let metadata = data.as_ref().map(|d| d.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+            map_gpu_op_completed(op_name)
+                .into_iter()
+                .map(|segments| build_latency_row(segments, *duration_us, metadata.clone()))
+                .collect()
+        }
         MetricEvent::InternalKernelCompleted {
             parent_op_name,
             internal_kernel_name,
             duration_us,
         } => map_internal_kernel(parent_op_name, internal_kernel_name)
             .into_iter()
-            .map(|segments| build_latency_row(segments, *duration_us))
+            .map(|segments| build_latency_row(segments, *duration_us, None))
             .collect(),
         _ => Vec::new(),
     }
@@ -175,6 +184,50 @@ pub fn map_hierarchical_gpu_op(path: &str) -> Option<Vec<String>> {
                 result_path.push("Dep Wait".to_string());
             }
             _ => {
+                // Check for matmul operations (format: matmul/backend or matmul_*/backend)
+                if seg.starts_with("matmul") {
+                    // Look ahead to see if next segment is a backend
+                    let seg_idx = segments.iter().position(|&s| s == seg);
+                    if let Some(idx) = seg_idx
+                        && idx + 1 < segments.len()
+                    {
+                        let backend = segments[idx + 1];
+                        // Format as "MatMul [OpType (BACKEND)]"
+                        let op_display = if seg == "matmul" {
+                            format!("MatMul [{}]", backend.to_uppercase())
+                        } else if seg == "matmul_bias_add" {
+                            format!("MatMul [BiasAdd ({})]", backend.to_uppercase())
+                        } else if seg == "matmul_alpha_beta" {
+                            format!("MatMul [AlphaBeta ({})]", backend.to_uppercase())
+                        } else if seg == "matmul_alpha_beta_cache" {
+                            format!("MatMul [AlphaBetaCache ({})]", backend.to_uppercase())
+                        } else {
+                            format!("MatMul [{}]", backend.to_uppercase())
+                        };
+
+                        if !has_forward_step && !has_block {
+                            result_path.push("Forward Step".to_string());
+                            has_forward_step = true;
+                        }
+                        if !result_path.contains(&op_display) {
+                            result_path.push(op_display);
+                        }
+                        continue; // Skip the backend segment (will be handled as part of matmul)
+                    }
+                }
+
+                // Skip standalone backend names that follow matmul
+                if matches!(seg, "mlx" | "mps" | "gemv") {
+                    // Check if previous segment was matmul-related
+                    let seg_idx = segments.iter().position(|&s| s == seg);
+                    if let Some(idx) = seg_idx
+                        && idx > 0
+                        && segments[idx - 1].starts_with("matmul")
+                    {
+                        continue; // Skip this backend segment
+                    }
+                }
+
                 // Check if this segment matches a known block stage
                 if let Some(stage_segments) = map_block_stage(seg) {
                     if !has_forward_step {
@@ -282,8 +335,12 @@ pub fn map_block_stage(name: &str) -> Option<Vec<String>> {
     None
 }
 
-/// Build a latency row from segments and duration
-pub fn build_latency_row(segments: Vec<String>, duration_us: u64) -> LatencyRow {
+/// Build a latency row from segments, duration, and optional metadata
+pub fn build_latency_row(
+    segments: Vec<String>,
+    duration_us: u64,
+    metadata: Option<std::collections::HashMap<String, String>>,
+) -> LatencyRow {
     let level = segments.len().saturating_sub(1) as u8;
     let label = segments.join("::");
     let duration_ms = duration_us as f64 / 1000.0;
@@ -292,6 +349,7 @@ pub fn build_latency_row(segments: Vec<String>, duration_us: u64) -> LatencyRow 
         last_ms: duration_ms,
         average_ms: duration_ms,
         level,
+        metadata,
     }
 }
 
@@ -370,6 +428,24 @@ pub fn metric_event_to_memory_rows(event: &MetricEvent) -> Vec<MemoryRow> {
                 }
                 current_node.value = value;
             }
+
+            fn aggregate_values(node: &mut Node) -> u64 {
+                let mut sum = node.value;
+                for child in node.children.values_mut() {
+                    sum += aggregate_values(child);
+                }
+                // If node has no value but has children, its value is the sum of children
+                // If it has a value (leaf), sum includes it.
+                // However, the display logic expects 'value' to be the total size of the node (inclusive of children)
+                // So we update node.value to sum.
+                // BUT: if we update node.value, we double count if we run this multiple times (we won't).
+                // Issue: If leaf has value 10, sum is 10. node.value becomes 10.
+                // If parent has value 0, sum is 10. parent.value becomes 10.
+                node.value = sum;
+                sum
+            }
+
+            aggregate_values(&mut root);
 
             fn build_rows(node: &Node, level: u8, rows: &mut Vec<MemoryRow>) {
                 let mut children_to_process: Vec<_> = node.children.iter().collect();

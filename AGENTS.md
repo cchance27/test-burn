@@ -10,11 +10,10 @@ The following are design goals and rules for our Agents and Developers for the p
 - Perform cargo build runs periodically to make sure to avoid regressions.
 - Do not roll back code or delete files without checking with a superior. 
 -  The project is stored on git commits, so you can reference git diffs and status when you want to review recent changes.
--  Before turning in a task as complete make sure that critical cargo commands were run.
+- Before we perform a git commit (when requested by the user), perform final cleanup checks.
    a. Run `cargo +nightly fmt` && `cargo clippy --fix --allow-dirty --allow-staged` && `cargo build`
 - NEVER return a task or mark it as complete with PLACEHOLDER functions are placeholder comments, we implement functions and components fully. Only ever use placeholders if we plan to replace the placeholder in our next step that we're already planning to execute, and placeholders should have todo!() so that it will crash out if we forget to finish them.
 - Always use idiomatic rust where possible.
-- When creating test and validating our code and functions, we should use pytorch or numpy for 1 off experiments or to generate expected outputs, for more complex tests that need large comparison data we can use burn-rs as a comparison tool (only in tests)
 - Don't force tests to pass ever, tests should be properly setup and logical, if a test fails it either has a mistake OR its showing a valid issue in our code that should be researched and fixed correctly.
 - Make sure we use strongly typed errors whenever possible (avoid unwraps and expect outside of tests)
 - Remember performance is #1 priority, so cloning should be minimized we should try to use zero copy abstractions where possible. 
@@ -27,4 +26,7 @@ The following are design goals and rules for our Agents and Developers for the p
 - Please remember to context.synchronize() as needed to make sure that tensors are settled in the gpu memory when created or used.
 - If updating code that has comments that reference it make sure the comments are updated to match the new changes.
 - Use ideomatic rust always
-- DO NOT edit cargo.toml and cargo.lock, to add or modify crates use cargo add/remove etc.
+- Always use `cargo add xxxx` to add packages don't manually edit cargo files.
+- When reviewing json files, use jq, grep and other bash commands, if more advanced parsing is needed use a python one liner, as json files could be extremely large so cating them or reading those files directly could be a major issue.
+- When reviewing logs or csv files use bash commands (grep, awk, sed, cut, sort etc), as the files may be very large so reading them or catting them is ill advised. 
+- When executing cargo commands make sure to use options like -q and --message-format=short to minimize output and maximize context usage.

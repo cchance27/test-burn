@@ -6,9 +6,9 @@ debug_compare_out
 debug_dumps
 **/pytorch/*.json
 *.jsonl
-*.json
 *.log
 *.tsv
+cache*.json
 .DS_Store
 test.py
 **/Cargo.lock
@@ -17,8 +17,13 @@ experimental
 .vscode
 venv
 *.png
-tools/metal_probes/*.air
+tools/metal_probes/**/*.air
 tools/metal_probes/.build
+tools/metal_probes/.cache
 *.metallib
 *.air
 .zed
+*.cpython*
+__pycache__
+.trae
+metallic.db

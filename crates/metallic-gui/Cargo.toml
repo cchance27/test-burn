@@ -1,0 +1,32 @@
+[package]
+name = "metallic-gui"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "metallic-gui"
+path = "src/main.rs"
+
+[dependencies]
+gpui = "0.2.2"
+gpui-component = "0.5.0"
+unicode-segmentation = "1.11"
+chrono = { version = "0.4", features = ["clock"] }
+smol = "2.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rusqlite = { version = "0.31", features = ["bundled"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustc-hash = "2.0"
+parking_lot = "0.12"
+rand = "0.8"
+
+# Metallic crates for inference
+metallic-foundry = { path = "../metallic-foundry" }
+metallic-loader = { path = "../metallic-loader" }
+metallic-sdk = { path = "../metallic-sdk" }
+
+# Pin core-text to avoid conflicting core_graphics versions
+core-text = "=21.0.0"

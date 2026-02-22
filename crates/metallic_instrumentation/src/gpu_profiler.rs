@@ -49,6 +49,7 @@ struct GpuProfilerScopeInner {
     op_name: String,
     backend: String,
     cpu_start: Instant,
+    data: Option<FxHashMap<String, String>>,
 }
 
 impl GpuProfilerScopeInner {
@@ -58,6 +59,7 @@ impl GpuProfilerScopeInner {
             op_name: self.op_name,
             backend: self.backend,
             cpu_duration,
+            data: self.data,
         };
 
         self.state.push_record(record);
@@ -108,6 +110,32 @@ fn host_interval(start: f64, end: f64) -> Option<Duration> {
     Some(Duration::from_secs_f64(delta))
 }
 
+/// Best-effort GPU runtime for a completed command buffer (microseconds).
+///
+/// This reads timing metadata reported by Metal (`GPUStartTime/GPUEndTime` or
+/// `kernelStartTime/kernelEndTime`). Returns `None` when timing is unavailable.
+#[inline]
+pub fn command_buffer_best_duration_us(command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) -> Option<u64> {
+    let timing = CommandBufferTiming::from_command_buffer(command_buffer);
+    timing.best_duration().map(|duration| {
+        let us = (duration.as_secs_f64() * 1e6).round();
+        us.max(1.0) as u64
+    })
+}
+
+/// Best-effort (`gpu_us`, `kernel_us`) timing tuple for a completed command buffer (microseconds).
+///
+/// This is mainly intended for diagnostics and should be treated as optional telemetry.
+#[inline]
+pub fn command_buffer_timing_us(command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) -> (Option<u64>, Option<u64>) {
+    let timing = CommandBufferTiming::from_command_buffer(command_buffer);
+    let gpu_us = timing.gpu.map(|duration| ((duration.as_secs_f64() * 1e6).round().max(1.0)) as u64);
+    let kernel_us = timing
+        .kernel
+        .map(|duration| ((duration.as_secs_f64() * 1e6).round().max(1.0)) as u64);
+    (gpu_us, kernel_us)
+}
+
 impl GpuProfilerState {
     fn new(key: usize, dispatch: Dispatch, record_command_buffer_timing: bool) -> Self {
         Self {
@@ -155,28 +183,29 @@ impl GpuProfilerState {
 
         // Group records by (base op_name without '#sequence', backend) and aggregate CPU durations for weighting
         // This collapses multiple encoder dispatches for the same logical op into a single group
-        let mut groups: FxHashMap<(String, String), Vec<Duration>> = FxHashMap::default();
+        type GroupKey = (String, String);
+        type GroupValue = (Vec<Duration>, Option<FxHashMap<String, String>>);
+        let mut groups: FxHashMap<GroupKey, GroupValue> = FxHashMap::default();
         for rec in records {
             let base_name = rec.op_name.split('#').next().unwrap_or(&rec.op_name).to_string();
-            groups.entry((base_name, rec.backend)).or_default().push(rec.cpu_duration);
+            let entry = groups.entry((base_name, rec.backend)).or_insert_with(|| (Vec::new(), None));
+            entry.0.push(rec.cpu_duration);
+            // Store the data from the first record in the group
+            if entry.1.is_none() {
+                entry.1 = rec.data;
+            }
         }
 
         let mut command_buffer_duration = self.command_buffer_runtime();
-        // If Metal reports an unrealistically small GPU time but we have a CPU commit->complete elapsed,
-        // use the CPU elapsed as a fallback approximation of the true kernel time (common when heavy work runs
-        // in an internal CB not visible to our profiler).
-        if let Some(best) = command_buffer_duration {
-            let tiny = best < Duration::from_micros(100);
-            if tiny
-                && let Ok(mut instant_guard) = self.cpu_commit_instant.lock()
-                && let Some(committed_at) = instant_guard.take()
-            {
-                let elapsed = committed_at.elapsed();
-                // If elapsed is meaningfully larger than the tiny reported GPU time, prefer it.
-                if elapsed > best.saturating_mul(5) {
-                    command_buffer_duration = Some(elapsed);
-                }
-            }
+        // When profiling is enabled, prefer GPU timing directly from Metal when available
+        // rather than falling back to CPU timing to match Swift's behavior
+        if command_buffer_duration.is_none()
+            && let Ok(mut instant_guard) = self.cpu_commit_instant.lock()
+            && let Some(committed_at) = instant_guard.take()
+        {
+            // Only use CPU fallback if no GPU timing is available at all
+            let elapsed = committed_at.elapsed();
+            command_buffer_duration = Some(elapsed);
         }
         trace!(
             "CB_COMPLETE gpu_or_kernel_timing_present={} groups_len={}",
@@ -200,11 +229,11 @@ impl GpuProfilerState {
         let dominant_index: Option<usize> = if command_buffer_duration.is_some() && groups.len() > 1 {
             let mut max_cpu = Duration::from_micros(0);
             let mut idx = 0usize;
-            for (i, (_k, cpu_durations)) in groups.iter().enumerate() {
+            for (i, (_k, (cpu_durations, _))) in groups.iter().enumerate() {
                 let cpu_total: Duration = cpu_durations
                     .iter()
                     .copied()
-                    .fold(Duration::from_micros(0), |acc, d| acc.saturating_add(d));
+                    .fold(Duration::from_micros(0), std::time::Duration::saturating_add);
                 if cpu_total > max_cpu {
                     max_cpu = cpu_total;
                     idx = i;
@@ -216,11 +245,11 @@ impl GpuProfilerState {
         };
 
         let groups_len = groups.len();
-        for (i, ((op_name, backend), cpu_durations)) in groups.into_iter().enumerate() {
+        for (i, ((op_name, backend), (cpu_durations, data))) in groups.into_iter().enumerate() {
             let cpu_total: Duration = cpu_durations
                 .iter()
                 .copied()
-                .fold(Duration::from_micros(0), |acc, d| acc.saturating_add(d));
+                .fold(Duration::from_micros(0), std::time::Duration::saturating_add);
 
             // Decide timing source:
             // - If this CB/op was marked as MPS-based, prefer CPU scope elapsed; else
@@ -263,10 +292,12 @@ impl GpuProfilerState {
             }
 
             let duration_us = (duration.as_secs_f64() * 1e6).max(1.0).round() as u64;
+
             record_metric_async!(MetricEvent::GpuOpCompleted {
                 op_name,
                 backend,
                 duration_us,
+                data,
             });
         }
 
@@ -329,6 +360,7 @@ struct GpuOpRecord {
     op_name: String,
     backend: String,
     cpu_duration: Duration,
+    data: Option<FxHashMap<String, String>>,
 }
 
 // SAFETY: `GpuOpRecord` only contains owned data and `Duration`, which are safe to
@@ -360,7 +392,7 @@ impl GpuProfiler {
 
     pub fn attach<C: ProfiledCommandBuffer + ?Sized>(command_buffer: &C, record_command_buffer_timing: bool) -> Option<Self> {
         let key = buffer_key(command_buffer);
-        let dispatch = dispatcher::get_default(|dispatch| dispatch.clone());
+        let dispatch = dispatcher::get_default(std::clone::Clone::clone);
         let state = Arc::new(GpuProfilerState::new(key, dispatch, record_command_buffer_timing));
 
         registry()
@@ -378,7 +410,12 @@ impl GpuProfiler {
         Some(Self { state })
     }
 
-    fn scope_for_encoder(state: Arc<GpuProfilerState>, op_name: String, backend: String) -> Option<GpuProfilerScope> {
+    fn scope_for_encoder(
+        state: Arc<GpuProfilerState>,
+        op_name: String,
+        backend: String,
+        data: Option<FxHashMap<String, String>>,
+    ) -> Option<GpuProfilerScope> {
         // Mark the CPU scope begin time the first time we create a scope for this CB
         if let Ok(mut begin) = state.cpu_scope_begin.lock()
             && begin.is_none()
@@ -392,6 +429,7 @@ impl GpuProfiler {
                 op_name,
                 backend,
                 cpu_start: Instant::now(),
+                data,
             }),
         })
     }
@@ -402,9 +440,10 @@ impl GpuProfiler {
             .lock()
             .expect("registry mutex poisoned")
             .get(&key)
-            .and_then(|weak| weak.upgrade())
+            .and_then(std::sync::Weak::upgrade)
     }
 
+    #[must_use] 
     pub fn profile_compute(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
@@ -413,9 +452,23 @@ impl GpuProfiler {
     ) -> Option<GpuProfilerScope> {
         let state = Self::from_command_buffer(command_buffer)?;
         let sequence = state.next_sequence();
-        Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend)
+        Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend, None)
     }
 
+    #[must_use] 
+    pub fn profile_compute_with_data(
+        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+        op_name: String,
+        backend: String,
+        data: FxHashMap<String, String>,
+    ) -> Option<GpuProfilerScope> {
+        let state = Self::from_command_buffer(command_buffer)?;
+        let sequence = state.next_sequence();
+        Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend, Some(data))
+    }
+
+    #[must_use] 
     pub fn profile_blit(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _encoder: &Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>,
@@ -424,9 +477,10 @@ impl GpuProfiler {
     ) -> Option<GpuProfilerScope> {
         let state = Self::from_command_buffer(command_buffer)?;
         let sequence = state.next_sequence();
-        Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend)
+        Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend, None)
     }
 
+    #[must_use] 
     pub fn profile_command_buffer(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         op_name: String,
@@ -434,6 +488,18 @@ impl GpuProfiler {
     ) -> Option<GpuProfilerScope> {
         let state = Self::from_command_buffer(command_buffer)?;
         let sequence = state.next_sequence();
-        Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend)
+        Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend, None)
+    }
+
+    #[must_use] 
+    pub fn profile_command_buffer_with_data(
+        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        op_name: String,
+        backend: String,
+        data: FxHashMap<String, String>,
+    ) -> Option<GpuProfilerScope> {
+        let state = Self::from_command_buffer(command_buffer)?;
+        let sequence = state.next_sequence();
+        Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend, Some(data))
     }
 }

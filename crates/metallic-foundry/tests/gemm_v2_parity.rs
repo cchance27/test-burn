@@ -1,0 +1,1249 @@
+//! GemmV2 Parity Test Suite
+//!
+//! Compares GemmV2 (Stage composition) against CPU reference.
+//!
+//! Coverage:
+//! - F16 x F16 GEMM
+//! - F16 x Q8 GEMM (quantized weights with scale bytes)
+//! - Various M,N,K shapes: small, prefill-relevant, unaligned
+//! - Transpose modes (NN, NT)
+
+use half::f16;
+use metallic_foundry::{
+    Foundry, metals::{
+        gemm::{
+            GemmV2Step, step::{GemmParams, GemmV2Args, gemm_dispatch_config, get_gemm_kernel}
+        }, mma::stages::TileConfig
+    }, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, spec::{DynamicValue, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit}, types::TensorArg
+};
+use rand::{Rng, rng};
+use serial_test::serial;
+
+// ============================================================================
+// Test Configuration
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestQuantization {
+    F16,
+    Q8,
+    Q4,
+}
+
+#[derive(Clone)]
+struct GemmTestConfig {
+    m: usize,
+    n: usize,
+    k: usize,
+    transpose_a: bool,
+    transpose_b: bool,
+    tile_config: Option<TileConfig>,
+    quant_b: TestQuantization,
+}
+
+impl Default for GemmTestConfig {
+    fn default() -> Self {
+        Self {
+            m: 32,
+            n: 32,
+            k: 32,
+            transpose_a: false,
+            transpose_b: false,
+            tile_config: None,
+            quant_b: TestQuantization::F16,
+        }
+    }
+}
+
+// ============================================================================
+// CPU Reference Implementation
+// ============================================================================
+
+fn quantize_q8(data: &[f16], n: usize, k: usize, transpose_b: bool) -> (Vec<u8>, Vec<u8>) {
+    let blocks_per_k = k.div_ceil(32);
+    let mut weights = vec![0u8; n * blocks_per_k * 32];
+    let mut scales = vec![0u8; n * blocks_per_k * 2];
+
+    for ni in 0..n {
+        for ki_block in 0..blocks_per_k {
+            let mut max_abs = 0.0f32;
+            let k_start = ki_block * 32;
+
+            for j in 0..32 {
+                let ki = k_start + j;
+                if ki < k {
+                    let val = if transpose_b {
+                        data[ni * k + ki].to_f32()
+                    } else {
+                        data[ki * n + ni].to_f32()
+                    };
+                    max_abs = max_abs.max(val.abs());
+                }
+            }
+
+            let scale = max_abs / 127.0;
+            let scale_f16 = f16::from_f32(scale);
+            let s_idx = (ni * blocks_per_k + ki_block) * 2;
+            scales[s_idx..s_idx + 2].copy_from_slice(&scale_f16.to_le_bytes());
+
+            for j in 0..32 {
+                let ki = k_start + j;
+                let q = if ki < k {
+                    let val = if transpose_b {
+                        data[ni * k + ki].to_f32()
+                    } else {
+                        data[ki * n + ni].to_f32()
+                    };
+                    if scale > 0.0 {
+                        (val / scale).round().clamp(-128.0, 127.0) as i8
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                weights[ni * blocks_per_k * 32 + ki_block * 32 + j] = q as u8;
+            }
+        }
+    }
+    (weights, scales)
+}
+
+fn quantize_q4_0(data: &[f16], n: usize, k: usize, transpose_b: bool) -> (Vec<u8>, Vec<u8>) {
+    let blocks_per_k = k.div_ceil(32);
+    // Weight buffer (16 bytes per 32 weights) in Foundry's internal packed order:
+    // out[j] = (w[2j+1] << 4) | w[2j]
+    let mut weights = vec![0u8; n * blocks_per_k * 16];
+    // Scale buffer (2 bytes per block)
+    let mut scales = vec![0u8; n * blocks_per_k * 2];
+
+    for ni in 0..n {
+        for ki_block in 0..blocks_per_k {
+            let mut max_abs = 0.0f32;
+            let k_start = ki_block * 32;
+
+            for j in 0..32 {
+                let ki = k_start + j;
+                if ki < k {
+                    let val = if transpose_b {
+                        data[ni * k + ki].to_f32()
+                    } else {
+                        data[ki * n + ni].to_f32()
+                    };
+                    max_abs = max_abs.max(val.abs());
+                }
+            }
+
+            let scale = max_abs / 7.0;
+            let scale_f16 = f16::from_f32(scale);
+            let s_idx = (ni * blocks_per_k + ki_block) * 2;
+            scales[s_idx..s_idx + 2].copy_from_slice(&scale_f16.to_le_bytes());
+
+            // GGML Q4_0 stores qs[0..15] where:
+            // - low nibble encodes weight j
+            // - high nibble encodes weight j+16
+            //
+            // Foundry internally wants adjacent-pair packing; perform the same transform as the loader.
+            let mut qs = [0u8; 16];
+            for (j, q) in qs.iter_mut().enumerate() {
+                let ki0 = k_start + j;
+                let ki1 = k_start + 16 + j;
+
+                let q0 = if ki0 < k {
+                    let val = if transpose_b {
+                        data[ni * k + ki0].to_f32()
+                    } else {
+                        data[ki0 * n + ni].to_f32()
+                    };
+                    if scale > 0.0 {
+                        (val / scale).round().clamp(-8.0, 7.0) as i8
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+
+                let q1 = if ki1 < k {
+                    let val = if transpose_b {
+                        data[ni * k + ki1].to_f32()
+                    } else {
+                        data[ki1 * n + ni].to_f32()
+                    };
+                    if scale > 0.0 {
+                        (val / scale).round().clamp(-8.0, 7.0) as i8
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+
+                let uq0 = (q0 + 8) as u8; // 0..15
+                let uq1 = (q1 + 8) as u8; // 0..15
+
+                *q = (uq1 << 4) | uq0;
+            }
+
+            // De-interleave GGML layout into adjacent pairs for the Metal policy.
+            let w_block = &mut weights[ni * blocks_per_k * 16 + ki_block * 16..ni * blocks_per_k * 16 + ki_block * 16 + 16];
+            for i in 0..8 {
+                let b0 = qs[2 * i];
+                let b1 = qs[2 * i + 1];
+                w_block[i] = ((b1 & 0x0F) << 4) | (b0 & 0x0F);
+                w_block[i + 8] = (b1 & 0xF0) | (b0 >> 4);
+            }
+        }
+    }
+    (weights, scales)
+}
+
+fn run_cpu_gemm_f16(
+    m: usize,
+    n: usize,
+    k: usize,
+    a: &[f16], // [M, K] or [K, M] if transposed
+    b: &[f16], // [K, N] or [N, K] if transposed
+    transpose_a: bool,
+    transpose_b: bool,
+) -> Vec<f16> {
+    let mut output = vec![f16::from_f32(0.0); m * n];
+
+    for i in 0..m {
+        for j in 0..n {
+            let mut acc = 0.0f32;
+            for ki in 0..k {
+                // Get A element
+                let a_idx = if transpose_a {
+                    ki * m + i // A is [K, M], reading A[ki, i]
+                } else {
+                    i * k + ki // A is [M, K], reading A[i, ki]
+                };
+
+                // Get B element
+                let b_idx = if transpose_b {
+                    j * k + ki // B is [N, K], reading B[j, ki]
+                } else {
+                    ki * n + j // B is [K, N], reading B[ki, j]
+                };
+
+                let a_val = a[a_idx].to_f32();
+                let b_val = b[b_idx].to_f32();
+                acc += a_val * b_val;
+            }
+            output[i * n + j] = f16::from_f32(acc);
+        }
+    }
+    output
+}
+
+// ============================================================================
+// Test Runner
+// ============================================================================
+
+struct SimpleQ8Tensor {
+    data: Vec<u8>,
+    scales: Vec<u8>,
+    blocks_per_k: usize,
+}
+
+fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
+    let mut foundry = Foundry::new().unwrap();
+    let mut rng = rng();
+
+    // Determine tensor dimensions based on transpose flags
+    let a_dims = if cfg.transpose_a {
+        vec![cfg.k, cfg.m] // [K, M] when transposed
+    } else {
+        vec![cfg.m, cfg.k] // [M, K] normal
+    };
+
+    let b_dims = if cfg.transpose_b {
+        vec![cfg.n, cfg.k] // [N, K] when transposed
+    } else {
+        vec![cfg.k, cfg.n] // [K, N] normal
+    };
+
+    let a_rows = if cfg.transpose_a { cfg.k } else { cfg.m };
+    let a_cols = if cfg.transpose_a { cfg.m } else { cfg.k };
+    let a_data: Vec<f16> = (0..a_rows * a_cols)
+        .map(|_| f16::from_f32(rng.random_range(-1.0f32..1.0f32)))
+        .collect();
+    let (b_rows, b_cols) = if cfg.transpose_b { (cfg.n, cfg.k) } else { (cfg.k, cfg.n) };
+    let b_data: Vec<f16> = (0..b_rows * b_cols)
+        .map(|_| f16::from_f32(rng.random_range(-1.0f32..1.0f32)))
+        .collect();
+
+    // Create tensors
+    let a = FoundryTensor::<metallic_foundry::F16, Pooled>::new(&mut foundry, a_dims, TensorInit::CopyFrom(&a_data)).unwrap();
+
+    let (b_quantized, b_f16): (Option<SimpleQ8Tensor>, Option<FoundryTensor<metallic_foundry::F16, Pooled>>) = match cfg.quant_b {
+        TestQuantization::Q8 => {
+            let (w, s) = quantize_q8(&b_data, cfg.n, cfg.k, cfg.transpose_b);
+            let blocks_per_k = cfg.k.div_ceil(32);
+            (Some(SimpleQ8Tensor { data: w, scales: s, blocks_per_k }), None)
+        }
+        TestQuantization::Q4 => (None, None),
+        TestQuantization::F16 => {
+            let b =
+                FoundryTensor::<metallic_foundry::F16, Pooled>::new(&mut foundry, b_dims.clone(), TensorInit::CopyFrom(&b_data)).unwrap();
+            (None, Some(b))
+        }
+    };
+
+    let output = FoundryTensor::<metallic_foundry::F16, Pooled>::new(&mut foundry, vec![cfg.m, cfg.n], TensorInit::Uninitialized).unwrap();
+
+    // ========== Run CPU Reference ==========
+    let cpu_b_data = match cfg.quant_b {
+        TestQuantization::Q8 => {
+            let q8 = b_quantized.as_ref().unwrap();
+            let weights = &q8.data;
+            let scales_raw = &q8.scales;
+            let mut dequant = vec![f16::ZERO; cfg.n * cfg.k];
+            let blocks_per_k = q8.blocks_per_k;
+
+            for ni in 0..cfg.n {
+                for ki_block in 0..blocks_per_k {
+                    let s_idx = (ni * blocks_per_k + ki_block) * 2;
+                    let scale_bits = (scales_raw[s_idx] as u16) | ((scales_raw[s_idx + 1] as u16) << 8);
+                    let scale = f16::from_bits(scale_bits).to_f32();
+
+                    for j in 0..32 {
+                        let ki = ki_block * 32 + j;
+                        if ki < cfg.k {
+                            let w_val = weights[ni * blocks_per_k * 32 + ki_block * 32 + j] as i8;
+                            let val = f16::from_f32(w_val as f32 * scale);
+                            if cfg.transpose_b {
+                                dequant[ni * cfg.k + ki] = val;
+                            } else {
+                                dequant[ki * cfg.n + ni] = val;
+                            }
+                        }
+                    }
+                }
+            }
+            dequant
+        }
+        TestQuantization::Q4 => {
+            let (weights, scales) = quantize_q4_0(&b_data, cfg.n, cfg.k, cfg.transpose_b);
+            let mut dequant = vec![f16::ZERO; cfg.n * cfg.k];
+            let blocks_per_k = cfg.k.div_ceil(32);
+
+            for ni in 0..cfg.n {
+                for ki_block in 0..blocks_per_k {
+                    let s_idx = (ni * blocks_per_k + ki_block) * 2;
+                    let scale_bits = (scales[s_idx] as u16) | ((scales[s_idx + 1] as u16) << 8);
+                    let scale = f16::from_bits(scale_bits).to_f32();
+
+                    for j in 0..16 {
+                        let b = weights[ni * blocks_per_k * 16 + ki_block * 16 + j];
+                        let uq0 = b & 0x0F;
+                        let uq1 = b >> 4;
+
+                        let q0 = (uq0 as i8) - 8;
+                        let q1 = (uq1 as i8) - 8;
+
+                        let ki0 = ki_block * 32 + 2 * j;
+                        let ki1 = ki_block * 32 + 2 * j + 1;
+
+                        if ki0 < cfg.k {
+                            let val = f16::from_f32(q0 as f32 * scale);
+                            if cfg.transpose_b {
+                                dequant[ni * cfg.k + ki0] = val;
+                            } else {
+                                dequant[ki0 * cfg.n + ni] = val;
+                            }
+                        }
+                        if ki1 < cfg.k {
+                            let val = f16::from_f32(q1 as f32 * scale);
+                            if cfg.transpose_b {
+                                dequant[ni * cfg.k + ki1] = val;
+                            } else {
+                                dequant[ki1 * cfg.n + ni] = val;
+                            }
+                        }
+                    }
+                }
+            }
+            dequant
+        }
+        TestQuantization::F16 => b_data.clone(),
+    };
+    let cpu_output = run_cpu_gemm_f16(cfg.m, cfg.n, cfg.k, &a_data, &cpu_b_data, cfg.transpose_a, cfg.transpose_b);
+
+    // ========== Run V2 GEMM ==========
+    let tile_config = cfg.tile_config.unwrap_or_else(|| TileConfig::auto_select(cfg.m, cfg.n));
+    let params = GemmParams::simple(
+        cfg.m as i32,
+        cfg.n as i32,
+        cfg.k as i32,
+        cfg.transpose_a,
+        cfg.transpose_b,
+        tile_config,
+    );
+    let dispatch = gemm_dispatch_config(&params, tile_config);
+
+    // Get kernel
+    let kernel = get_gemm_kernel(
+        std::sync::Arc::new(PolicyF16),
+        match cfg.quant_b {
+            TestQuantization::F16 => std::sync::Arc::new(PolicyF16),
+            TestQuantization::Q8 => std::sync::Arc::new(PolicyQ8),
+            TestQuantization::Q4 => std::sync::Arc::new(metallic_foundry::policy::q4_0::PolicyQ4_0),
+        },
+        cfg.transpose_a,
+        cfg.transpose_b,
+        tile_config,
+        false,
+        false,
+        Activation::None,
+    );
+
+    let (b_arg, b_scales_arg) = match cfg.quant_b {
+        TestQuantization::Q8 => {
+            let q8 = b_quantized.as_ref().unwrap();
+            let b_dims = vec![cfg.n, cfg.k.div_ceil(32) * 32];
+            let s_dims = vec![cfg.n, cfg.k.div_ceil(32)];
+
+            // Create Metal buffers for Q8 data
+            let w_buf = foundry.device.new_buffer_with_bytes(
+                metallic_foundry::types::nonnull_void_ptr_from_slice(&q8.data, "Q8_W").unwrap(),
+                q8.data.len(),
+                metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+            ).unwrap();
+            
+            let s_buf = foundry.device.new_buffer_with_bytes(
+                metallic_foundry::types::nonnull_void_ptr_from_slice(&q8.scales, "Q8_S").unwrap(),
+                q8.scales.len(),
+                metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+            ).unwrap();
+
+            let b_data_arg = TensorArg::from_buffer(
+                w_buf,
+                metallic_foundry::Dtype::Q8_0,
+                b_dims.clone(),
+                metallic_foundry::tensor::compute_strides(&b_dims),
+            );
+            let b_scales_arg = TensorArg::from_buffer(
+                s_buf,
+                metallic_foundry::Dtype::F16,
+                s_dims.clone(),
+                metallic_foundry::tensor::compute_strides(&s_dims),
+            );
+            (b_data_arg, b_scales_arg)
+        }
+        TestQuantization::Q4 => {
+            let (w, s) = quantize_q4_0(&b_data, cfg.n, cfg.k, cfg.transpose_b);
+            let w_buf = foundry
+                .device
+                .new_buffer_with_bytes(
+                    metallic_foundry::types::nonnull_void_ptr_from_slice(&w, "Q4_W").unwrap(),
+                    w.len(),
+                    metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+                )
+                .unwrap();
+            let s_buf = foundry
+                .device
+                .new_buffer_with_bytes(
+                    metallic_foundry::types::nonnull_void_ptr_from_slice(&s, "Q4_S").unwrap(),
+                    s.len(),
+                    metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+                )
+                .unwrap();
+
+            let b_data_arg = TensorArg::from_buffer(
+                w_buf,
+                metallic_foundry::Dtype::Q4_0,
+                b_dims.clone(),
+                metallic_foundry::tensor::compute_strides(&b_dims),
+            );
+            let b_scales_arg = TensorArg::from_buffer(
+                s_buf,
+                metallic_foundry::Dtype::F16,
+                vec![cfg.n, cfg.k.div_ceil(32)],
+                vec![cfg.k.div_ceil(32), 1],
+            );
+            (b_data_arg, b_scales_arg)
+        }
+        TestQuantization::F16 => {
+            let b = b_f16.as_ref().unwrap();
+            (TensorArg::from_tensor(b), TensorArg::from_tensor(b))
+        }
+    };
+
+    let args = GemmV2Args {
+        a: TensorArg::from_tensor(&a),
+        b: b_arg,
+        d: TensorArg::from_tensor(&output),
+        c: TensorArg::from_tensor(&output),    // Dummy
+        bias: TensorArg::from_tensor(&output), // Dummy
+        b_scales: b_scales_arg,
+        weights_per_block: 32,
+        alpha: 1.0,
+        beta: 0.0,
+        b_is_canonical: 0,
+        params,
+    };
+
+    foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
+
+    // ========== Compare Results ==========
+    let gpu_output = FoundryTensor::to_vec(&output, &foundry);
+
+    let cpu_f32: Vec<f32> = cpu_output.iter().map(|x| x.to_f32()).collect();
+    let gpu_f32: Vec<f32> = gpu_output.iter().map(|x: &f16| x.to_f32()).collect();
+
+    // 4. Compare CPU vs V2
+    let mut max_diff = 0.0f32;
+    let mut v2_vs_cpu_fail = false;
+    for i in 0..gpu_f32.len() {
+        let diff = (gpu_f32[i] - cpu_f32[i]).abs();
+        max_diff = max_diff.max(diff);
+        if diff > 1e-2 {
+            v2_vs_cpu_fail = true;
+        }
+    }
+
+    // Debug print first few values
+    println!("First 5 values:");
+    println!("  CPU: {:?}", &cpu_f32[..5.min(cpu_f32.len())]);
+    println!("  GPU: {:?}", &gpu_f32[..5.min(gpu_f32.len())]);
+
+    println!("\n=== GEMM V2 Parity Test ===");
+    println!("Shape: M={}, N={}, K={}", cfg.m, cfg.n, cfg.k);
+    println!("Transpose: A={}, B={}", cfg.transpose_a, cfg.transpose_b);
+    println!("Tile config: {:?}", tile_config);
+    println!("Max diff CPU: {:.6}", max_diff);
+
+    if v2_vs_cpu_fail {
+        panic!(
+            "Parity failure! Shape {}x{}x{}, trans_a={}, trans_b={}. Max diff CPU: {:.6}",
+            cfg.m, cfg.n, cfg.k, cfg.transpose_a, cfg.transpose_b, max_diff
+        );
+    }
+
+    println!("✓ PASSED (CPU)");
+}
+
+// ============================================================================
+// Basic Shape Tests - F16 x F16
+// ============================================================================
+
+#[test]
+#[serial]
+fn test_gemm_v2_32x32x32() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 32,
+        k: 32,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_64x64x64() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 64,
+        n: 64,
+        k: 64,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_128x128x128() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 128,
+        n: 128,
+        k: 128,
+        ..Default::default()
+    });
+}
+
+// ============================================================================
+// Prefill-Relevant Shapes
+// ============================================================================
+
+#[test]
+#[serial]
+fn test_gemm_v2_prefill_32_896_896() {
+    // Typical prefill shape: 32 tokens, hidden_size=896
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 896,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_prefill_128_896_896() {
+    // Larger prefill
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 128,
+        n: 896,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_prefill_64_4864_896() {
+    // MLP up projection shape
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 64,
+        n: 4864,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+// ============================================================================
+// Transpose Tests
+// ============================================================================
+
+#[test]
+#[serial]
+fn test_gemm_v2_64x64x64_nt() {
+    // A normal, B transposed (common for weight matrices)
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 64,
+        n: 64,
+        k: 64,
+        transpose_a: false,
+        transpose_b: true,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_prefill_32_896_896_nt() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 896,
+        k: 896,
+        transpose_a: false,
+        transpose_b: true,
+        ..Default::default()
+    });
+}
+
+// ============================================================================
+// Unaligned Shapes (tests edge handling)
+// ============================================================================
+
+#[test]
+#[serial]
+fn test_gemm_v2_33x35x37() {
+    // Unaligned to tile boundaries
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 33,
+        n: 35,
+        k: 37,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_100x200x150() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 100,
+        n: 200,
+        k: 150,
+        ..Default::default()
+    });
+}
+
+// ============================================================================
+// Tile Config Tests
+// ============================================================================
+
+#[test]
+#[serial]
+fn test_gemm_v2_128x128x128_skinny_m() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 128,
+        n: 128,
+        k: 128,
+        tile_config: Some(TileConfig::SkinnyM),
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_128x128x128_skinny_n() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 128,
+        n: 128,
+        k: 128,
+        tile_config: Some(TileConfig::SkinnyN),
+        ..Default::default()
+    });
+}
+
+// ============================================================================
+// Qwen2.5 0.5B Specific Shapes
+// ============================================================================
+// hidden_size=896, intermediate_size=4864, num_heads=14, head_dim=64
+
+#[test]
+#[serial]
+fn test_gemm_v2_qwen25_qkv_proj_m16() {
+    // QKV projection: [M, 896] x [896, 896]
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 16,
+        n: 896,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_qwen25_qkv_proj_m64() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 64,
+        n: 896,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_qwen25_qkv_proj_m128() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 128,
+        n: 896,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_qwen25_mlp_up_m32() {
+    // MLP up projection: [M, 896] x [896, 4864]
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 4864,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_qwen25_mlp_up_m64() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 64,
+        n: 4864,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_qwen25_mlp_down_m32() {
+    // MLP down projection: [M, 4864] x [4864, 896]
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 896,
+        k: 4864,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_qwen25_mlp_down_m64() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 64,
+        n: 896,
+        k: 4864,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_qwen25_lm_head_m32() {
+    // LM head: [M, 896] x [896, 151936] (vocab)
+    // Note: Full vocab is too large for quick tests, use subset
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 4096, // Subset of vocab for speed
+        k: 896,
+        ..Default::default()
+    });
+}
+
+// ============================================================================
+// Edge Cases - Very Small M (Decode-like)
+// ============================================================================
+
+#[test]
+#[serial]
+fn test_gemm_v2_m1_32x32() {
+    // M=1 should still work (though GEMV might be faster)
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 1,
+        n: 32,
+        k: 32,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_m2_896x896() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 2,
+        n: 896,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_m4_896x896() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 4,
+        n: 896,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_m8_896x896() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 8,
+        n: 896,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+// ============================================================================
+// Edge Cases - Unaligned to Various Powers of 2
+// ============================================================================
+
+#[test]
+#[serial]
+fn test_gemm_v2_unaligned_17x19x23() {
+    // Prime-ish numbers
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 17,
+        n: 19,
+        k: 23,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_unaligned_31x33x35() {
+    // Just below/above 32
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 31,
+        n: 33,
+        k: 35,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_unaligned_63x65x67() {
+    // Just below/above 64
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 63,
+        n: 65,
+        k: 67,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_unaligned_127x129x131() {
+    // Just below/above 128
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 127,
+        n: 129,
+        k: 131,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_unaligned_255x257x259() {
+    // Just below/above 256
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 255,
+        n: 257,
+        k: 259,
+        ..Default::default()
+    });
+}
+
+// ============================================================================
+// Edge Cases - Extreme Aspect Ratios
+// ============================================================================
+
+#[test]
+#[serial]
+fn test_gemm_v2_wide_16x1024x64() {
+    // Very wide output
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 16,
+        n: 1024,
+        k: 64,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_tall_256x32x64() {
+    // Very tall output
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 256,
+        n: 32,
+        k: 64,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_deep_k_32x32x1024() {
+    // Very large reduction dimension
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 32,
+        k: 1024,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_shallow_k_32x32x8() {
+    // Very small reduction dimension
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 32,
+        k: 8,
+        ..Default::default()
+    });
+}
+
+// ============================================================================
+// Transpose Combinations with Qwen2.5 Shapes
+// ============================================================================
+
+#[test]
+#[serial]
+fn test_gemm_v2_qwen25_qkv_nt_m32() {
+    // Transposed B (common for stored weights)
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 896,
+        k: 896,
+        transpose_b: true,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_qwen25_mlp_up_nt_m32() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 4864,
+        k: 896,
+        transpose_b: true,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_qwen25_mlp_down_nt_m32() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 896,
+        k: 4864,
+        transpose_b: true,
+        ..Default::default()
+    });
+}
+
+// ============================================================================
+// Power of 2 Shapes (Optimal alignment)
+// ============================================================================
+
+#[test]
+#[serial]
+fn test_gemm_v2_pow2_256x256x256() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 256,
+        n: 256,
+        k: 256,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_pow2_512x512x512() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 512,
+        n: 512,
+        k: 512,
+        ..Default::default()
+    });
+}
+
+// ============================================================================
+// Larger Prefill Batch Sizes
+// ============================================================================
+
+#[test]
+#[serial]
+fn test_gemm_v2_prefill_256_896_896() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 256,
+        n: 896,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_prefill_512_896_896() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 512,
+        n: 896,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_prefill_256_4864_896() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 256,
+        n: 4864,
+        k: 896,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_qwen25_mlp_up_q8() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 18944,
+        k: 1536,
+        transpose_a: false,
+        transpose_b: true,
+        quant_b: TestQuantization::Q8,
+        ..Default::default()
+    });
+}
+
+// ============================================================================
+// Regression Test: Runtime Policy Selection (No DSL Hints)
+// ============================================================================
+
+#[test]
+#[serial]
+fn test_gemm_v2_step_runtime_policy_selection_q8() {
+    let mut foundry = Foundry::new().unwrap();
+    let mut rng = rng();
+
+    // Config
+    let m = 32;
+    let n = 32;
+    let k = 32;
+    let transpose_a = false;
+    let transpose_b = true; // Typical for weights
+
+    // Data
+    let a_rows = m;
+    let a_cols = k;
+    let a_data: Vec<f16> = (0..a_rows * a_cols)
+        .map(|_| f16::from_f32(rng.random_range(-1.0f32..1.0f32)))
+        .collect();
+
+    let b_rows = n;
+    let b_cols = k;
+    let b_data: Vec<f16> = (0..b_rows * b_cols)
+        .map(|_| f16::from_f32(rng.random_range(-1.0f32..1.0f32)))
+        .collect();
+
+    // Create A tensor (F16)
+    let a_tensor =
+        FoundryTensor::<metallic_foundry::F16, Pooled>::new(&mut foundry, vec![a_rows, a_cols], TensorInit::CopyFrom(&a_data)).unwrap();
+
+    // Create B tensor (Q8)
+    let (w, s) = quantize_q8(&b_data, n, k, transpose_b);
+    let blocks_per_k = k.div_ceil(32);
+    let q8_tensor = SimpleQ8Tensor { data: w, scales: s, blocks_per_k };
+
+    // Convert Q8 tensor parts to Foundry TensorArgs
+    let w_buf = foundry.device.new_buffer_with_bytes(
+        metallic_foundry::types::nonnull_void_ptr_from_slice(&q8_tensor.data, "Q8_W").unwrap(),
+        q8_tensor.data.len(),
+        metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+    ).unwrap();
+    
+    let s_buf = foundry.device.new_buffer_with_bytes(
+        metallic_foundry::types::nonnull_void_ptr_from_slice(&q8_tensor.scales, "Q8_S").unwrap(),
+        q8_tensor.scales.len(),
+        metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+    ).unwrap();
+
+    let b_dims = vec![n, k.div_ceil(32) * 32];
+    let s_dims = vec![n, k.div_ceil(32)];
+
+    let b_weights_arg = TensorArg::from_buffer(
+        w_buf,
+        metallic_foundry::Dtype::Q8_0,
+        b_dims.clone(),
+        metallic_foundry::tensor::compute_strides(&b_dims),
+    );
+    let b_scales_arg = TensorArg::from_buffer(
+        s_buf,
+        metallic_foundry::Dtype::F16,
+        s_dims.clone(),
+        metallic_foundry::tensor::compute_strides(&s_dims),
+    );
+
+    // Output tensor
+    let d_tensor = FoundryTensor::<metallic_foundry::F16, Pooled>::new(&mut foundry, vec![m, n], TensorInit::Uninitialized).unwrap();
+
+    // Bindings
+    let mut bindings = TensorBindings::new();
+    bindings.insert("A", TensorArg::from_tensor(&a_tensor));
+    bindings.insert("B", b_weights_arg); // B is bound as U8 (Q8 weights)
+    bindings.insert("B_scales", b_scales_arg);
+    bindings.insert("D", TensorArg::from_tensor(&d_tensor));
+
+    // Construct the Step
+    // Note: We intentionally do NOT provide any "quantization hint".
+    // The "b_quant" field should be missing or ignored if it existed (it doesn't).
+    // The system MUST detect Q8 from the "B" tensor dtype (U8).
+    let step = GemmV2Step {
+        a: Ref("A".to_string()),
+        b: Ref("B".to_string()),
+        d: Ref("D".to_string()),
+        c: None,
+        bias: None,
+        b_scales: Some(Ref("B_scales".to_string())),
+        weights_per_block: 32,
+        alpha: 1.0,
+        beta: 0.0,
+        b_is_canonical: 0,
+        params: GemmParams::default(),
+        m_dim: DynamicValue::Literal(m as u32),
+        n_dim: DynamicValue::Literal(n as u32),
+        k_dim: DynamicValue::Literal(k as u32),
+        transpose_a,
+        transpose_b,
+        tile_config: Some(TileConfig::Default),
+        activation: Activation::None,
+    };
+
+    // Execute
+    step.execute(&mut foundry, &mut bindings).expect("Execution failed");
+
+    // Verification
+    let gpu_output = FoundryTensor::to_vec(&d_tensor, &foundry);
+    let gpu_f32: Vec<f32> = gpu_output.iter().map(|x: &f16| x.to_f32()).collect();
+
+    // CPU Gemm
+    let mut cpu_output = vec![0.0f32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut acc = 0.0f32;
+            for ki in 0..k {
+                let a_val = a_data[i * k + ki].to_f32();
+                // B is [N, K] transposed
+                let b_val = b_data[j * k + ki].to_f32();
+                acc += a_val * b_val;
+            }
+            cpu_output[i * n + j] = acc;
+        }
+    }
+
+    let mut max_diff = 0.0f32;
+    for i in 0..gpu_f32.len() {
+        let diff = (gpu_f32[i] - cpu_output[i]).abs();
+        max_diff = max_diff.max(diff);
+    }
+
+    println!("Max diff (Q8 vs CPU F16): {}", max_diff);
+    assert!(
+        max_diff < 1.0,
+        "Difference too high ({}), likely wrong kernel selected or Q8 corruption",
+        max_diff
+    );
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_q4_0_32x32x32() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 32,
+        k: 32,
+        transpose_b: true, // Quantized GGUF weights are typically stored [N, K]
+        quant_b: TestQuantization::Q4,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_q4_0_64x64x64_nt() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 64,
+        n: 64,
+        k: 64,
+        transpose_b: true,
+        quant_b: TestQuantization::Q4,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_q4_0_gemv() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 1,
+        n: 128,
+        k: 64,
+        transpose_a: false,
+        transpose_b: true,
+        quant_b: TestQuantization::Q4,
+        ..Default::default()
+    });
+}

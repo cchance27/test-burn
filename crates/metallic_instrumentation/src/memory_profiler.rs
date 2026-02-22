@@ -1,6 +1,6 @@
 //! Efficient memory profiling utilities that cache system information to reduce performance impact.
 //!
-//! The main benefit of this profiler is that it caches the sysinfo::System instance and process ID,
+//! The main benefit of this profiler is that it caches the `sysinfo::System` instance and process ID,
 //! avoiding expensive recreation of these objects on each call, which was happening in the generation loop.
 
 use std::{
@@ -13,7 +13,7 @@ const MEMORY_CACHE_DURATION: Duration = Duration::from_millis(50); // Cache syst
 
 /// Cached memory profiler that reuses the System instance to avoid expensive recreation.
 pub struct CachedMemoryProfiler {
-    /// Cached process ID to avoid repeated calls to process::id()
+    /// Cached process ID to avoid repeated calls to `process::id()`
     cached_pid: Pid,
     /// Cached System instance wrapped in a mutex for thread-safe access
     cached_system: Arc<Mutex<System>>,
@@ -25,6 +25,7 @@ pub struct CachedMemoryProfiler {
 
 impl CachedMemoryProfiler {
     /// Create a new cached memory profiler.
+    #[must_use] 
     pub fn new() -> Self {
         // Get the current process ID once and cache it
         let pid = get_current_pid().expect("Failed to get current process ID");
@@ -54,6 +55,7 @@ impl CachedMemoryProfiler {
     /// Get the current process memory usage in bytes.
     /// This is the main method that should be called from the generation loop.
     /// Uses caching to avoid expensive system calls on every invocation.
+    #[must_use] 
     pub fn get_process_memory_usage(&self) -> u64 {
         let now = Instant::now();
 
@@ -89,6 +91,7 @@ impl CachedMemoryProfiler {
     }
 
     /// Get the cached process ID
+    #[must_use] 
     pub fn get_pid(&self) -> Pid {
         self.cached_pid
     }

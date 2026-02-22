@@ -1,0 +1,29 @@
+[package]
+name = "metallic-loader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+metallic-sdk = { path = "../metallic-sdk" }
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.17"
+memmap2 = "0.9"
+byteorder = "1.5"
+half = { version = "2.6.0", features = ["zerocopy", "bytemuck", "num-traits"] }
+tracing = "0.1"
+serde_json = "1.0.145"
+anyhow = "1.0.100"
+sysinfo = "0.37.1"
+bytemuck = { version = "1.15", features = ["derive"] }
+rustc-hash = "2.1.1"
+
+# Optional/Feature-gated
+# metallic-foundry-types? For now, we might need to redefine some types or depend on a common types crate if we want to share Dtype etc. 
+# But wait, foundry depends on loader. Loader shouldn't depend on foundry.
+# We might need to duplicate Dtype or move it to a common crate if we want to return Metallic Dtypes.
+# For now, let's assume we return standard types or our own types and Foundry maps them.
+# The plan mentions Dtype mapping in GGUFModel::map_dtype.
+
+[features]
+default = ["gguf"]
+gguf = []

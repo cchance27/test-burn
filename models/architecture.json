@@ -1,0 +1,20 @@
+{
+  "default_workflow": "crates/metallic-foundry/workflows/multiturn_chat.json",
+  "entries": [
+    {
+      "id": "qwen2-default",
+      "architecture": "qwen2",
+      "spec": "models/qwen25.json"
+    },
+    {
+      "id": "smollm3-default",
+      "architecture": "smollm3",
+      "spec": "models/smollm3.json"
+    },
+    {
+      "id": "llama-default",
+      "architecture": "llama",
+      "spec": "models/llama.json"
+    }
+  ]
+}

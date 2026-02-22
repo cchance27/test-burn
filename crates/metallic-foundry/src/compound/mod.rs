@@ -1,0 +1,752 @@
+//! Compound Kernel System
+//! Enables composing Metal helper functions into fused kernels.
+//!
+//! # Example
+//! ```text
+//! use metallic::compound::{CompoundKernel, GemvCoreStage, PolicyStage};
+//! use metallic::policies::PolicyQ8;
+//!
+//! let kernel = CompoundKernel::new("fused_q8_gemv")
+//!     .prologue(PolicyStage::<PolicyQ8>::new())
+//!     .main(GemvCoreStage::new())
+//!     .build();
+//!
+//! foundry.run(&kernel)?;
+//! ```
+
+mod code_builder;
+pub mod layout;
+pub mod stages;
+
+pub use code_builder::CodeBuilder;
+pub use layout::Layout;
+pub use stages::*;
+
+use crate::{
+    Includes, Kernel, KernelSource, fusion::THREAD_ARGS, types::{ComputeCommandEncoder, DispatchConfig, GridSize, ThreadgroupSize}
+};
+
+/// A buffer argument contributed by a stage.
+#[derive(Clone, Debug)]
+pub struct BufferArg {
+    /// Argument name in Metal signature.
+    pub name: &'static str,
+    /// Metal type string (e.g., "const device half*").
+    pub metal_type: &'static str,
+    /// Buffer index in kernel signature.
+    pub buffer_index: u32,
+}
+
+/// Trait for types that can bind themselves to a Metal encoder.
+/// This is implemented by `#[derive(KernelArgs)]` types.
+pub trait BindArgs {
+    fn bind_args(&self, encoder: &ComputeCommandEncoder);
+}
+
+/// A stage in a compound kernel.
+///
+/// Each stage wraps a hand-written Metal helper function and provides:
+/// - Headers to include
+/// - Buffer arguments for the kernel signature
+/// - Metal code to emit (calling the helper function)
+pub trait Stage: Send + Sync {
+    /// Metal headers required by this stage.
+    fn includes(&self) -> Vec<&'static str>;
+
+    /// Buffer arguments this stage contributes to the kernel signature.
+    fn buffer_args(&self) -> Vec<BufferArg>;
+
+    /// Debug name for diagnostics (used for fail-fast signature validation).
+    fn debug_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
+    /// Generate Metal code for this stage.
+    ///
+    /// # Arguments
+    /// * `input_var` - Variable name from the previous stage (or "input" for first stage)
+    ///
+    /// # Returns
+    /// Tuple of (output_variable_name, metal_code_string)
+    fn emit(&self, input_var: &str) -> (String, String);
+
+    /// Generate Metal code for SIMD GEMV prologue (threadgroup setup).
+    /// Used when this Stage is fused into a GEMV kernel.
+    fn emit_simd_prologue(&self) -> Option<String> {
+        None
+    }
+
+    /// Generate Metal code for SIMD GEMV reduction loop (shuffle/xor).
+    /// Used when this Stage is fused into a GEMV kernel.
+    fn emit_simd_reduce(&self) -> Option<String> {
+        None
+    }
+
+    /// Generate C-struct definitions required by this stage.
+    /// Default implementation returns empty string.
+    fn struct_defs(&self) -> String {
+        String::new()
+    }
+
+    /// Optional activation metadata for introspection and diagnostics.
+    fn activation_meta(&self) -> Option<crate::policy::activation::Activation> {
+        None
+    }
+
+    /// Optional policy metadata for introspection and diagnostics.
+    fn policy_meta(&self) -> Option<crate::fusion::PolicyMeta> {
+        None
+    }
+}
+
+/// Compile-time metadata for stages (not dyn-compatible).
+/// Used by #[derive(CompoundKernel)] macro.
+pub trait StageMeta {
+    /// Number of buffer arguments this stage contributes.
+    const BUFFER_ARG_COUNT: usize;
+
+    /// Buffer argument metadata for macro code generation.
+    /// Each entry: (name, metal_type, rust_type, is_output)
+    const BUFFER_ARG_META: &'static [(&'static str, &'static str, &'static str, bool)];
+}
+
+impl<S: Stage + ?Sized> Stage for Box<S> {
+    fn includes(&self) -> Vec<&'static str> {
+        (**self).includes()
+    }
+
+    fn buffer_args(&self) -> Vec<BufferArg> {
+        (**self).buffer_args()
+    }
+
+    fn debug_name(&self) -> &'static str {
+        (**self).debug_name()
+    }
+
+    fn emit(&self, input_var: &str) -> (String, String) {
+        (**self).emit(input_var)
+    }
+
+    fn struct_defs(&self) -> String {
+        (**self).struct_defs()
+    }
+
+    fn activation_meta(&self) -> Option<crate::policy::activation::Activation> {
+        (**self).activation_meta()
+    }
+
+    fn policy_meta(&self) -> Option<crate::fusion::PolicyMeta> {
+        (**self).policy_meta()
+    }
+}
+
+/// Typestate: Kernel is being built, not yet compiled.
+pub struct Unfused;
+
+/// Typestate: Kernel is compiled and ready to dispatch.
+pub struct Fused;
+
+/// Typestate: Kernel is bound with runtime arguments.
+pub struct Bound<A: BindArgs> {
+    args: A,
+    dispatch: DispatchConfig,
+}
+
+/// A compound kernel composed of multiple stages.
+///
+/// Uses typestate pattern to ensure kernels are built before dispatch.
+pub struct CompoundKernel<State = Unfused> {
+    /// Kernel function name.
+    name: String,
+    /// Prologue stages (input loading, dequant). Can have multiple for multi-input ops.
+    prologues: Vec<Box<dyn Stage>>,
+    /// Main computation stage (e.g., GEMV core).
+    main: Option<Box<dyn Stage>>,
+    /// Epilogue stages (activations, norms).
+    epilogues: Vec<Box<dyn Stage>>,
+
+    // --- Fused state only ---
+    /// Generated Metal source code.
+    source: Option<String>,
+
+    /// Typestate with embedded data (e.g., Bound<A> holds args and dispatch config).
+    state: State,
+
+    /// Disable automatic output assignment (output[idx] = var).
+    /// Used when a stage handles writing to output manually (e.g. Gemv).
+    pub manual_output: bool,
+}
+
+/// A compiled compound kernel template that no longer retains stage objects.
+///
+/// This is the recommended representation for hot-path usage (e.g. per-token decode),
+/// since it avoids rebuilding source strings and avoids owning non-cloneable stage graphs.
+#[derive(Clone, Debug, Default)]
+pub struct CompiledCompoundKernel {
+    fn_name: String,
+    includes: Vec<&'static str>,
+    struct_defs: String,
+    source: String,
+    pub(crate) source_hash: u64,
+}
+
+impl CompiledCompoundKernel {
+    /// Get the generated Metal source code for debugging.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+/// A bound (dispatchable) compiled compound kernel.
+pub struct BoundCompiledCompoundKernel<'a, A: BindArgs> {
+    template: &'a CompiledCompoundKernel,
+    args: A,
+    dispatch: DispatchConfig,
+    metric_data: Option<rustc_hash::FxHashMap<String, String>>,
+}
+
+/// An Arc-based bound kernel for registry-cached kernels.
+///
+/// This variant holds an `Arc<CompiledCompoundKernel>` instead of `&'static`,
+/// enabling bounded eviction from the kernel registry.
+pub struct ArcBoundCompiledCompoundKernel<A: BindArgs> {
+    template: std::sync::Arc<CompiledCompoundKernel>,
+    args: A,
+    dispatch: DispatchConfig,
+    metric_data: Option<rustc_hash::FxHashMap<String, String>>,
+}
+
+impl CompoundKernel<Unfused> {
+    /// Create a new compound kernel builder.
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            prologues: Vec::new(),
+            main: None,
+            epilogues: Vec::new(),
+            source: None,
+            state: Unfused,
+            manual_output: false,
+        }
+    }
+
+    /// Enable manual output mode (disables default assignment).
+    pub fn with_manual_output(mut self, manual: bool) -> Self {
+        self.manual_output = manual;
+        self
+    }
+
+    /// Add a prologue stage (input loading, dequant).
+    ///
+    /// Can be called multiple times for multi-input operations (QKV, attention).
+    pub fn prologue<S: Stage + 'static>(mut self, stage: S) -> Self {
+        self.prologues.push(Box::new(stage));
+        self
+    }
+
+    /// Set the main computation stage.
+    pub fn main<S: Stage + 'static>(mut self, stage: S) -> Self {
+        self.main = Some(Box::new(stage));
+        self
+    }
+
+    /// Add an epilogue stage (activation, normalization).
+    ///
+    /// Can be called multiple times to chain post-processing.
+    pub fn epilogue<S: Stage + 'static>(mut self, stage: S) -> Self {
+        self.epilogues.push(Box::new(stage));
+        self
+    }
+
+    // --- Dynamic variants for derive macro use ---
+
+    /// Add a boxed prologue stage (for macro-generated code).
+    pub fn prologue_dyn(mut self, stage: Box<dyn Stage>) -> Self {
+        self.prologues.push(stage);
+        self
+    }
+
+    /// Set a boxed main stage (for macro-generated code).
+    pub fn main_dyn(mut self, stage: Box<dyn Stage>) -> Self {
+        self.main = Some(stage);
+        self
+    }
+
+    /// Add a boxed epilogue stage (for macro-generated code).
+    pub fn epilogue_dyn(mut self, stage: Box<dyn Stage>) -> Self {
+        self.epilogues.push(stage);
+        self
+    }
+
+    /// Compile the compound kernel into a fused, dispatchable kernel.
+    pub fn build(self) -> CompoundKernel<Fused> {
+        let source = self.generate_source();
+
+        CompoundKernel {
+            name: self.name,
+            prologues: self.prologues,
+            main: self.main,
+            epilogues: self.epilogues,
+            source: Some(source),
+            state: Fused,
+            manual_output: self.manual_output,
+        }
+    }
+
+    /// Compile into a reusable template that can be bound many times without rebuilding.
+    pub fn compile(self) -> CompiledCompoundKernel {
+        let source = self.generate_source();
+        let includes = self.collect_includes();
+        let struct_defs = format!("#define FUSED_KERNEL 1\n\n{}", self.collect_struct_defs());
+        let fn_name = self.name;
+
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = rustc_hash::FxHasher::default();
+        // Hash the full compilation input that influences the final pipeline.
+        // This is used by the global pipeline cache key to avoid collisions.
+        fn_name.hash(&mut hasher);
+        includes.hash(&mut hasher);
+        struct_defs.hash(&mut hasher);
+        source.hash(&mut hasher);
+        let source_hash = hasher.finish();
+
+        CompiledCompoundKernel {
+            fn_name,
+            includes,
+            struct_defs,
+            source,
+            source_hash,
+        }
+    }
+
+    fn generate_source(&self) -> String {
+        let mut code = String::new();
+
+        // 1. (Includes are handled by Kernel::includes() and the pipeline compiler)
+
+        // 2. Generate signature
+        let all_args = self.collect_buffer_args();
+        code.push_str(&format!("kernel void {}(\n", self.name));
+
+        for (i, arg) in all_args.iter().enumerate() {
+            let is_last = i == all_args.len() - 1;
+            // Add comma unless this is the last buffer arg AND there are no thread args
+            let comma = if is_last && THREAD_ARGS.is_empty() { "" } else { "," };
+            code.push_str(&format!(
+                "    {} {} [[buffer({})]]{}\n",
+                arg.metal_type, arg.name, arg.buffer_index, comma
+            ));
+        }
+        // Use THREAD_ARGS from fusion module
+        for (i, arg) in THREAD_ARGS.iter().enumerate() {
+            let comma = if i < THREAD_ARGS.len() - 1 { "," } else { "" };
+            code.push_str(&format!("    {}{}\n", arg, comma));
+        }
+        code.push_str(") {\n");
+
+        code.push_str("    uint idx = gid.x;\n\n");
+
+        // 3. Generate body by chaining stages
+        let mut current_var = "input".to_string();
+
+        // Prologues
+        for (i, stage) in self.prologues.iter().enumerate() {
+            let (out_var, stage_code) = stage.emit(&current_var);
+            code.push_str(&format!("    // Prologue {}\n", i));
+            code.push_str(&stage_code);
+            code.push('\n');
+            current_var = out_var;
+        }
+
+        // Main
+        if let Some(main) = &self.main {
+            let (out_var, stage_code) = main.emit(&current_var);
+            code.push_str("    // Main computation\n");
+            code.push_str(&stage_code);
+            code.push('\n');
+            current_var = out_var;
+        }
+
+        // Epilogues
+        for (i, stage) in self.epilogues.iter().enumerate() {
+            let (out_var, stage_code) = stage.emit(&current_var);
+            code.push_str(&format!("    // Epilogue {}\n", i));
+            code.push_str(&stage_code);
+            code.push('\n');
+            current_var = out_var;
+        }
+
+        // Write final output
+        if !self.manual_output {
+            code.push_str(&format!("    output[idx] = {};\n", current_var));
+        }
+        code.push_str("}\n");
+
+        code
+    }
+}
+
+impl<S> CompoundKernel<S> {
+    /// Get the kernel function name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Collect includes from all stages.
+    fn collect_includes(&self) -> Vec<&'static str> {
+        let mut all_includes = Vec::new();
+        for stage in &self.prologues {
+            all_includes.extend(stage.includes());
+        }
+        if let Some(main) = &self.main {
+            all_includes.extend(main.includes());
+        }
+        for stage in &self.epilogues {
+            all_includes.extend(stage.includes());
+        }
+
+        // Dedup preserving order
+        let mut seen = std::collections::HashSet::new();
+        all_includes.retain(|item| seen.insert(*item));
+        all_includes
+    }
+
+    /// Collect struct definitions from all stages.
+    pub fn collect_struct_defs(&self) -> String {
+        let mut all_struct_defs = Vec::new();
+
+        for stage in &self.prologues {
+            let def = stage.struct_defs();
+            if !def.is_empty() {
+                all_struct_defs.push(def);
+            }
+        }
+        if let Some(main) = &self.main {
+            let def = main.struct_defs();
+            if !def.is_empty() {
+                all_struct_defs.push(def);
+            }
+        }
+        for stage in &self.epilogues {
+            let def = stage.struct_defs();
+            if !def.is_empty() {
+                all_struct_defs.push(def);
+            }
+        }
+
+        // Dedup preserving order
+        let mut seen = std::collections::HashSet::new();
+        all_struct_defs.retain(|item| seen.insert(item.clone()));
+        all_struct_defs.join("\n\n")
+    }
+
+    /// Collect all buffer arguments from all stages.
+    pub fn collect_buffer_args(&self) -> Vec<BufferArg> {
+        #[derive(Clone, Copy)]
+        struct SeenArg {
+            name: &'static str,
+            metal_type: &'static str,
+            stage: &'static str,
+        }
+
+        let mut out: Vec<BufferArg> = Vec::new();
+        let mut seen: std::collections::HashMap<u32, SeenArg> = std::collections::HashMap::new();
+
+        let mut visit_stage = |stage: &dyn Stage| {
+            let stage_name = stage.debug_name();
+            for arg in stage.buffer_args() {
+                if let Some(prev) = seen.get(&arg.buffer_index).copied() {
+                    // Hard fail: a single buffer index must have a single canonical signature.
+                    if prev.name != arg.name || prev.metal_type != arg.metal_type {
+                        panic!(
+                            "CompoundKernel signature conflict for buffer({}):\n\
+                             - {} declares: {} {} [[buffer({})]]\n\
+                             - {} declares: {} {} [[buffer({})]]\n\
+                             Fix: ensure stages use distinct buffer indices, or identical name+type when intentionally shared.",
+                            arg.buffer_index,
+                            prev.stage,
+                            prev.metal_type,
+                            prev.name,
+                            arg.buffer_index,
+                            stage_name,
+                            arg.metal_type,
+                            arg.name,
+                            arg.buffer_index
+                        );
+                    }
+                    continue;
+                }
+
+                seen.insert(
+                    arg.buffer_index,
+                    SeenArg {
+                        name: arg.name,
+                        metal_type: arg.metal_type,
+                        stage: stage_name,
+                    },
+                );
+                out.push(arg);
+            }
+        };
+
+        for stage in &self.prologues {
+            visit_stage(stage);
+        }
+        if let Some(main) = &self.main {
+            visit_stage(main);
+        }
+        for stage in &self.epilogues {
+            visit_stage(stage);
+        }
+
+        out.sort_by_key(|a| a.buffer_index);
+        out
+    }
+}
+
+impl CompiledCompoundKernel {
+    /// Bind this kernel with runtime arguments for dispatch.
+    pub fn bind<A: BindArgs>(&self, args: A, dispatch: DispatchConfig) -> BoundCompiledCompoundKernel<'_, A> {
+        BoundCompiledCompoundKernel {
+            template: self,
+            args,
+            dispatch,
+            metric_data: None,
+        }
+    }
+
+    #[inline]
+    pub fn bind_with_metrics<A: BindArgs>(
+        &self,
+        args: A,
+        dispatch: DispatchConfig,
+        metric_data: rustc_hash::FxHashMap<String, String>,
+    ) -> BoundCompiledCompoundKernel<'_, A> {
+        BoundCompiledCompoundKernel {
+            template: self,
+            args,
+            dispatch,
+            metric_data: Some(metric_data),
+        }
+    }
+}
+
+impl CompiledCompoundKernel {
+    /// Bind an Arc-wrapped kernel with runtime arguments.
+    ///
+    /// This is the preferred method for registry-cached kernels, as it doesn't
+    /// require `&'static` and enables bounded eviction.
+    pub fn bind_arc<A: BindArgs>(self: std::sync::Arc<Self>, args: A, dispatch: DispatchConfig) -> ArcBoundCompiledCompoundKernel<A> {
+        ArcBoundCompiledCompoundKernel {
+            template: self,
+            args,
+            dispatch,
+            metric_data: None,
+        }
+    }
+
+    /// Bind an Arc-wrapped kernel with runtime arguments and metrics.
+    #[inline]
+    pub fn bind_arc_with_metrics<A: BindArgs>(
+        self: std::sync::Arc<Self>,
+        args: A,
+        dispatch: DispatchConfig,
+        metric_data: rustc_hash::FxHashMap<String, String>,
+    ) -> ArcBoundCompiledCompoundKernel<A> {
+        ArcBoundCompiledCompoundKernel {
+            template: self,
+            args,
+            dispatch,
+            metric_data: Some(metric_data),
+        }
+    }
+}
+
+impl Kernel for CompiledCompoundKernel {
+    type Args = ();
+
+    fn function_name(&self) -> &str {
+        &self.fn_name
+    }
+
+    fn source(&self) -> KernelSource {
+        KernelSource::String(self.source.clone())
+    }
+
+    fn includes(&self) -> Includes {
+        Includes(self.includes.clone())
+    }
+
+    fn struct_defs(&self) -> String {
+        self.struct_defs.clone()
+    }
+
+    fn bind(&self, _encoder: &ComputeCommandEncoder) {}
+
+    fn source_hash(&self) -> u64 {
+        self.source_hash
+    }
+}
+
+impl<'a, A: BindArgs> Kernel for BoundCompiledCompoundKernel<'a, A> {
+    type Args = A;
+
+    fn function_name(&self) -> &str {
+        &self.template.fn_name
+    }
+
+    fn source(&self) -> KernelSource {
+        KernelSource::String(self.template.source.clone())
+    }
+
+    fn includes(&self) -> Includes {
+        Includes(self.template.includes.clone())
+    }
+
+    fn struct_defs(&self) -> String {
+        self.template.struct_defs.clone()
+    }
+
+    fn bind(&self, encoder: &ComputeCommandEncoder) {
+        self.args.bind_args(encoder);
+    }
+
+    fn dispatch_config(&self) -> DispatchConfig {
+        self.dispatch
+    }
+
+    fn metric_data(&self) -> Option<rustc_hash::FxHashMap<String, String>> {
+        self.metric_data.clone()
+    }
+
+    fn source_hash(&self) -> u64 {
+        self.template.source_hash
+    }
+}
+
+impl<A: BindArgs> Kernel for ArcBoundCompiledCompoundKernel<A> {
+    type Args = A;
+
+    fn function_name(&self) -> &str {
+        &self.template.fn_name
+    }
+
+    fn source(&self) -> KernelSource {
+        KernelSource::String(self.template.source.clone())
+    }
+
+    fn includes(&self) -> Includes {
+        Includes(self.template.includes.clone())
+    }
+
+    fn struct_defs(&self) -> String {
+        self.template.struct_defs.clone()
+    }
+
+    fn bind(&self, encoder: &ComputeCommandEncoder) {
+        self.args.bind_args(encoder);
+    }
+
+    fn dispatch_config(&self) -> DispatchConfig {
+        self.dispatch
+    }
+
+    fn metric_data(&self) -> Option<rustc_hash::FxHashMap<String, String>> {
+        self.metric_data.clone()
+    }
+
+    fn source_hash(&self) -> u64 {
+        self.template.source_hash
+    }
+}
+
+// --- Kernel Trait Implementation ---
+
+impl Kernel for CompoundKernel<Fused> {
+    type Args = ();
+
+    fn function_name(&self) -> &str {
+        &self.name
+    }
+
+    fn source(&self) -> KernelSource {
+        KernelSource::String(self.source.clone().unwrap())
+    }
+
+    fn includes(&self) -> Includes {
+        Includes(self.collect_includes())
+    }
+
+    fn struct_defs(&self) -> String {
+        format!("#define FUSED_KERNEL 1\n\n{}", self.collect_struct_defs())
+    }
+
+    fn bind(&self, _encoder: &ComputeCommandEncoder) {
+        // Note: For unbound compound kernels, binding is a no-op.
+        // Use BoundCompoundKernel for actual dispatch with buffer binding.
+    }
+
+    fn dispatch_config(&self) -> DispatchConfig {
+        // Default dispatch - should be overridden by BoundCompoundKernel
+        DispatchConfig {
+            grid: GridSize::d1(1),
+            group: ThreadgroupSize::d1(64),
+        }
+    }
+}
+
+impl<A: BindArgs + 'static> Kernel for CompoundKernel<Bound<A>> {
+    type Args = A;
+
+    fn function_name(&self) -> &str {
+        &self.name
+    }
+
+    fn source(&self) -> KernelSource {
+        KernelSource::String(self.source.clone().unwrap())
+    }
+
+    fn includes(&self) -> Includes {
+        let mut all_includes = Vec::new();
+        for stage in &self.prologues {
+            all_includes.extend(stage.includes());
+        }
+        if let Some(main) = &self.main {
+            all_includes.extend(main.includes());
+        }
+        for stage in &self.epilogues {
+            all_includes.extend(stage.includes());
+        }
+        all_includes.sort();
+        all_includes.dedup();
+        Includes(all_includes)
+    }
+
+    fn bind(&self, encoder: &ComputeCommandEncoder) {
+        self.state.args.bind_args(encoder);
+    }
+
+    fn dispatch_config(&self) -> DispatchConfig {
+        self.state.dispatch
+    }
+}
+
+impl CompoundKernel<Fused> {
+    /// Get the generated source code.
+    pub fn source(&self) -> &str {
+        self.source.as_ref().unwrap()
+    }
+
+    /// Bind this kernel with runtime arguments for dispatch.
+    pub fn bind<A: BindArgs>(self, args: A, dispatch: DispatchConfig) -> CompoundKernel<Bound<A>> {
+        CompoundKernel {
+            name: self.name,
+            prologues: self.prologues,
+            main: self.main,
+            epilogues: self.epilogues,
+            source: self.source,
+            state: Bound { args, dispatch },
+            manual_output: self.manual_output,
+        }
+    }
+}

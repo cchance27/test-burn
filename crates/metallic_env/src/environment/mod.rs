@@ -23,6 +23,7 @@ impl From<InstrumentEnvVar> for EnvVar {
 
 impl EnvVar {
     /// Retrieve the canonical environment variable key for the identifier.
+    #[must_use] 
     pub const fn key(self) -> &'static str {
         match self {
             EnvVar::Instrument(inner) => inner.key(),

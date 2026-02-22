@@ -1,252 +1,351 @@
-# Adding New Metal Kernels
+# Foundry Kernels Architecture
 
-This document outlines the standard procedure for adding new custom Metal compute kernels to the project. Following this guide ensures that new kernels are well-integrated, easy to use, and maintainable.
+Foundry is the kernel backend for Metallic, designed to support **high-performance, low-latency inference** on Apple Silicon. It provides a modular system for writing, composing, and fusing Metal kernels.
 
-## 1. File Structure
+## Core Concepts
 
-All custom kernels reside in the `src/metallic/kernels/` directory. Each kernel or family of related kernels should be placed in its own module (a subdirectory).
+The kernel system is built around three primary abstractions:
 
-The required structure for a new kernel named `my_kernel` is as follows:
+1.  **Standalone Kernels**: Traditional, single-function Metal kernels.
+2.  **Compound Kernels**: Fused kernels composed of multiple "Stages" (Prologue → Main → Epilogue) that are stitched together at runtime or compile-time.
+3.  **Conditional Kernels**: Logic for dispatching to different kernel variants based on runtime conditions (e.g., batch size, sequence length).
 
+---
+
+## Foundry Executor Preparation (DSL-driven)
+
+Foundry’s executor no longer hardcodes model-specific intermediates. Instead, the model’s DSL (plus source metadata extracted via `ModelLoader`) declares what the executor must prepare before inference.
+
+### Precedence (baseline → overrides)
+
+1. **Source metadata baseline** (inferred at load time via `LoadedModel`)
+2. **DSL overrides** (values specified in the model JSON)
+3. **Runtime overrides** (values set in `TensorBindings` / ContextConfig)
+
+If a model family uses different metadata key names, the DSL can declare `architecture.metadata_keys.keys` to map each baseline field to an ordered list of keys (first match wins). This reduces hardcoded format-specific metadata logic in the loader.
+
+### `architecture.prepare` contract
+
+The DSL `architecture.prepare` section can declare:
+
+- `globals`: one-time integer expressions evaluated at session initialization.
+- `derived_globals`: integer expressions evaluated at runtime (per prefill chunk / per decode step).
+- `tensors`: intermediate/KV/rope tensors the executor must allocate and bind.
+- `rope`: the logical tensor names for RoPE caches (cos/sin). The executor computes and uploads their contents.
+
+### Layer-aware RoPE control (KvPrepFused)
+
+`KvPrepFused` now supports optional layer-aware RoPE skipping through dynamic params:
+
+- `layer_idx` (0-based, default `0`)
+- `no_rope_layer_step` (default `0`, disabled)
+
+When `no_rope_layer_step > 0`, RoPE is skipped for layers where `(layer_idx + 1) % no_rope_layer_step == 0`.
+This is used by SmolLM3-style periodic no-RoPE layers while keeping the same fused KV-prep kernel path.
+
+### `architecture.weight_bindings` contract
+
+The DSL `architecture.weight_bindings` section declares which source tensors must be materialized and bound before inference.
+
+- Each entry specifies a `key` resolved via `architecture.tensor_names` and a `logical_name` inserted into bindings.
+- Per-layer weights are expressed via `repeat` (`count: "n_layers", var: "i"`), and can use `{i}` interpolation in `logical_name`.
+- Layout-sensitive weights must specify a layout:
+  - `row_major` (default)
+  - `canonical` with `expected_k` / `expected_n` integer expressions (fail-fast validation)
+- Optional bias tensors should use `fallback_zero_len` to bind a shared zero vector when missing in the source file.
+
+### Expressions and missing values
+
+- Tensor shapes and derived globals can use integer expressions (e.g. `"d_model / n_heads"`, `"{m} * {d_model}"`).
+- If an expression or `DynamicValue` references a missing variable, Foundry **panics** and the error message points to `architecture.prepare.globals/derived_globals` or runtime overrides. This is intentional to avoid silent shape/dispatch correctness bugs.
+
+---
+
+## 1. Kernel Types
+
+### 1.1 Standalone Kernels
+
+Use standalone kernels for simple operations that do not require fusion or complex configuration.
+
+**Rust Definition:**
+```rust
+#[derive(Kernel, KernelArgs, Clone)]
+#[kernel(
+    source = "ops/simple.metal",
+    function = "simple_op",
+    args = "SimpleParams", // Injects SimpleParams C++ struct definition
+    dispatch = "per_element" // Auto-calculates grid based on params.total_elements
+)]
+pub struct SimpleKernel {
+    pub input: TensorArg,
+    #[arg(output)]
+    pub output: TensorArg,
+    pub params: SimpleParams,
+}
 ```
-src/metallic/kernels/
-├── my_kernel/
-│   ├── mod.rs                    # Rust logic for MyKernelOp and trait implementations, mod and pub use to export MyKernelOtherOp
-│   ├── my_kernel_test.rs         # Tests for the main MyKernelOp
-│   └── my_kernel_other.rs        # Additional Ops that exist in the kernel.metal beyond the main MyKernelOp
-│   └── my_kernel_other_test.rs   # Tests for the MyKernelOtherOp
-│   └── kernel.metal              # Raw Metal Shading Language (MSL) code (for all of this kernels functions)
-└── ...
-```
 
-## 2. Step-by-Step Guide
+**Auto-Generation:**
+When `step = true` (default), the macro also generates `SimpleKernelStep` and `CompiledSimpleKernelStep`, allowing immediate use in the model DSL without writing any boilerplate glue code.
 
-Let's add a simple element-wise multiplication kernel as an example.
+**Metal Side (`ops/simple.metal`):**
+> **Note:** Do NOT define `struct SimpleParams` here. It is automatically injected by the runtime based on the Rust struct.
 
-### Step 1: Create the Kernel Files (Needed for Raw Metal Kernels)
-
-First, create the directory and the two files:
-
-1.  `src/metallic/kernels/elemwise_mul/`
-2.  `src/metallic/kernels/elemwise_mul/kernel.metal`
-3.  `src/metallic/kernels/elemwise_mul/mod.rs`
-
-### Step 2: Write the Metal Code
-
-Place your MSL function(s) in `kernel.metal`.
-
-**`src/metallic/kernels/elemwise_mul/kernel.metal`**:
 ```metal
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void mul_kernel(device const float* a [[buffer(0)]],
-                       device const float* b [[buffer(1)]],
-                       device float* out [[buffer(2)]],
-                       uint gid [[thread_position_in_grid]]) {
-    out[gid] = a[gid] * b[gid];
+[[kernel]] void simple_op(
+    const device half *input [[buffer(0)]],
+    device half *output [[buffer(1)]],
+    constant SimpleParams *params [[buffer(2)]], // Struct defined by injection
+    // Implicit arguments automatically available:
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]],
+    uint3 tptg [[threads_per_threadgroup]]
+) {
+    // ...
 }
 ```
 
-### Step 3: Update Kernel Enums (Required for Raw Metal Kernel style kernels, MPS call kernels don't require these enums)
+### 1.2 Compound Kernels (Fusion)
 
-Edit `src/metallic/kernels/mod.rs` to make the kernel management system aware of your new kernel.
+Compound kernels are the preferred way to write compute-intensive operations. They allow you to write small, reusable "Stages" in Metal and fuse them together in Rust.
 
-1.  **`KernelLibrary` enum**: Add a variant for your new kernel module. This corresponds to the `.metal` file.
+**Architecture:**
+*   **Prologue:** Handles data loading and dequantization (e.g., `PolicyStage`).
+*   **Main:** The core computation.
+*   **Epilogue:** Post-processing.
 
-    ```rust
-    // Export our kernels
-    pub mod elemwise_add;
-    pub mod elemwise_mul; // <-- Add this
+**Example:**
+```rust
+use metallic_foundry::policy::activation::Activation;
 
-    pub enum KernelLibrary {
-        ElemwiseAdd,
-        ElemwiseMul, // <-- Add this
-    }
+let kernel = CompoundKernel::new("fused_q8_gemv")
+    .prologue(PolicyStage::<PolicyQ8>::new()) // Load Q8 weights
+    .main(GemvCoreStage::new())               // Compute Dot Product
+    // Activations are typically selected via `Activation` on the write/epilogue stage.
+    // (Some built-in kernels bake this into their stages rather than using EpilogueStage.)
+    .main(WarpWriteOutputStage::new().with_activation(Activation::SiLU))
+    .build();
+```
 
-    impl KernelLibrary {
-        fn source(&self) -> &'static str {
-            match self {
-                KernelLibrary::ElemwiseAdd => include_str!("elemwise_add/kernel.metal"),
-                KernelLibrary::ElemwiseMul => include_str!("elemwise_mul/kernel.metal"), // <-- Add this
-            }
-        }
-    }
-    ```
+---
 
-2.  **`KernelFunction` enum**: Add a variant for each `kernel` function in your `.metal` file. (Required for Raw Metal Kernels Only)
+## 2. Developing Compound Stages
 
-    ```rust
-    pub enum KernelFunction {
-        ElemwiseAdd,
-        ElemwiseBroadcastAdd,
-        ElemwiseMul, // <-- Add this
-    }
+A `Stage` is a Rust struct that wraps a Metal helper function. You can use `#[derive(Kernel)]` to auto-generate the Stage implementation.
 
-    impl KernelFunction {
-        fn library(&self) -> KernelLibrary {
-            match self {
-                Self::ElemwiseAdd | Self::ElemwiseBroadcastAdd => KernelLibrary::ElemwiseAdd,
-                Self::ElemwiseMul => KernelLibrary::ElemwiseMul, // <-- Add this
-            }
-        }
-
-        fn name(&self) -> &'static str {
-            match self {
-                Self::ElemwiseAdd => "add_kernel",
-                Self::ElemwiseBroadcastAdd => "broadcast_add_kernel",
-                Self::ElemwiseMul => "mul_kernel", // <-- Add this
-            }
-        }
-    }
-    ```
-
-### Step 4: Implement the Rust Logic
-
-In your kernel's `mod.rs`, you will implement the `KernelInvocable` trait. This trait connects the high-level API (`ctx.call<T>()`) to your kernel's specific implementation.
-
-**`src/metallic/kernels/elemwise_mul/mod.rs`**:
+### 2.1 Rust Implementation
 
 ```rust
-// You can pull in super::* to pull in most imports required for kernel creation to keep kernel rust files small.
-use super::*;
-
-// 1. Public, user-facing, zero-sized struct for the operation.
-pub struct ElemwiseMulOp;
-
-// 2. Internal struct that holds data for the `Operation` trait.
-struct ElemwiseMul {
-    a: Tensor,
-    b: Tensor,
-    out: Tensor,
-    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
-}
-
-// 3. Implement `KernelInvocable` for the public struct.
-impl KernelInvocable for ElemwiseMulOp {
-    // Input arguments for the call.
-    type Args = (Tensor, Tensor);
-    // The output type.
-    type Output = Tensor;
-
-    // Link to the enum variant in `KernelFunction`.
-    fn function_id() -> Option<KernelFunction> {
-        Some(KernelFunction::ElemwiseMul)
-    }
-
-    // This `new` method is called by `ctx.call()`.
-    // It creates the output tensor and the internal `Operation` struct.
-    fn new(
-        ctx: &mut Context,
-        args: Self::Args,
-        pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
-        let (a, b) = args;
-
-        // Create the output tensor.
-        let out = Tensor::create_tensor_pooled(a.dims().to_vec(), ctx)?;
-
-        // Create the internal operation struct.
-        let op = ElemwiseMul {
-            a,
-            b,
-            out: out.clone(),
-            pipeline: pipeline.expect("Kernel Module should be supplied from our kernel library"),
-        };
-
-        // Return the boxed operation and the output tensor.
-        Ok((Box::new(op), out))
-    }
-}
-
-// 4. Implement `Operation` for the internal struct.
-// This contains the low-level logic to encode the kernel onto the command buffer.
-impl Operation for ElemwiseMul {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        // ... encoding logic (set buffers, dispatch threads, etc.)
-        Ok(())
-    }
+#[derive(Kernel, KernelArgs, Clone)]
+#[kernel(
+    source = "ops/my_op.metal",
+    function = "my_op_entry",        // Entry point for standalone usage
+    stage_function = "run_my_op",    // Template function for fusion
+    args = "MyParams",
+    threadgroup = "float shared_mem[256]" // Declares shared memory for this stage
+)]
+pub struct MyOp {
+    // Input/Scales are handled by PolicyStage, so we skip them here for the stage signature
+    #[arg(stage_skip)] 
+    pub input: TensorArg,
+    
+    // Output is managed by this stage
+    #[arg(output)]
+    pub output: TensorArg,
+    
+    pub params: MyParams,
 }
 ```
 
-### Step 5: Add Tests (Recommended)
+### 2.2 Metal Template Contract
 
-To maintain quality, add a test file for your new kernel.
+When using `stage_function`, your Metal function must follow a strict signature contract to be compatible with the auto-generated code.
 
-1.  Create `src/metallic/kernels/my_kernel/my_kernel.test.rs`.
-2.  In `src/metallic/kernels/my_kernel/mod.rs`, add the following to include the test file:
-    ```rust
-    mod my_kernel_test;
-    ```
-3.  Write a test using the `ctx.call` API.
+**Signature:**
+```metal
+template<typename Policy>
+ALWAYS_INLINE void run_my_op(
+    const device uchar *matrix,       // Provided by PolicyStage
+    device half *output,              // Buffer 2 (Your Arg)
+    constant MyParams *params,        // Buffer 3 (Your Arg)
+    const device uchar *scales,       // Provided by PolicyStage
+    uint3 gid,                        // Implicit
+    uint3 lid,                        // Implicit
+    threadgroup float *shared_mem     // Passed from entry point
+) {
+    // ... logic ...
+}
+```
 
-    **`my_kernel.test.rs`**:
-    ```rust
-    #![cfg(test)]
-    use metallic::kernels::my_kernel::MyKernelOp;
-    use metallic::{Context, Tensor, TensorInit, TensorStorage};
+**Key Rules:**
+1.  **Implicit Arguments:** `matrix`, `scales`, `gid`, `lid` are passed by name from the caller.
+2.  **Threadgroup Memory:** Must be declared in the `threadgroup` attribute in Rust. It is allocated in the `[[kernel]]` entry point and passed as a pointer to your template. **Never** declare `threadgroup` variables inside the template function itself.
+3.  **Struct Injection:** Again, do not define `MyParams` in the Metal file.
 
-    #[test]
-    fn test_my_kernel_logic() -> Result<(), MetalError> {
-        let mut ctx = Context::new()?;
-        let a = Tensor::new(vec![2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&[1., 2.]))?;
-        let b = Tensor::new(vec![2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&[3., 4.]))?;
+### 2.3 Include Management
 
-        // Use the kernel via the generic `call` method.
-        let result_tensor = ctx.call::<MyKernelOp>((a, b))?;
-        ctx.synchronize();
+Foundry uses a "virtual filesystem" approach for Metal includes to ensure consistent builds and dependency tracking.
 
-        assert_eq!(result_tensor.as_slice(), &[3.0, 8.0]);
-        Ok(())
+**Best Practices:**
+1.  **Do NOT use `#include` in `.metal` files:** Manual includes (e.g., `#include "utils.metal"`) are strictly forbidden in kernel source files. They bypass the dependency system and will trigger build warnings or errors.
+2.  **Declare Dependencies in Rust:** Use the `Kernel::includes()` trait method (or the `includes` attribute in macros) to specify required files.
+3.  **Standard Libraries:** System includes like `<metal_stdlib>`, `<metal_simdgroup>`, and `<metal_simdgroup_matrix>` are allowed and encouraged.
+
+**Example (Macro):**
+```rust
+#[derive(Kernel)]
+#[kernel(
+    source = "ops/my_op.metal",
+    // Declare dependencies here
+    includes = ["utils/math.metal", "utils/shuffles.metal"] 
+)]
+pub struct MyOp { ... }
+```
+
+**Example (Manual Impl):**
+```rust
+impl Stage for MyManualStage {
+    fn includes(&self) -> Vec<&'static str> {
+        vec!["utils/math.metal", "policies/base.metal"]
     }
-    ```
+    // ...
+}
+```
 
-## 3. Usage
+The build system will automatically resolve these paths, strip local `#include` directives if present (with a warning), and inline the content into the final source passed to the Metal compiler.
 
-Once a kernel is implemented according to this pattern, using it from anywhere in the application is simple, clean, and type-safe.
+---
+
+## 3. The Policy System (Quantization)
+
+Foundry abstracts data types (F16, Q8, Q4) using **Policies**. A Policy defines how data is loaded from memory and presented to the kernel.
+
+**Rust Convention:**
+*   **Buffer 0**: `matrix` (Input/Weights) - Managed by `PolicyStage`.
+*   **Buffer 1**: `scales` (Quantization Metadata) - Managed by `PolicyStage`.
+*   **Buffer 2+**: Kernel-specific arguments.
+
+---
+
+## 4. Memory Layout & Striding
+
+Foundry provides a centralized system for managing memory layouts and stride calculations to ensure consistency between different kernel stages (e.g., GEMM and Softmax).
+
+### 4.1 The `Layout` Enum
+
+Located in `metallic_foundry::compound::layout`, this enum unifies weight and activation layouts:
+
+*   **`RowMajor`**: Standard [N, K] output-major layout.
+*   **`ColMajor`**: Standard [K, N] input-major layout.
+*   **`Canonical { expected_k, expected_n }`**: Blocked [N, K] format optimized for cache efficiency.
+
+### 4.2 `TiledLayout` Utility
+
+For kernels that operate on tiles (like SDPA), use `TiledLayout` to calculate strides and padding:
 
 ```rust
-// Make sure the Op struct is in scope.
-use metallic::kernels::my_kernel::MyKernelOp;
+use metallic_foundry::compound::layout::TiledLayout;
 
-// ...
+// Create layout for SDPA scratch buffers (Head-Major: [H, M, SeqLen])
+let layout = TiledLayout::sdpa_scratch(n_heads, m, kv_seq_len, tile_m);
 
-fn some_function(ctx: &mut Context, tensor_a: Tensor, tensor_b: Tensor) -> Result<Tensor, MetalError> {
-    // Simply call the kernel through the generic `Context::call` method.
-    let result = ctx.call::<MyKernelOp>((tensor_a, tensor_b))?;
-    Ok(result)
+// Use centralized properties for dispatch and parameter binding
+let head_stride = layout.head_stride;
+let padded_m = layout.padded_m;
+```
+
+This ensures that if the underlying tile size changes, all kernels in the fused pipeline remain aligned without manual math updates.
+
+---
+
+## 4. Activations (Foundry Inference)
+
+Foundry’s inference kernels standardize activations via a single Rust-side enum:
+
+- `metallic_foundry::policy::activation::Activation` (`None`, `SiLU`, `ReLU`, `GELU`)
+- Metal implementation lives in `policies/activations.metal` as `ActivationX::apply(...)` with scalar (`float`) and vector (`float2`/`float4`) overloads.
+
+### Where activations are applied
+
+The ordering matters for correctness and for future fusion work:
+
+- **GEMV output write (decode/projections):** `dot + bias` → `activation` → `+ residual * beta` (if enabled).
+- **GEMM epilogue (prefill/batched matmul):** `alpha/beta` blend → `+ bias` (if enabled) → `activation` → store.
+
+### How to enable
+
+Most user-facing entry points expose `activation: Activation` directly (e.g. `MatMulStep`, `GemvV2Step`, `GemmV2Step`).
+
+**Serialization/DX note:** the enum accepts common lowercase names (`"silu"`, `"relu"`, `"gelu"`, `"none"`) and legacy GGUF-style names (`"ActivationSiLU"`, etc.).
+
+---
+
+## 4. SIMD GEMV System (Decode Path)
+
+For the ultra-critical decode path (Batch Size = 1), Foundry uses a specialized, highly fused GEMV system.
+
+### 4.1 Manual Stage Implementation (Advanced/Legacy)
+
+Some complex kernels, such as **FusedQKV** (`qkv_stages.rs`), currently use manual `Stage` implementations. This is necessary when:
+*   Binding complex argument sets that exceed standard patterns (e.g., Q, K, V weights + scales = 6 buffers).
+*   Implementing custom emit logic that doesn't fit the standard template.
+
+For new stage work, prefer `#[derive(Stage)]` with declarative adapters:
+- `policy_field = "policy"` / `activation_field = "activation"` for policy/activation-aware emit templates.
+- `template_bindings(...)` for structured per-stage parameterization.
+- `buffer_args_fn = "..."` when signature shape is dynamic (for example, optional gamma buffers).
+
+**Manual Implementation Pattern:**
+1.  Implement the `Stage` trait manually.
+2.  Define `buffer_args()` to return the exact list of buffers (remembering to skip 0/1 if using PolicyStage).
+3.  Implement `emit()` to generate the specific C++ call site for your helper function.
+
+```rust
+// Example from qkv_stages.rs
+impl Stage for ParallelProjectStage {
+    fn buffer_args(&self) -> Vec<BufferArg> {
+        // Manually define 6 buffers for Q/K/V weights & scales
+        vec![
+            BufferArg { name: "w_q", metal_type: "const device uchar*", buffer_index: 0 },
+            // ...
+        ]
+    }
+
+    fn emit(&self, input_var: &str) -> (String, String) {
+        // manually construct the C++ call
+        let code = format!("... {policy}::template dot<{vec_width}>(...); ...");
+        ("qkv_partial".to_string(), code)
+    }
 }
 ```
 
-## Graph-backed Kernels
+---
 
-Several kernels now have MPSGraph-backed implementations that sit alongside the legacy Metal
-paths. When promoting a kernel to run through MPSGraph, follow this checklist to keep performance
-and telemetry consistent:
+## 5. Macro Reference
 
-- **Implement `GraphKernel`**: create a zero-sized type that implements both `KernelInvocable` and
-  the new `GraphKernel` trait. Encode storage and accumulator precision through
-  `GraphKernelDtypePolicy` (e.g., f16 storage with fp32 accumulators) so cache keys remain stable.
-- **Publish signatures**: override `GraphKernel::signature()` so axis semantics, optional bindings,
-  and notes are discoverable by tooling and future kernel ports.
-- **Dispatch via the registry**: introduce a `*DispatchOp` that queries `KernelBackendRegistry` and
-  selects the appropriate backend. The dispatcher automatically honors
-  `METALLIC_FORCE_SDPA_BACKEND=legacy|mpsgraph|auto` so developers can toggle behaviour without
-  code changes.
-- **Expose overrides**: surface CLI/config toggles (e.g., `--sdpa-backend`) that map onto the
-  registry, enabling per-run backend selection without mutating global environment variables.
-- **Use shared caches**: request executables through `ResourceCache::get_or_create_mpsgraph_*`.
-  The underlying `GraphExecutableCache` and `MaskArena` abstractions handle instrumentation and
-  reuse; avoid ad-hoc maps for graph resources.
-- **Add parity coverage**: extend `metallic::tests` with fixtures that compare graph vs. legacy
-  outputs and assert that env overrides flip the dispatcher as expected.
-- **Document invariants**: note any graph-specific constraints (mask semantics, stride
-  requirements, accumulator modes) directly alongside the kernel so future ports stay aligned.
+### `#[derive(MetalStruct)]`
+Generates a C++ struct definition string `METAL_STRUCT_DEF` that matches the Rust struct layout.
+*   **Usage:** Apply to param structs.
+*   **Note:** Handles `DynamicValue<T>` fields automatically for compilation.
 
-Following this pattern keeps DX uniform: every kernel exposes a single entry point, reports backend
-selection through `KernelBackendSelected` events, and shares graph executables through the reusable
-cache layers introduced in Milestone C.
+### `#[derive(Kernel)]`
+Implements `Kernel` and optionally `Stage` traits.
+*   `source`: Path to `.metal` file.
+*   `function`: Name of `[[kernel]]` function.
+*   `stage_function`: Name of template function (enables Stage generation).
+*   `args`: Name of the params struct (injects its definition).
+*   `threadgroup`: Declaration string for shared memory (e.g., `"float s[256]"`).
+*   `dispatch`: Enables default dispatch config or presets (e.g., `dispatch="per_row"`).
+
+### `#[derive(ConditionalKernel)]`
+Creates a dispatcher enum.
+*   `selector`: Variables used for dispatch (e.g., `"batch: u32"`).
+*   `#[when(condition)]`: Variants selected by condition.
+
+---
+
+## 6. Development Checklist
+
+- **Structs:** Defined in Rust with `#[derive(MetalStruct)]`. **Not** defined in `.metal`.
+- **Threadgroup:** Declared in Rust via `threadgroup` attribute. Passed as pointer in Metal.
+- **Buffers:** `PolicyStage` owns buffers 0 and 1. Your args start at 2 (unless standalone).
+- **Implict Args:** `gid`, `lid`, `tptg` are available in Metal signatures.

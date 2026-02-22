@@ -31,10 +31,13 @@ pub enum InstrumentEnvVar {
     MatmulSimdMMin,
     /// Minimum N dimension to enable SIMD-optimized GEMM.
     MatmulSimdNMin,
+    /// Threshold (in MB) under which tensors are zero-filled on CPU instead of GPU.
+    TensorCpuFillThresholdMb,
 }
 
 impl InstrumentEnvVar {
     /// Obtain the canonical environment variable key for the identifier.
+    #[must_use] 
     pub const fn key(self) -> &'static str {
         match self {
             InstrumentEnvVar::LogLevel => "METALLIC_LOG_LEVEL",
@@ -47,10 +50,12 @@ impl InstrumentEnvVar {
             InstrumentEnvVar::MatmulSmallnMaxN => "METALLIC_MATMUL_SMALLN_MAX_N",
             InstrumentEnvVar::MatmulSimdMMin => "METALLIC_MATMUL_SIMD_M_MIN",
             InstrumentEnvVar::MatmulSimdNMin => "METALLIC_MATMUL_SIMD_N_MIN",
+            InstrumentEnvVar::TensorCpuFillThresholdMb => "METALLIC_TENSOR_CPU_FILL_THRESHOLD_MB",
         }
     }
 
     /// Convert into the unscoped [`EnvVar`] variant.
+    #[must_use] 
     pub const fn into_env(self) -> EnvVar {
         EnvVar::Instrument(self)
     }
@@ -92,16 +97,22 @@ pub const MATMUL_SIMD_M_MIN: TypedEnvVar<String> =
 pub const MATMUL_SIMD_N_MIN: TypedEnvVar<String> =
     TypedEnvVar::new(InstrumentEnvVar::MatmulSimdNMin.into_env(), parse_string, format_string);
 
+/// Typed descriptor for the CPU fill threshold (MB) for tensor zero-inits.
+pub const CPU_FILL_THRESHOLD_MB: TypedEnvVar<usize> =
+    TypedEnvVar::new(InstrumentEnvVar::TensorCpuFillThresholdMb.into_env(), parse_usize, format_usize);
+
 /// Shim exposing ergonomic helpers for the log level variable.
 pub struct InstrumentLogLevel;
 
 impl InstrumentLogLevel {
     /// Retrieve the descriptor associated with the log level variable.
+    #[must_use] 
     pub const fn descriptor(&self) -> TypedEnvVar<Level> {
         LOG_LEVEL
     }
 
     /// Canonical key for the environment variable.
+    #[must_use] 
     pub const fn key(&self) -> &'static str {
         LOG_LEVEL.key()
     }
@@ -123,10 +134,11 @@ impl InstrumentLogLevel {
 
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
-        LOG_LEVEL.unset()
+        LOG_LEVEL.unset();
     }
 
     /// Unset the environment variable for the guard's lifetime.
+    #[must_use] 
     pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         LOG_LEVEL.unset_guard()
     }
@@ -137,11 +149,13 @@ pub struct InstrumentMetricsJsonlPath;
 
 impl InstrumentMetricsJsonlPath {
     /// Retrieve the descriptor associated with the JSONL path variable.
+    #[must_use] 
     pub const fn descriptor(&self) -> TypedEnvVar<PathBuf> {
         METRICS_JSONL_PATH
     }
 
     /// Canonical key for the environment variable.
+    #[must_use] 
     pub const fn key(&self) -> &'static str {
         METRICS_JSONL_PATH.key()
     }
@@ -163,10 +177,11 @@ impl InstrumentMetricsJsonlPath {
 
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
-        METRICS_JSONL_PATH.unset()
+        METRICS_JSONL_PATH.unset();
     }
 
     /// Unset the environment variable for the guard's lifetime.
+    #[must_use] 
     pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         METRICS_JSONL_PATH.unset_guard()
     }
@@ -177,11 +192,13 @@ pub struct InstrumentMetricsConsole;
 
 impl InstrumentMetricsConsole {
     /// Retrieve the descriptor associated with the console metrics toggle.
+    #[must_use] 
     pub const fn descriptor(&self) -> TypedEnvVar<bool> {
         METRICS_CONSOLE
     }
 
     /// Canonical key for the environment variable.
+    #[must_use] 
     pub const fn key(&self) -> &'static str {
         METRICS_CONSOLE.key()
     }
@@ -203,10 +220,11 @@ impl InstrumentMetricsConsole {
 
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
-        METRICS_CONSOLE.unset()
+        METRICS_CONSOLE.unset();
     }
 
     /// Unset the environment variable for the guard's lifetime.
+    #[must_use] 
     pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         METRICS_CONSOLE.unset_guard()
     }
@@ -217,11 +235,13 @@ pub struct InstrumentEnableProfiling;
 
 impl InstrumentEnableProfiling {
     /// Retrieve the descriptor associated with the latency toggle.
+    #[must_use] 
     pub const fn descriptor(&self) -> TypedEnvVar<bool> {
         ENABLE_PROFILING
     }
 
     /// Canonical key for the environment variable.
+    #[must_use] 
     pub const fn key(&self) -> &'static str {
         ENABLE_PROFILING.key()
     }
@@ -243,10 +263,11 @@ impl InstrumentEnableProfiling {
 
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
-        ENABLE_PROFILING.unset()
+        ENABLE_PROFILING.unset();
     }
 
     /// Unset the environment variable for the guard's lifetime.
+    #[must_use] 
     pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         ENABLE_PROFILING.unset_guard()
     }
@@ -257,11 +278,13 @@ pub struct InstrumentForceMatmulBackend;
 
 impl InstrumentForceMatmulBackend {
     /// Retrieve the descriptor associated with the matmul backend override.
+    #[must_use] 
     pub const fn descriptor(&self) -> TypedEnvVar<String> {
         FORCE_MATMUL_BACKEND
     }
 
     /// Canonical key for the environment variable.
+    #[must_use] 
     pub const fn key(&self) -> &'static str {
         FORCE_MATMUL_BACKEND.key()
     }
@@ -283,10 +306,11 @@ impl InstrumentForceMatmulBackend {
 
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
-        FORCE_MATMUL_BACKEND.unset()
+        FORCE_MATMUL_BACKEND.unset();
     }
 
     /// Unset the environment variable for the guard's lifetime.
+    #[must_use] 
     pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         FORCE_MATMUL_BACKEND.unset_guard()
     }
@@ -297,11 +321,13 @@ pub struct InstrumentForceSdpaBackend;
 
 impl InstrumentForceSdpaBackend {
     /// Retrieve the descriptor associated with the SDPA backend variable.
+    #[must_use] 
     pub const fn descriptor(&self) -> TypedEnvVar<String> {
         FORCE_SDPA_BACKEND
     }
 
     /// Canonical key for the environment variable.
+    #[must_use] 
     pub const fn key(&self) -> &'static str {
         FORCE_SDPA_BACKEND.key()
     }
@@ -323,10 +349,11 @@ impl InstrumentForceSdpaBackend {
 
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
-        FORCE_SDPA_BACKEND.unset()
+        FORCE_SDPA_BACKEND.unset();
     }
 
     /// Unset the environment variable for the guard's lifetime.
+    #[must_use] 
     pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         FORCE_SDPA_BACKEND.unset_guard()
     }
@@ -337,11 +364,13 @@ pub struct InstrumentSoftmaxBackend;
 
 impl InstrumentSoftmaxBackend {
     /// Retrieve the descriptor associated with the softmax backend override.
+    #[must_use] 
     pub const fn descriptor(&self) -> TypedEnvVar<String> {
         SOFTMAX_BACKEND
     }
 
     /// Canonical key for the environment variable.
+    #[must_use] 
     pub const fn key(&self) -> &'static str {
         SOFTMAX_BACKEND.key()
     }
@@ -363,10 +392,11 @@ impl InstrumentSoftmaxBackend {
 
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
-        SOFTMAX_BACKEND.unset()
+        SOFTMAX_BACKEND.unset();
     }
 
     /// Unset the environment variable for the guard's lifetime.
+    #[must_use] 
     pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         SOFTMAX_BACKEND.unset_guard()
     }
@@ -377,11 +407,13 @@ pub struct InstrumentMatmulSmallnMaxN;
 
 impl InstrumentMatmulSmallnMaxN {
     /// Retrieve the descriptor associated with the matmul small-N max N threshold.
+    #[must_use] 
     pub const fn descriptor(&self) -> TypedEnvVar<String> {
         MATMUL_SMALLN_MAX_N
     }
 
     /// Canonical key for the environment variable.
+    #[must_use] 
     pub const fn key(&self) -> &'static str {
         MATMUL_SMALLN_MAX_N.key()
     }
@@ -403,10 +435,11 @@ impl InstrumentMatmulSmallnMaxN {
 
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
-        MATMUL_SMALLN_MAX_N.unset()
+        MATMUL_SMALLN_MAX_N.unset();
     }
 
     /// Unset the environment variable for the guard's lifetime.
+    #[must_use] 
     pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         MATMUL_SMALLN_MAX_N.unset_guard()
     }
@@ -417,11 +450,13 @@ pub struct InstrumentMatmulSimdMMin;
 
 impl InstrumentMatmulSimdMMin {
     /// Retrieve the descriptor associated with the matmul SIMD M minimum threshold.
+    #[must_use] 
     pub const fn descriptor(&self) -> TypedEnvVar<String> {
         MATMUL_SIMD_M_MIN
     }
 
     /// Canonical key for the environment variable.
+    #[must_use] 
     pub const fn key(&self) -> &'static str {
         MATMUL_SIMD_M_MIN.key()
     }
@@ -443,10 +478,11 @@ impl InstrumentMatmulSimdMMin {
 
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
-        MATMUL_SIMD_M_MIN.unset()
+        MATMUL_SIMD_M_MIN.unset();
     }
 
     /// Unset the environment variable for the guard's lifetime.
+    #[must_use] 
     pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         MATMUL_SIMD_M_MIN.unset_guard()
     }
@@ -457,11 +493,13 @@ pub struct InstrumentMatmulSimdNMin;
 
 impl InstrumentMatmulSimdNMin {
     /// Retrieve the descriptor associated with the matmul SIMD N minimum threshold.
+    #[must_use] 
     pub const fn descriptor(&self) -> TypedEnvVar<String> {
         MATMUL_SIMD_N_MIN
     }
 
     /// Canonical key for the environment variable.
+    #[must_use] 
     pub const fn key(&self) -> &'static str {
         MATMUL_SIMD_N_MIN.key()
     }
@@ -483,10 +521,11 @@ impl InstrumentMatmulSimdNMin {
 
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
-        MATMUL_SIMD_N_MIN.unset()
+        MATMUL_SIMD_N_MIN.unset();
     }
 
     /// Unset the environment variable for the guard's lifetime.
+    #[must_use] 
     pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         MATMUL_SIMD_N_MIN.unset_guard()
     }
@@ -512,6 +551,8 @@ pub const MATMUL_SMALLN_MAX_N_VAR: InstrumentMatmulSmallnMaxN = InstrumentMatmul
 pub const MATMUL_SIMD_M_MIN_VAR: InstrumentMatmulSimdMMin = InstrumentMatmulSimdMMin;
 /// Ergonomic constant exposing the matmul-simd-n-min helper methods.
 pub const MATMUL_SIMD_N_MIN_VAR: InstrumentMatmulSimdNMin = InstrumentMatmulSimdNMin;
+/// Ergonomic constant exposing the CPU fill threshold helper methods.
+pub const CPU_FILL_THRESHOLD_MB_VAR: InstrumentCpuFillThresholdMb = InstrumentCpuFillThresholdMb;
 
 fn parse_log_level(value: &str) -> Result<Level, EnvVarParseError> {
     value.parse::<Level>().map_err(|_| EnvVarParseError::new("invalid tracing level"))
@@ -547,4 +588,56 @@ fn parse_bool(value: &str) -> Result<bool, EnvVarParseError> {
 
 fn format_bool(value: &bool) -> Result<String, EnvVarFormatError> {
     Ok(value.to_string())
+}
+
+fn parse_usize(value: &str) -> Result<usize, EnvVarParseError> {
+    value
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| EnvVarParseError::new("value is not a valid usize"))
+}
+
+fn format_usize(value: &usize) -> Result<String, EnvVarFormatError> {
+    Ok(value.to_string())
+}
+
+/// Shim exposing ergonomic helpers for the CPU fill threshold variable.
+pub struct InstrumentCpuFillThresholdMb;
+
+impl InstrumentCpuFillThresholdMb {
+    /// Descriptor for the CPU fill threshold.
+    #[must_use] 
+    pub const fn descriptor(&self) -> TypedEnvVar<usize> {
+        CPU_FILL_THRESHOLD_MB
+    }
+
+    /// Canonical key name.
+    #[must_use] 
+    pub const fn key(&self) -> &'static str {
+        CPU_FILL_THRESHOLD_MB.key()
+    }
+
+    /// Get the typed value if present.
+    pub fn get(&self) -> Result<Option<usize>, EnvVarError> {
+        CPU_FILL_THRESHOLD_MB.get()
+    }
+
+    /// Set the threshold (in MB).
+    pub fn set(&self, value: usize) -> Result<(), EnvVarError> {
+        CPU_FILL_THRESHOLD_MB.set(value)
+    }
+
+    /// Scoped set.
+    pub fn set_guard(&self, value: usize) -> Result<TypedEnvVarGuard<'_, usize>, EnvVarError> {
+        CPU_FILL_THRESHOLD_MB.set_guard(value)
+    }
+
+    /// Unset.
+    pub fn unset(&self) {
+        CPU_FILL_THRESHOLD_MB.unset();
+    }
+    #[must_use] 
+    pub fn unset_guard(&self) -> super::guard::EnvVarGuard<'_> {
+        CPU_FILL_THRESHOLD_MB.unset_guard()
+    }
 }

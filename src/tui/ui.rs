@@ -1,6 +1,7 @@
 use ratatui::{
     Frame, layout::{Alignment, Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style}, text::Text, widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap}
 };
+use tui_markdown::from_str;
 
 use crate::tui::{
     app::{App, FocusArea, MetricsView}, metrics::HierarchicalMetric
@@ -17,15 +18,25 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
         .split(main_layout[0]);
 
-    // Conditionally split the main text area to have generation text and log box
+    // Split the body layout [0] (Left Column) into Content Area and Input Area
+    let left_column = body_layout[0];
+    let left_column_split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)]) // Content + Input
+        .split(left_column);
+
+    let content_area = left_column_split[0];
+    let input_area = left_column_split[1];
+
+    // Conditionally split the content area to have generation text and log box
     let (text_area, log_area) = if app.log_visible {
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(0), Constraint::Length(10)]) // Generation area + log box
-            .split(body_layout[0]);
+            .split(content_area);
         (areas[0], Some(areas[1]))
     } else {
-        (body_layout[0], None)
+        (content_area, None)
     };
 
     let text_block = Block::default()
@@ -33,9 +44,16 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .borders(Borders::ALL)
         .border_style(border_style(app.focus == FocusArea::GeneratedText));
 
-    // Create text with selections highlighted
-    let text_with_selection = create_text_with_selection(&app.generated_text, app, text_area);
-    let text_area_widget = Paragraph::new(text_with_selection)
+    // Create text content based on display mode
+    let text_content = match app.text_display_mode {
+        crate::tui::app::TextDisplayMode::Markdown => from_str(&app.generated_text),
+        crate::tui::app::TextDisplayMode::Plain => {
+            // Create text with selections highlighted (original behavior)
+            create_text_with_selection(&app.generated_text, app, text_area)
+        }
+    };
+
+    let text_area_widget = Paragraph::new(text_content)
         .block(text_block)
         .wrap(Wrap { trim: false })
         .scroll((app.text_scroll, 0));
@@ -106,6 +124,14 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .wrap(Wrap { trim: false })
         .scroll((app.log_scroll, 0));
 
+    // Input Box
+    let input_block = Block::default()
+        .title("Input (Enter to send)")
+        .borders(Borders::ALL)
+        .border_style(border_style(app.focus == FocusArea::Input));
+
+    let input_widget = Paragraph::new(app.input_buffer.as_str()).block(input_block);
+
     frame.render_widget(text_area_widget, text_area); // Render text in the appropriate area
     if let Some(log_area) = log_area {
         frame.render_widget(log_widget, log_area);
@@ -122,15 +148,25 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         None
     };
 
+    // Add markdown mode indicator to status
+    let mode_indicator = match app.text_display_mode {
+        crate::tui::app::TextDisplayMode::Markdown => " [Ctrl+D: Plain Text Mode]",
+        crate::tui::app::TextDisplayMode::Plain => " [Ctrl+D: Markdown Mode]",
+    };
+    let extended_status = format!("{}{}", app.status, mode_indicator);
+
     app.status_bar.set_tokens_per_second(tokens_per_second);
-    app.status_bar.set_status_text(&app.status);
+    app.status_bar.set_status_text(&extended_status);
 
     // Render the status bar using the component
     app.status_bar.render(frame, main_layout[1]);
 
+    frame.render_widget(input_widget, input_area);
+
     app.text_area = text_area; // Update app.text_area to refer to the actual text area
     app.metrics_area = sidebar_sections[1];
     app.log_area = log_area.unwrap_or_default();
+    app.input_area = input_area;
 
     if let Some(alert) = app.active_alert() {
         render_alert_modal(frame, alert, app.pending_alert_count());
@@ -138,7 +174,14 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     if app.request_follow_text {
         if app.text_area.height > 0 {
-            let content_lines = app.generated_text.matches('\n').count() + 1;
+            let content_lines = if matches!(app.text_display_mode, crate::tui::app::TextDisplayMode::Markdown) {
+                // For markdown mode, calculate the visual lines from the markdown text
+                let markdown_text = from_str(&app.generated_text);
+                markdown_text.lines.len()
+            } else {
+                // For plain text mode, count the actual lines
+                app.generated_text.matches('\n').count() + 1
+            };
             let visible = app.text_area.height as usize;
             let baseline = content_lines.saturating_sub(visible) as u16;
             app.text_scroll = baseline;
@@ -158,23 +201,33 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     // Render scrollbars for widgets that need them
 
-    // Text area scrollbar
-    let wrap_width = text_area.width.saturating_sub(2); // Subtract 2 for borders
-    let mut total_visual_lines = 0u16;
-    for line in app.generated_text.lines() {
-        let visual_lines = app.count_visual_lines_for_content_line(line, wrap_width) as u16;
-        total_visual_lines = total_visual_lines.saturating_add(visual_lines);
-    }
-
+    // Text area scrollbar - calculate based on the text content already created
     let text_visible_lines = text_area.height.saturating_sub(2); // Subtract 2 for borders
+    let total_content_lines = match app.text_display_mode {
+        crate::tui::app::TextDisplayMode::Markdown => {
+            // Create the markdown text and count its lines
+            let markdown_text = from_str(&app.generated_text);
+            markdown_text.lines.len()
+        }
+        crate::tui::app::TextDisplayMode::Plain => {
+            // For plain text mode, use existing calculation
+            let wrap_width = text_area.width.saturating_sub(2); // Subtract 2 for borders
+            let mut total_visual_lines = 0u16;
+            for line in app.generated_text.lines() {
+                let visual_lines = app.count_visual_lines_for_content_line(line, wrap_width) as u16;
+                total_visual_lines = total_visual_lines.saturating_add(visual_lines);
+            }
+            total_visual_lines as usize
+        }
+    };
+    let max_scroll = total_content_lines.saturating_sub(text_visible_lines as usize).max(0);
 
-    if total_visual_lines > text_visible_lines && text_visible_lines > 0 {
+    if max_scroll > 0 && text_visible_lines > 0 {
         let text_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
 
-        // Calculate the maximum scroll position (total visual lines - visible lines)
-        let max_scroll = (total_visual_lines - text_visible_lines) as usize;
+        // Calculate the current scroll position
         let current_scroll = (app.text_scroll as usize).min(max_scroll);
 
         let text_scrollbar_state = ScrollbarState::new(max_scroll).position(current_scroll);
@@ -347,7 +400,19 @@ fn render_metric(metric: &HierarchicalMetric, depth: usize, max_depth: usize, li
     });
     let residual_last = (inclusive_last_ms - child_last_sum).max(0.0);
     let residual_avg = (inclusive_average_ms - child_average_sum).max(0.0);
-    lines.push(format_latency_line(level, &metric.label, inclusive_last_ms, inclusive_average_ms));
+
+    // Check for metadata like batch_size
+    let display_label = if let Some(meta) = &metric.metadata {
+        if let Some(batch_size) = meta.get("batch_size") {
+            format!("{} [Batch Size: {}]", metric.label, batch_size)
+        } else {
+            metric.label.clone()
+        }
+    } else {
+        metric.label.clone()
+    };
+
+    lines.push(format_latency_line(level, &display_label, inclusive_last_ms, inclusive_average_ms));
 
     if depth == max_depth {
         return;
@@ -546,14 +611,14 @@ impl App {
             metric.running_average.record(self.prompt_processing_total_last_ms);
         } else {
             // For non-prompt processing metrics, add normally
-            self.upsert_latency_path(&segments, row.last_ms);
+            self.upsert_latency_path(&segments, row.last_ms, row.metadata);
         }
 
         // Recalculate max depth for latency metrics since the tree structure may have changed
         self.latency_collapse_depth.calculate_max_depth(&self.latency_tree);
     }
 
-    fn upsert_latency_path(&mut self, path: &[&str], last_ms: f64) {
+    fn upsert_latency_path(&mut self, path: &[&str], last_ms: f64, metadata: Option<std::collections::HashMap<String, String>>) {
         if path.is_empty() {
             return;
         }
@@ -573,19 +638,31 @@ impl App {
         if path.len() == 1 {
             metric.last_ms = last_ms;
             metric.running_average.record(last_ms);
+            // Store metadata on the leaf node
+            metric.metadata = metadata;
             return;
         }
 
-        metric.upsert_path(&path[1..], last_ms);
+        metric.upsert_path_with_metadata(&path[1..], last_ms, metadata);
     }
 }
 
 fn create_text_with_selection(text: &str, app: &App, _area: Rect) -> ratatui::text::Text<'static> {
     use ratatui::text::{Line, Span};
 
-    // If there's no selection, return the text as is
+    // If there's no selection, return the text with coloring
     if !app.is_selecting || app.text_selection_start.is_none() || app.text_selection_end.is_none() {
-        return Text::from(text.to_string());
+        let lines: Vec<Line> = text
+            .lines()
+            .map(|line| {
+                if line.starts_with("> ") {
+                    Line::from(vec![Span::styled(line.to_string(), Style::default().fg(Color::Cyan))])
+                } else {
+                    Line::from(line.to_string())
+                }
+            })
+            .collect();
+        return Text::from(lines);
     }
 
     let lines: Vec<&str> = text.lines().collect();

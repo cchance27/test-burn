@@ -1,0 +1,405 @@
++-------------------------------------+
+| Llama-3.2-3B-Instruct-Q4_0_4_4.gguf |
++-------------------------------------+
+
+Header
+======
+
+✔️  Magic   = "GGUF"
+✔️  Endian  = Little
+✔️  Version = 3
+✔️  MetaKVs = 35
+✔️  Tensors = 255
+
+Meta KV
+=======
+
+✔️  general.architecture····················str: `llama`
+✔️  general.type····························str: `model`
+✔️  general.name····························str: `Llama 3.2 3B Instruct`
+✔️  general.finetune························str: `Instruct`
+✔️  general.basename························str: `Llama-3.2`
+✔️  general.size_label······················str: `3B`
+✔️  general.license·························str: `llama3.2`
+✔️  general.tags····························arr: [`facebook`, `meta`, `pytorch`, `llama`, `llama-3`, `text-generation`]
+✔️  general.languages·······················arr: [`en`, `de`, `fr`, `it`, `pt`, `hi`, `es`, `th`]
+✔️  llama.block_count·······················u32: 28
+✔️  llama.context_length····················u32: 131072
+✔️  llama.embedding_length··················u32: 3072
+✔️  llama.feed_forward_length···············u32: 8192
+✔️  llama.attention.head_count··············u32: 24
+✔️  llama.attention.head_count_kv···········u32: 8
+✔️  llama.rope.freq_base····················f32: 5e5
+✔️  llama.attention.layer_norm_rms_epsilon··f32: 1e-5
+✔️  llama.attention.key_length··············u32: 128
+✔️  llama.attention.value_length············u32: 128
+✔️  general.file_type·······················u32: 33
+✔️  llama.vocab_size························u32: 128256
+✔️  llama.rope.dimension_count··············u32: 128
+✔️  tokenizer.ggml.model····················str: `gpt2`
+✔️  tokenizer.ggml.pre······················str: `llama-bpe`
+✔️  tokenizer.ggml.tokens···················arr: [`!`, `"`, `#`, `$`, `%`, `&`, `'`, `(`, ...(128248 more of 128256)]
+✔️  tokenizer.ggml.token_type···············arr: [1, 1, 1, 1, 1, 1, 1, 1, ...(128248 more of 128256)]
+✔️  tokenizer.ggml.merges···················arr: [`Ġ Ġ`, `Ġ ĠĠĠ`, `ĠĠ ĠĠ`, `ĠĠĠ Ġ`, `i n`, `Ġ t`, `Ġ ĠĠĠĠĠĠĠ`, `ĠĠ ĠĠĠĠĠĠ`, ...(280139 more of 280147)]
+✔️  tokenizer.ggml.bos_token_id·············u32: 128000
+✔️  tokenizer.ggml.eos_token_id·············u32: 128009
+✔️  tokenizer.chat_template·················str: 
+   +--
+   | {{- bos_token }}
+   | {%- if custom_tools is defined %}
+   |     {%- set tools = custom_tools %}
+   | {%- endif %}
+   | {%- if not tools_in_user_message is defined %}
+   |     {%- set tools_in_user_message = true %}
+   | {%- endif %}
+   | {%- if not date_string is defined %}
+   |     {%- if strftime_now is defined %}
+   |         {%- set date_string = strftime_now("%d %b %Y") %}
+   |     {%- else %}
+   |         {%- set date_string = "26 Jul 2024" %}
+   |     {%- endif %}
+   | {%- endif %}
+   | {%- if not tools is defined %}
+   |     {%- set tools = none %}
+   | {%- endif %}
+   | 
+   | {#- This block extracts the system message, so we can slot it into the right place. #}
+   | {%- if messages[0]['role'] == 'system' %}
+   |     {%- set system_message = messages[0]['content']|trim %}
+   |     {%- set messages = messages[1:] %}
+   | {%- else %}
+   |     {%- set system_message = "" %}
+   | {%- endif %}
+   | 
+   | {#- System message #}
+   | {{- "<|start_header_id|>system<|end_header_id|>\n\n" }}
+   | {%- if tools is not none %}
+   |     {{- "Environment: ipython\n" }}
+   | {%- endif %}
+   | {{- "Cutting Knowledge Date: December 2023\n" }}
+   | {{- "Today Date: " + date_string + "\n\n" }}
+   | {%- if tools is not none and not tools_in_user_message %}
+   |     {{- "You have access to the following functions. To call a function, please respond with JSON for a function call." }}
+   |     {{- 'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.' }}
+   |     {{- "Do not use variables.\n\n" }}
+   |     {%- for t in tools %}
+   |         {{- t | tojson(indent=4) }}
+   |         {{- "\n\n" }}
+   |     {%- endfor %}
+   | {%- endif %}
+   | {{- system_message }}
+   | {{- "<|eot_id|>" }}
+   | 
+   | {#- Custom tools are passed in a user message with some extra guidance #}
+   | {%- if tools_in_user_message and not tools is none %}
+   |     {#- Extract the first user message so we can plug it in here #}
+   |     {%- if messages | length != 0 %}
+   |         {%- set first_user_message = messages[0]['content']|trim %}
+   |         {%- set messages = messages[1:] %}
+   |     {%- else %}
+   |         {{- raise_exception("Cannot put tools in the first user message when there's no first user message!") }}
+   | {%- endif %}
+   |     {{- '<|start_header_id|>user<|end_header_id|>\n\n' -}}
+   |     {{- "Given the following functions, please respond with a JSON for a function call " }}
+   |     {{- "with its proper arguments that best answers the given prompt.\n\n" }}
+   |     {{- 'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.' }}
+   |     {{- "Do not use variables.\n\n" }}
+   |     {%- for t in tools %}
+   |         {{- t | tojson(indent=4) }}
+   |         {{- "\n\n" }}
+   |     {%- endfor %}
+   |     {{- first_user_message + "<|eot_id|>"}}
+   | {%- endif %}
+   | 
+   | {%- for message in messages %}
+   |     {%- if not (message.role == 'ipython' or message.role == 'tool' or 'tool_calls' in message) %}
+   |         {{- '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n'+ message['content'] | trim + '<|eot_id|>' }}
+   |     {%- elif 'tool_calls' in message %}
+   |         {%- if not message.tool_calls|length == 1 %}
+   |             {{- raise_exception("This model only supports single tool-calls at once!") }}
+   |         {%- endif %}
+   |         {%- set tool_call = message.tool_calls[0].function %}
+   |         {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' -}}
+   |         {{- '{"name": "' + tool_call.name + '", ' }}
+   |         {{- '"parameters": ' }}
+   |         {{- tool_call.arguments | tojson }}
+   |         {{- "}" }}
+   |         {{- "<|eot_id|>" }}
+   |     {%- elif message.role == "tool" or message.role == "ipython" %}
+   |         {{- "<|start_header_id|>ipython<|end_header_id|>\n\n" }}
+   |         {%- if message.content is mapping or message.content is iterable %}
+   |             {{- message.content | tojson }}
+   |         {%- else %}
+   |             {{- message.content }}
+   |         {%- endif %}
+   |         {{- "<|eot_id|>" }}
+   |     {%- endif %}
+   | {%- endfor %}
+   | {%- if add_generation_prompt %}
+   |     {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' }}
+   | {%- endif %}
+   +--
+✔️  general.quantization_version············u32: 2
+✔️  quantize.imatrix.file···················str: `/models_out/Llama-3.2-3B-Instruct-GGUF/Llama-3.2-3B-Instruct.imatrix`
+✔️  quantize.imatrix.dataset················str: `/training_dir/calibration_datav3.txt`
+✔️  quantize.imatrix.entries_count··········i32: 196
+✔️  quantize.imatrix.chunks_count···········i32: 125
+
+Tensors
+=======
+
+✔️  rope_freqs.weight············F32 +0x00000000 [64]
+✔️  token_embd.weight············Q6K +0x00000100 [3072, 128256]
+✔️  blk.0.attn_norm.weight·······F32 +0x1343b900 [3072]
+✔️  blk.0.ffn_down.weight·····Q4_0_4_4 +0x1343e900 [8192, 3072]
+✔️  blk.0.ffn_gate.weight·····Q4_0_4_4 +0x141be900 [3072, 8192]
+✔️  blk.0.ffn_up.weight·······Q4_0_4_4 +0x14f3e900 [3072, 8192]
+✔️  blk.0.ffn_norm.weight········F32 +0x15cbe900 [3072]
+✔️  blk.0.attn_k.weight·······Q4_0_4_4 +0x15cc1900 [3072, 1024]
+✔️  blk.0.attn_output.weight··Q4_0_4_4 +0x15e71900 [3072, 3072]
+✔️  blk.0.attn_q.weight·······Q4_0_4_4 +0x16381900 [3072, 3072]
+✔️  blk.0.attn_v.weight·······Q4_0_4_4 +0x16891900 [3072, 1024]
+✔️  blk.1.attn_norm.weight·······F32 +0x16a41900 [3072]
+✔️  blk.1.ffn_down.weight·····Q4_0_4_4 +0x16a44900 [8192, 3072]
+✔️  blk.1.ffn_gate.weight·····Q4_0_4_4 +0x177c4900 [3072, 8192]
+✔️  blk.1.ffn_up.weight·······Q4_0_4_4 +0x18544900 [3072, 8192]
+✔️  blk.1.ffn_norm.weight········F32 +0x192c4900 [3072]
+✔️  blk.1.attn_k.weight·······Q4_0_4_4 +0x192c7900 [3072, 1024]
+✔️  blk.1.attn_output.weight··Q4_0_4_4 +0x19477900 [3072, 3072]
+✔️  blk.1.attn_q.weight·······Q4_0_4_4 +0x19987900 [3072, 3072]
+✔️  blk.1.attn_v.weight·······Q4_0_4_4 +0x19e97900 [3072, 1024]
+✔️  blk.10.attn_norm.weight······F32 +0x1a047900 [3072]
+✔️  blk.10.ffn_down.weight····Q4_0_4_4 +0x1a04a900 [8192, 3072]
+✔️  blk.10.ffn_gate.weight····Q4_0_4_4 +0x1adca900 [3072, 8192]
+✔️  blk.10.ffn_up.weight······Q4_0_4_4 +0x1bb4a900 [3072, 8192]
+✔️  blk.10.ffn_norm.weight·······F32 +0x1c8ca900 [3072]
+✔️  blk.10.attn_k.weight······Q4_0_4_4 +0x1c8cd900 [3072, 1024]
+✔️  blk.10.attn_output.weight·Q4_0_4_4 +0x1ca7d900 [3072, 3072]
+✔️  blk.10.attn_q.weight······Q4_0_4_4 +0x1cf8d900 [3072, 3072]
+✔️  blk.10.attn_v.weight······Q4_0_4_4 +0x1d49d900 [3072, 1024]
+✔️  blk.11.attn_norm.weight······F32 +0x1d64d900 [3072]
+✔️  blk.11.ffn_down.weight····Q4_0_4_4 +0x1d650900 [8192, 3072]
+✔️  blk.11.ffn_gate.weight····Q4_0_4_4 +0x1e3d0900 [3072, 8192]
+✔️  blk.11.ffn_up.weight······Q4_0_4_4 +0x1f150900 [3072, 8192]
+✔️  blk.11.ffn_norm.weight·······F32 +0x1fed0900 [3072]
+✔️  blk.11.attn_k.weight······Q4_0_4_4 +0x1fed3900 [3072, 1024]
+✔️  blk.11.attn_output.weight·Q4_0_4_4 +0x20083900 [3072, 3072]
+✔️  blk.11.attn_q.weight······Q4_0_4_4 +0x20593900 [3072, 3072]
+✔️  blk.11.attn_v.weight······Q4_0_4_4 +0x20aa3900 [3072, 1024]
+✔️  blk.12.attn_norm.weight······F32 +0x20c53900 [3072]
+✔️  blk.12.ffn_down.weight····Q4_0_4_4 +0x20c56900 [8192, 3072]
+✔️  blk.12.ffn_gate.weight····Q4_0_4_4 +0x219d6900 [3072, 8192]
+✔️  blk.12.ffn_up.weight······Q4_0_4_4 +0x22756900 [3072, 8192]
+✔️  blk.12.ffn_norm.weight·······F32 +0x234d6900 [3072]
+✔️  blk.12.attn_k.weight······Q4_0_4_4 +0x234d9900 [3072, 1024]
+✔️  blk.12.attn_output.weight·Q4_0_4_4 +0x23689900 [3072, 3072]
+✔️  blk.12.attn_q.weight······Q4_0_4_4 +0x23b99900 [3072, 3072]
+✔️  blk.12.attn_v.weight······Q4_0_4_4 +0x240a9900 [3072, 1024]
+✔️  blk.13.attn_norm.weight······F32 +0x24259900 [3072]
+✔️  blk.13.ffn_down.weight····Q4_0_4_4 +0x2425c900 [8192, 3072]
+✔️  blk.13.ffn_gate.weight····Q4_0_4_4 +0x24fdc900 [3072, 8192]
+✔️  blk.13.ffn_up.weight······Q4_0_4_4 +0x25d5c900 [3072, 8192]
+✔️  blk.13.ffn_norm.weight·······F32 +0x26adc900 [3072]
+✔️  blk.13.attn_k.weight······Q4_0_4_4 +0x26adf900 [3072, 1024]
+✔️  blk.13.attn_output.weight·Q4_0_4_4 +0x26c8f900 [3072, 3072]
+✔️  blk.13.attn_q.weight······Q4_0_4_4 +0x2719f900 [3072, 3072]
+✔️  blk.13.attn_v.weight······Q4_0_4_4 +0x276af900 [3072, 1024]
+✔️  blk.14.attn_norm.weight······F32 +0x2785f900 [3072]
+✔️  blk.14.ffn_down.weight····Q4_0_4_4 +0x27862900 [8192, 3072]
+✔️  blk.14.ffn_gate.weight····Q4_0_4_4 +0x285e2900 [3072, 8192]
+✔️  blk.14.ffn_up.weight······Q4_0_4_4 +0x29362900 [3072, 8192]
+✔️  blk.14.ffn_norm.weight·······F32 +0x2a0e2900 [3072]
+✔️  blk.14.attn_k.weight······Q4_0_4_4 +0x2a0e5900 [3072, 1024]
+✔️  blk.14.attn_output.weight·Q4_0_4_4 +0x2a295900 [3072, 3072]
+✔️  blk.14.attn_q.weight······Q4_0_4_4 +0x2a7a5900 [3072, 3072]
+✔️  blk.14.attn_v.weight······Q4_0_4_4 +0x2acb5900 [3072, 1024]
+✔️  blk.15.attn_norm.weight······F32 +0x2ae65900 [3072]
+✔️  blk.15.ffn_down.weight····Q4_0_4_4 +0x2ae68900 [8192, 3072]
+✔️  blk.15.ffn_gate.weight····Q4_0_4_4 +0x2bbe8900 [3072, 8192]
+✔️  blk.15.ffn_up.weight······Q4_0_4_4 +0x2c968900 [3072, 8192]
+✔️  blk.15.ffn_norm.weight·······F32 +0x2d6e8900 [3072]
+✔️  blk.15.attn_k.weight······Q4_0_4_4 +0x2d6eb900 [3072, 1024]
+✔️  blk.15.attn_output.weight·Q4_0_4_4 +0x2d89b900 [3072, 3072]
+✔️  blk.15.attn_q.weight······Q4_0_4_4 +0x2ddab900 [3072, 3072]
+✔️  blk.15.attn_v.weight······Q4_0_4_4 +0x2e2bb900 [3072, 1024]
+✔️  blk.16.attn_norm.weight······F32 +0x2e46b900 [3072]
+✔️  blk.16.ffn_down.weight····Q4_0_4_4 +0x2e46e900 [8192, 3072]
+✔️  blk.16.ffn_gate.weight····Q4_0_4_4 +0x2f1ee900 [3072, 8192]
+✔️  blk.16.ffn_up.weight······Q4_0_4_4 +0x2ff6e900 [3072, 8192]
+✔️  blk.16.ffn_norm.weight·······F32 +0x30cee900 [3072]
+✔️  blk.16.attn_k.weight······Q4_0_4_4 +0x30cf1900 [3072, 1024]
+✔️  blk.16.attn_output.weight·Q4_0_4_4 +0x30ea1900 [3072, 3072]
+✔️  blk.16.attn_q.weight······Q4_0_4_4 +0x313b1900 [3072, 3072]
+✔️  blk.16.attn_v.weight······Q4_0_4_4 +0x318c1900 [3072, 1024]
+✔️  blk.17.attn_norm.weight······F32 +0x31a71900 [3072]
+✔️  blk.17.ffn_down.weight····Q4_0_4_4 +0x31a74900 [8192, 3072]
+✔️  blk.17.ffn_gate.weight····Q4_0_4_4 +0x327f4900 [3072, 8192]
+✔️  blk.17.ffn_up.weight······Q4_0_4_4 +0x33574900 [3072, 8192]
+✔️  blk.17.ffn_norm.weight·······F32 +0x342f4900 [3072]
+✔️  blk.17.attn_k.weight······Q4_0_4_4 +0x342f7900 [3072, 1024]
+✔️  blk.17.attn_output.weight·Q4_0_4_4 +0x344a7900 [3072, 3072]
+✔️  blk.17.attn_q.weight······Q4_0_4_4 +0x349b7900 [3072, 3072]
+✔️  blk.17.attn_v.weight······Q4_0_4_4 +0x34ec7900 [3072, 1024]
+✔️  blk.18.attn_norm.weight······F32 +0x35077900 [3072]
+✔️  blk.18.ffn_down.weight····Q4_0_4_4 +0x3507a900 [8192, 3072]
+✔️  blk.18.ffn_gate.weight····Q4_0_4_4 +0x35dfa900 [3072, 8192]
+✔️  blk.18.ffn_up.weight······Q4_0_4_4 +0x36b7a900 [3072, 8192]
+✔️  blk.18.ffn_norm.weight·······F32 +0x378fa900 [3072]
+✔️  blk.18.attn_k.weight······Q4_0_4_4 +0x378fd900 [3072, 1024]
+✔️  blk.18.attn_output.weight·Q4_0_4_4 +0x37aad900 [3072, 3072]
+✔️  blk.18.attn_q.weight······Q4_0_4_4 +0x37fbd900 [3072, 3072]
+✔️  blk.18.attn_v.weight······Q4_0_4_4 +0x384cd900 [3072, 1024]
+✔️  blk.19.attn_norm.weight······F32 +0x3867d900 [3072]
+✔️  blk.19.ffn_down.weight····Q4_0_4_4 +0x38680900 [8192, 3072]
+✔️  blk.19.ffn_gate.weight····Q4_0_4_4 +0x39400900 [3072, 8192]
+✔️  blk.19.ffn_up.weight······Q4_0_4_4 +0x3a180900 [3072, 8192]
+✔️  blk.19.ffn_norm.weight·······F32 +0x3af00900 [3072]
+✔️  blk.19.attn_k.weight······Q4_0_4_4 +0x3af03900 [3072, 1024]
+✔️  blk.19.attn_output.weight·Q4_0_4_4 +0x3b0b3900 [3072, 3072]
+✔️  blk.19.attn_q.weight······Q4_0_4_4 +0x3b5c3900 [3072, 3072]
+✔️  blk.19.attn_v.weight······Q4_0_4_4 +0x3bad3900 [3072, 1024]
+✔️  blk.2.attn_norm.weight·······F32 +0x3bc83900 [3072]
+✔️  blk.2.ffn_down.weight·····Q4_0_4_4 +0x3bc86900 [8192, 3072]
+✔️  blk.2.ffn_gate.weight·····Q4_0_4_4 +0x3ca06900 [3072, 8192]
+✔️  blk.2.ffn_up.weight·······Q4_0_4_4 +0x3d786900 [3072, 8192]
+✔️  blk.2.ffn_norm.weight········F32 +0x3e506900 [3072]
+✔️  blk.2.attn_k.weight·······Q4_0_4_4 +0x3e509900 [3072, 1024]
+✔️  blk.2.attn_output.weight··Q4_0_4_4 +0x3e6b9900 [3072, 3072]
+✔️  blk.2.attn_q.weight·······Q4_0_4_4 +0x3ebc9900 [3072, 3072]
+✔️  blk.2.attn_v.weight·······Q4_0_4_4 +0x3f0d9900 [3072, 1024]
+✔️  blk.20.ffn_gate.weight····Q4_0_4_4 +0x3f289900 [3072, 8192]
+✔️  blk.20.ffn_up.weight······Q4_0_4_4 +0x40009900 [3072, 8192]
+✔️  blk.20.attn_k.weight······Q4_0_4_4 +0x40d89900 [3072, 1024]
+✔️  blk.20.attn_output.weight·Q4_0_4_4 +0x40f39900 [3072, 3072]
+✔️  blk.20.attn_q.weight······Q4_0_4_4 +0x41449900 [3072, 3072]
+✔️  blk.20.attn_v.weight······Q4_0_4_4 +0x41959900 [3072, 1024]
+✔️  blk.3.attn_norm.weight·······F32 +0x41b09900 [3072]
+✔️  blk.3.ffn_down.weight·····Q4_0_4_4 +0x41b0c900 [8192, 3072]
+✔️  blk.3.ffn_gate.weight·····Q4_0_4_4 +0x4288c900 [3072, 8192]
+✔️  blk.3.ffn_up.weight·······Q4_0_4_4 +0x4360c900 [3072, 8192]
+✔️  blk.3.ffn_norm.weight········F32 +0x4438c900 [3072]
+✔️  blk.3.attn_k.weight·······Q4_0_4_4 +0x4438f900 [3072, 1024]
+✔️  blk.3.attn_output.weight··Q4_0_4_4 +0x4453f900 [3072, 3072]
+✔️  blk.3.attn_q.weight·······Q4_0_4_4 +0x44a4f900 [3072, 3072]
+✔️  blk.3.attn_v.weight·······Q4_0_4_4 +0x44f5f900 [3072, 1024]
+✔️  blk.4.attn_norm.weight·······F32 +0x4510f900 [3072]
+✔️  blk.4.ffn_down.weight·····Q4_0_4_4 +0x45112900 [8192, 3072]
+✔️  blk.4.ffn_gate.weight·····Q4_0_4_4 +0x45e92900 [3072, 8192]
+✔️  blk.4.ffn_up.weight·······Q4_0_4_4 +0x46c12900 [3072, 8192]
+✔️  blk.4.ffn_norm.weight········F32 +0x47992900 [3072]
+✔️  blk.4.attn_k.weight·······Q4_0_4_4 +0x47995900 [3072, 1024]
+✔️  blk.4.attn_output.weight··Q4_0_4_4 +0x47b45900 [3072, 3072]
+✔️  blk.4.attn_q.weight·······Q4_0_4_4 +0x48055900 [3072, 3072]
+✔️  blk.4.attn_v.weight·······Q4_0_4_4 +0x48565900 [3072, 1024]
+✔️  blk.5.attn_norm.weight·······F32 +0x48715900 [3072]
+✔️  blk.5.ffn_down.weight·····Q4_0_4_4 +0x48718900 [8192, 3072]
+✔️  blk.5.ffn_gate.weight·····Q4_0_4_4 +0x49498900 [3072, 8192]
+✔️  blk.5.ffn_up.weight·······Q4_0_4_4 +0x4a218900 [3072, 8192]
+✔️  blk.5.ffn_norm.weight········F32 +0x4af98900 [3072]
+✔️  blk.5.attn_k.weight·······Q4_0_4_4 +0x4af9b900 [3072, 1024]
+✔️  blk.5.attn_output.weight··Q4_0_4_4 +0x4b14b900 [3072, 3072]
+✔️  blk.5.attn_q.weight·······Q4_0_4_4 +0x4b65b900 [3072, 3072]
+✔️  blk.5.attn_v.weight·······Q4_0_4_4 +0x4bb6b900 [3072, 1024]
+✔️  blk.6.attn_norm.weight·······F32 +0x4bd1b900 [3072]
+✔️  blk.6.ffn_down.weight·····Q4_0_4_4 +0x4bd1e900 [8192, 3072]
+✔️  blk.6.ffn_gate.weight·····Q4_0_4_4 +0x4ca9e900 [3072, 8192]
+✔️  blk.6.ffn_up.weight·······Q4_0_4_4 +0x4d81e900 [3072, 8192]
+✔️  blk.6.ffn_norm.weight········F32 +0x4e59e900 [3072]
+✔️  blk.6.attn_k.weight·······Q4_0_4_4 +0x4e5a1900 [3072, 1024]
+✔️  blk.6.attn_output.weight··Q4_0_4_4 +0x4e751900 [3072, 3072]
+✔️  blk.6.attn_q.weight·······Q4_0_4_4 +0x4ec61900 [3072, 3072]
+✔️  blk.6.attn_v.weight·······Q4_0_4_4 +0x4f171900 [3072, 1024]
+✔️  blk.7.attn_norm.weight·······F32 +0x4f321900 [3072]
+✔️  blk.7.ffn_down.weight·····Q4_0_4_4 +0x4f324900 [8192, 3072]
+✔️  blk.7.ffn_gate.weight·····Q4_0_4_4 +0x500a4900 [3072, 8192]
+✔️  blk.7.ffn_up.weight·······Q4_0_4_4 +0x50e24900 [3072, 8192]
+✔️  blk.7.ffn_norm.weight········F32 +0x51ba4900 [3072]
+✔️  blk.7.attn_k.weight·······Q4_0_4_4 +0x51ba7900 [3072, 1024]
+✔️  blk.7.attn_output.weight··Q4_0_4_4 +0x51d57900 [3072, 3072]
+✔️  blk.7.attn_q.weight·······Q4_0_4_4 +0x52267900 [3072, 3072]
+✔️  blk.7.attn_v.weight·······Q4_0_4_4 +0x52777900 [3072, 1024]
+✔️  blk.8.attn_norm.weight·······F32 +0x52927900 [3072]
+✔️  blk.8.ffn_down.weight·····Q4_0_4_4 +0x5292a900 [8192, 3072]
+✔️  blk.8.ffn_gate.weight·····Q4_0_4_4 +0x536aa900 [3072, 8192]
+✔️  blk.8.ffn_up.weight·······Q4_0_4_4 +0x5442a900 [3072, 8192]
+✔️  blk.8.ffn_norm.weight········F32 +0x551aa900 [3072]
+✔️  blk.8.attn_k.weight·······Q4_0_4_4 +0x551ad900 [3072, 1024]
+✔️  blk.8.attn_output.weight··Q4_0_4_4 +0x5535d900 [3072, 3072]
+✔️  blk.8.attn_q.weight·······Q4_0_4_4 +0x5586d900 [3072, 3072]
+✔️  blk.8.attn_v.weight·······Q4_0_4_4 +0x55d7d900 [3072, 1024]
+✔️  blk.9.attn_norm.weight·······F32 +0x55f2d900 [3072]
+✔️  blk.9.ffn_down.weight·····Q4_0_4_4 +0x55f30900 [8192, 3072]
+✔️  blk.9.ffn_gate.weight·····Q4_0_4_4 +0x56cb0900 [3072, 8192]
+✔️  blk.9.ffn_up.weight·······Q4_0_4_4 +0x57a30900 [3072, 8192]
+✔️  blk.9.ffn_norm.weight········F32 +0x587b0900 [3072]
+✔️  blk.9.attn_k.weight·······Q4_0_4_4 +0x587b3900 [3072, 1024]
+✔️  blk.9.attn_output.weight··Q4_0_4_4 +0x58963900 [3072, 3072]
+✔️  blk.9.attn_q.weight·······Q4_0_4_4 +0x58e73900 [3072, 3072]
+✔️  blk.9.attn_v.weight·······Q4_0_4_4 +0x59383900 [3072, 1024]
+✔️  blk.20.attn_norm.weight······F32 +0x59533900 [3072]
+✔️  blk.20.ffn_down.weight····Q4_0_4_4 +0x59536900 [8192, 3072]
+✔️  blk.20.ffn_norm.weight·······F32 +0x5a2b6900 [3072]
+✔️  blk.21.attn_norm.weight······F32 +0x5a2b9900 [3072]
+✔️  blk.21.ffn_down.weight····Q4_0_4_4 +0x5a2bc900 [8192, 3072]
+✔️  blk.21.ffn_gate.weight····Q4_0_4_4 +0x5b03c900 [3072, 8192]
+✔️  blk.21.ffn_up.weight······Q4_0_4_4 +0x5bdbc900 [3072, 8192]
+✔️  blk.21.ffn_norm.weight·······F32 +0x5cb3c900 [3072]
+✔️  blk.21.attn_k.weight······Q4_0_4_4 +0x5cb3f900 [3072, 1024]
+✔️  blk.21.attn_output.weight·Q4_0_4_4 +0x5ccef900 [3072, 3072]
+✔️  blk.21.attn_q.weight······Q4_0_4_4 +0x5d1ff900 [3072, 3072]
+✔️  blk.21.attn_v.weight······Q4_0_4_4 +0x5d70f900 [3072, 1024]
+✔️  blk.22.attn_norm.weight······F32 +0x5d8bf900 [3072]
+✔️  blk.22.ffn_down.weight····Q4_0_4_4 +0x5d8c2900 [8192, 3072]
+✔️  blk.22.ffn_gate.weight····Q4_0_4_4 +0x5e642900 [3072, 8192]
+✔️  blk.22.ffn_up.weight······Q4_0_4_4 +0x5f3c2900 [3072, 8192]
+✔️  blk.22.ffn_norm.weight·······F32 +0x60142900 [3072]
+✔️  blk.22.attn_k.weight······Q4_0_4_4 +0x60145900 [3072, 1024]
+✔️  blk.22.attn_output.weight·Q4_0_4_4 +0x602f5900 [3072, 3072]
+✔️  blk.22.attn_q.weight······Q4_0_4_4 +0x60805900 [3072, 3072]
+✔️  blk.22.attn_v.weight······Q4_0_4_4 +0x60d15900 [3072, 1024]
+✔️  blk.23.attn_norm.weight······F32 +0x60ec5900 [3072]
+✔️  blk.23.ffn_down.weight····Q4_0_4_4 +0x60ec8900 [8192, 3072]
+✔️  blk.23.ffn_gate.weight····Q4_0_4_4 +0x61c48900 [3072, 8192]
+✔️  blk.23.ffn_up.weight······Q4_0_4_4 +0x629c8900 [3072, 8192]
+✔️  blk.23.ffn_norm.weight·······F32 +0x63748900 [3072]
+✔️  blk.23.attn_k.weight······Q4_0_4_4 +0x6374b900 [3072, 1024]
+✔️  blk.23.attn_output.weight·Q4_0_4_4 +0x638fb900 [3072, 3072]
+✔️  blk.23.attn_q.weight······Q4_0_4_4 +0x63e0b900 [3072, 3072]
+✔️  blk.23.attn_v.weight······Q4_0_4_4 +0x6431b900 [3072, 1024]
+✔️  blk.24.attn_norm.weight······F32 +0x644cb900 [3072]
+✔️  blk.24.ffn_down.weight····Q4_0_4_4 +0x644ce900 [8192, 3072]
+✔️  blk.24.ffn_gate.weight····Q4_0_4_4 +0x6524e900 [3072, 8192]
+✔️  blk.24.ffn_up.weight······Q4_0_4_4 +0x65fce900 [3072, 8192]
+✔️  blk.24.ffn_norm.weight·······F32 +0x66d4e900 [3072]
+✔️  blk.24.attn_k.weight······Q4_0_4_4 +0x66d51900 [3072, 1024]
+✔️  blk.24.attn_output.weight·Q4_0_4_4 +0x66f01900 [3072, 3072]
+✔️  blk.24.attn_q.weight······Q4_0_4_4 +0x67411900 [3072, 3072]
+✔️  blk.24.attn_v.weight······Q4_0_4_4 +0x67921900 [3072, 1024]
+✔️  blk.25.attn_norm.weight······F32 +0x67ad1900 [3072]
+✔️  blk.25.ffn_down.weight····Q4_0_4_4 +0x67ad4900 [8192, 3072]
+✔️  blk.25.ffn_gate.weight····Q4_0_4_4 +0x68854900 [3072, 8192]
+✔️  blk.25.ffn_up.weight······Q4_0_4_4 +0x695d4900 [3072, 8192]
+✔️  blk.25.ffn_norm.weight·······F32 +0x6a354900 [3072]
+✔️  blk.25.attn_k.weight······Q4_0_4_4 +0x6a357900 [3072, 1024]
+✔️  blk.25.attn_output.weight·Q4_0_4_4 +0x6a507900 [3072, 3072]
+✔️  blk.25.attn_q.weight······Q4_0_4_4 +0x6aa17900 [3072, 3072]
+✔️  blk.25.attn_v.weight······Q4_0_4_4 +0x6af27900 [3072, 1024]
+✔️  blk.26.attn_norm.weight······F32 +0x6b0d7900 [3072]
+✔️  blk.26.ffn_down.weight····Q4_0_4_4 +0x6b0da900 [8192, 3072]
+✔️  blk.26.ffn_gate.weight····Q4_0_4_4 +0x6be5a900 [3072, 8192]
+✔️  blk.26.ffn_up.weight······Q4_0_4_4 +0x6cbda900 [3072, 8192]
+✔️  blk.26.ffn_norm.weight·······F32 +0x6d95a900 [3072]
+✔️  blk.26.attn_k.weight······Q4_0_4_4 +0x6d95d900 [3072, 1024]
+✔️  blk.26.attn_output.weight·Q4_0_4_4 +0x6db0d900 [3072, 3072]
+✔️  blk.26.attn_q.weight······Q4_0_4_4 +0x6e01d900 [3072, 3072]
+✔️  blk.26.attn_v.weight······Q4_0_4_4 +0x6e52d900 [3072, 1024]
+✔️  blk.27.attn_norm.weight······F32 +0x6e6dd900 [3072]
+✔️  blk.27.ffn_down.weight····Q4_0_4_4 +0x6e6e0900 [8192, 3072]
+✔️  blk.27.ffn_gate.weight····Q4_0_4_4 +0x6f460900 [3072, 8192]
+✔️  blk.27.ffn_up.weight······Q4_0_4_4 +0x701e0900 [3072, 8192]
+✔️  blk.27.ffn_norm.weight·······F32 +0x70f60900 [3072]
+✔️  blk.27.attn_k.weight······Q4_0_4_4 +0x70f63900 [3072, 1024]
+✔️  blk.27.attn_output.weight·Q4_0_4_4 +0x71113900 [3072, 3072]
+✔️  blk.27.attn_q.weight······Q4_0_4_4 +0x71623900 [3072, 3072]
+✔️  blk.27.attn_v.weight······Q4_0_4_4 +0x71b33900 [3072, 1024]
+✔️  output_norm.weight···········F32 +0x71ce3900 [3072]

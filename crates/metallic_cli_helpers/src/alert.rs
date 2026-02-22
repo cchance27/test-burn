@@ -20,7 +20,7 @@ impl AlertLogger {
         let file = path.and_then(|path| match OpenOptions::new().create(true).append(true).open(&path) {
             Ok(file) => Some(Mutex::new(file)),
             Err(err) => {
-                eprintln!("Failed to open error log at {:?}: {}", path, err);
+                eprintln!("Failed to open error log at {path:?}: {err}");
                 None
             }
         });

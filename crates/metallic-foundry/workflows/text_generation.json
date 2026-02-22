@@ -1,0 +1,116 @@
+{
+  "name": "TextGeneration",
+  "description": "Standard autoregressive text generation workflow",
+  "default_model": "llm",
+  "inputs": [
+    {
+      "name": "prompt_tokens",
+      "type": "u32[]",
+      "description": "Tokenized prompt"
+    },
+    {
+      "name": "max_tokens",
+      "type": "u32",
+      "default": 256
+    },
+    {
+      "name": "temperature",
+      "type": "f32",
+      "default": 0.8
+    },
+    {
+      "name": "top_k",
+      "type": "u32",
+      "default": 40
+    },
+    {
+      "name": "top_p",
+      "type": "f32",
+      "default": 0.95
+    },
+    {
+      "name": "min_p",
+      "type": "f32",
+      "default": 0.05
+    },
+    {
+      "name": "repeat_penalty",
+      "type": "f32",
+      "default": 1.1
+    },
+    {
+      "name": "repeat_last_n",
+      "type": "usize",
+      "default": 64
+    },
+    {
+      "name": "presence_penalty",
+      "type": "f32",
+      "default": 0.0
+    },
+    {
+      "name": "frequency_penalty",
+      "type": "f32",
+      "default": 0.0
+    },
+    {
+      "name": "seed",
+      "type": "u32",
+      "default": 42
+    },
+    {
+      "name": "eos_token",
+      "type": "u32"
+    }
+  ],
+  "steps": [
+    {
+      "op": "prefill",
+      "model_id": "llm",
+      "input": "prompt_tokens",
+      "output_pos": "current_pos",
+      "logits_binding": "logits",
+      "description": "Process prompt tokens through forward pass, populating KV cache"
+    },
+  {
+    "op": "while_batched",
+    "condition": "max_tokens",
+    "max_iterations": "{max_tokens}",
+    "token_var": "next_token",
+    "output_tokens": "generated_tokens",
+    "eos_token": "{eos_token}",
+    "body": [
+      {
+        "op": "sample",
+        "logits": "logits",
+        "output": "next_token",
+        "temperature": "{temperature}",
+        "top_k": "{top_k}",
+        "top_p": "{top_p}",
+        "min_p": "{min_p}",
+        "repeat_penalty": "{repeat_penalty}",
+        "repeat_last_n": "{repeat_last_n}",
+        "presence_penalty": "{presence_penalty}",
+        "frequency_penalty": "{frequency_penalty}",
+        "seed": "{seed}"
+      },
+      {
+        "op": "graph_forward",
+        "model_id": "llm",
+        "token_var": "next_token",
+          "logits_binding": "logits",
+          "position": "{current_pos}"
+        },
+        {
+          "op": "compute_int",
+          "output": "current_pos",
+          "expr": "{current_pos} + 1"
+        }
+      ]
+    },
+    {
+      "op": "return",
+      "output": "generated_tokens"
+    }
+  ]
+}

@@ -9,6 +9,9 @@ pub struct LatencyRow {
     pub last_ms: f64,
     pub average_ms: f64,
     pub level: u8,
+    /// Optional metadata for display (e.g., `batch_size`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -45,6 +48,7 @@ pub enum AlertLevel {
 }
 
 impl AlertLevel {
+    #[must_use] 
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Info => "INFO",
@@ -86,12 +90,20 @@ impl Alert {
 pub enum AppEvent {
     Token {
         text: Arc<str>,
+        /// Time spent in engine-side setup before the first prompt forward pass.
+        ///
+        /// This is primarily useful for performance breakdowns so that "Decode" can exclude
+        /// one-time setup costs (buffer allocation, pipeline warmup, etc.). Engines that don't
+        /// report this should set it to `None`.
+        setup_duration: Option<Duration>,
         prompt_processing: Duration,
         iteration: Option<Duration>,
     },
     GenerationComplete {
         total_generation_time: Duration,
     },
+    ModelLoadComplete(Duration),
+    TokenizationComplete(Duration),
     TokenCount(usize),
     StatusUpdate(String),
     MemoryUpdate(Vec<MemoryRow>),
@@ -99,4 +111,7 @@ pub enum AppEvent {
     StatsUpdate(Vec<StatsRow>),
     Alert(Alert),
     LogMessage(String),
+    /// UI-only: append a user prompt to the transcript (e.g. queued CLI turns when running the TUI).
+    UserPrompt(String),
+    Input(String),
 }
