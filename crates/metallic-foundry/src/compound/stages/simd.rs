@@ -1,5 +1,7 @@
 use std::sync::OnceLock;
 
+use metallic_env::GEMV_FORCE_SIMD_SUM_REDUCE;
+
 use crate::compound::{BufferArg, Stage};
 
 /// Operation type for SIMD reduction.
@@ -189,15 +191,7 @@ pub struct WarpReduceStage {
 #[inline]
 fn force_simd_sum_reduce() -> bool {
     static FORCE: OnceLock<bool> = OnceLock::new();
-    *FORCE.get_or_init(|| {
-        std::env::var("METALLIC_GEMV_FORCE_SIMD_SUM_REDUCE")
-            .ok()
-            .map(|value| {
-                let lowered = value.trim().to_ascii_lowercase();
-                !matches!(lowered.as_str(), "" | "0" | "false" | "no" | "off")
-            })
-            .unwrap_or(false)
-    })
+    *FORCE.get_or_init(|| GEMV_FORCE_SIMD_SUM_REDUCE.get().ok().flatten().unwrap_or(false))
 }
 
 impl WarpReduceStage {

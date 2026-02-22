@@ -1,4 +1,3 @@
-
 use metallic_foundry::{
     compound::Stage, metals::{
         attention::stages::{KvTileConfig, KvTileLayoutStage}, flashattention::{
@@ -9,10 +8,7 @@ use metallic_foundry::{
 
 #[test]
 fn flashattention_includes_flash_decode_metal() {
-    let stage = FlashDecodeStage::<64>::new(
-        SdpaParams::default(),
-        select_flash_decode_variant_m2m3(64, 1024)
-    );
+    let stage = FlashDecodeStage::<64>::new(SdpaParams::default(), select_flash_decode_variant_m2m3(64, 1024));
     let includes = stage.includes();
     assert!(
         includes.contains(&"flashattention/flash_decode.metal"),
@@ -32,10 +28,7 @@ fn flashattention_source_mentions_streaming_softmax() {
 
 #[test]
 fn sdpa_standalone_stage_uses_expected_sdpa_params_buffer_slot() {
-    let stage = FlashDecodeStage::<64>::new(
-        SdpaParams::default(),
-        select_flash_decode_variant_m2m3(64, 1024)
-    );
+    let stage = FlashDecodeStage::<64>::new(SdpaParams::default(), select_flash_decode_variant_m2m3(64, 1024));
     let args = stage.buffer_args();
     assert_eq!(args.len(), 1);
     assert_eq!(args[0].name, "sdpa_params");

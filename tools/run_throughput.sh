@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Default values
 MODEL_FP16="./models/qwen2.5-coder-0.5b-instruct-fp16.gguf"
-MODEL_Q8="./models/qwen2.5-coder-0.5b-instruct-q8_0.gguf"
+MODEL_Q8_0="./models/qwen2.5-coder-0.5b-instruct-q8_0.gguf"
 MODEL_Q4_0="./models/qwen2.5-coder-0.5b-instruct-q4_0.gguf"
 PROMPT="create a short js fibonacci function"
 MAX_TOKENS=50
@@ -14,7 +14,7 @@ IGNORE_EOS_STOP=1
 WORKFLOW_BATCH_SIZE=1
 
 RUN_FP16=0
-RUN_Q8=0
+RUN_Q8_0=0
 RUN_Q4_0=0
 
 show_help() {
@@ -22,10 +22,10 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  --fp16             Run FP16 benchmark"
-    echo "  --q8               Run Q8 benchmark"
+    echo "  --q8_0             Run Q8_0 benchmark"
     echo "  --q4_0             Run Q4_0 benchmark"
     echo "  --fp16_path <path> Path to FP16 model (default: $MODEL_FP16)"
-    echo "  --q8_path <path>   Path to Q8 model (default: $MODEL_Q8)"
+    echo "  --q8_0_path <path>   Path to Q8_0 model (default: $MODEL_Q8_0)"
     echo "  --q4_0_path <path> Path to Q4_0 model (default: $MODEL_Q4_0)"
     echo "  --prompt <string>  Prompt to use (default: '$PROMPT')"
     echo "  --max-tokens <n>   Max tokens to generate (default: $MAX_TOKENS)"
@@ -35,17 +35,17 @@ show_help() {
     echo "  --batch-size <n>   Foundry workflow batch size (default: $WORKFLOW_BATCH_SIZE)"
     echo "  --help             Show this help"
     echo ""
-    echo "Note: If neither --fp16, --q4_0, nor --q8 is specified, all will run."
+    echo "Note: If neither --fp16, --q4_0, nor --q8_0 is specified, all will run."
 }
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --fp16) RUN_FP16=1; shift ;;
-        --q8) RUN_Q8=1; shift ;;
+        --q8_0) RUN_Q8_0=1; shift ;;
         --q4_0) RUN_Q4_0=1; shift ;;
         --fp16_path) MODEL_FP16="$2"; shift 2 ;;
-        --q8_path) MODEL_Q8="$2"; shift 2 ;;
+        --q8_0_path) MODEL_Q8_0="$2"; shift 2 ;;
         --q4_0_path) MODEL_Q4_0="$2"; shift 2 ;;
         --prompt) PROMPT="$2"; shift 2 ;;
         --max-tokens) MAX_TOKENS="$2"; shift 2 ;;
@@ -59,10 +59,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Default to both if none specified
-if [[ $RUN_FP16 -eq 0 && $RUN_Q8 -eq 0 && $RUN_Q4_0 -eq 0 ]]; then
+if [[ $RUN_FP16 -eq 0 && $RUN_Q8_0 -eq 0 && $RUN_Q4_0 -eq 0 ]]; then
     RUN_FP16=1
     RUN_Q4_0=1
-    RUN_Q8=1
+    RUN_Q8_0=1
 fi
 
 echo "[metallic] MAX_TOKENS=${MAX_TOKENS}"
@@ -246,13 +246,13 @@ if [[ $RUN_FP16 -eq 1 ]]; then
     run_benchmark "fp16" "${MODEL_FP16}"
 fi
 
-# Run Q8 if selected
-if [[ $RUN_Q8 -eq 1 ]]; then
-    if [ ! -f "$MODEL_Q8" ]; then 
-        echo "Error: Q8 model not found at $MODEL_Q8"
+# Run Q8_0 if selected
+if [[ $RUN_Q8_0 -eq 1 ]]; then
+    if [ ! -f "$MODEL_Q8_0" ]; then 
+        echo "Error: Q8_0 model not found at $MODEL_Q8_0"
         exit 1
     fi
-    run_benchmark "q8" "${MODEL_Q8}"
+    run_benchmark "q8_0" "${MODEL_Q8_0}"
 fi
 
 # Run Q4_0 if selected

@@ -142,13 +142,13 @@ impl<T> TypedEnvVar<T> {
     }
 
     /// Retrieve the canonical environment variable key.
-    #[must_use] 
+    #[must_use]
     pub const fn key(&self) -> &'static str {
         self.var.key()
     }
 
     /// Retrieve the underlying [`EnvVar`] identifier.
-    #[must_use] 
+    #[must_use]
     pub const fn var(&self) -> EnvVar {
         self.var
     }
@@ -191,7 +191,7 @@ impl<T> TypedEnvVar<T> {
     }
 
     /// Unset the environment variable for the lifetime of the guard.
-    #[must_use] 
+    #[must_use]
     pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         EnvVarGuard::unset(self.var)
     }

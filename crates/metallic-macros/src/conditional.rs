@@ -235,9 +235,7 @@ fn extract_path(expr: &Expr) -> Result<String, String> {
 fn extract_literal(expr: &Expr) -> Result<i128, String> {
     match expr {
         Expr::Lit(lit) => match &lit.lit {
-            Lit::Int(int_lit) => int_lit
-                .base10_parse::<i128>()
-                .map_err(|e| format!("Failed to parse integer: {e}")),
+            Lit::Int(int_lit) => int_lit.base10_parse::<i128>().map_err(|e| format!("Failed to parse integer: {e}")),
             _ => Err("Expected integer literal".to_string()),
         },
         _ => Err(format!("Expected literal, got: {}", expr.to_token_stream())),
@@ -455,7 +453,9 @@ pub fn derive_conditional_kernel_impl(input: DeriveInput) -> TokenStream {
             }
         }
 
-        let condition = if let Some(c) = condition { c } else {
+        let condition = if let Some(c) = condition {
+            c
+        } else {
             let msg = format!("Variant {variant_name} missing #[when(...)] condition");
             return quote! { compile_error!(#msg); };
         };

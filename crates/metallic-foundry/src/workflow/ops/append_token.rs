@@ -1,6 +1,8 @@
 use crate::{
     error::MetalError, workflow::{
-        Value, ops::{WorkflowOp, WorkflowOpOutcome}, runner::WorkflowExecutionContext
+        Value, ops::{
+            WorkflowOp, WorkflowOpOutcome, common::{INTERNAL_LAST_DECODE_US, callback_timings_from_ctx, err_invalid_input_type, err_missing_input, read_internal_usize}
+        }, runner::WorkflowExecutionContext
     }
 };
 
@@ -28,38 +30,24 @@ impl WorkflowOp for AppendTokenOp {
             .values
             .get(&self.input)
             .and_then(|v| v.as_u32())
-            .ok_or_else(|| MetalError::InvalidOperation(format!("AppendTokenOp missing input token '{}' (u32)", self.input)))?;
+            .ok_or_else(|| err_missing_input("AppendTokenOp", &self.input, "u32"))?;
 
         // Append to output list
         if let Some(val) = ctx.values.get_mut(&self.output) {
             if let Value::TokensU32(vec) = val {
                 vec.push(token);
             } else {
-                return Err(MetalError::InvalidOperation(format!(
-                    "AppendTokenOp output '{}' is not a TokensU32 list",
-                    self.output
-                )));
+                return Err(err_invalid_input_type("AppendTokenOp", &self.output, "TokensU32"));
             }
         } else {
             ctx.values.insert(self.output.clone(), Value::TokensU32(vec![token]));
         }
 
         // Call on_token callback
-        // We attempt to read metrics from internal variables if they exist, otherwise 0
-        let prefill_us = ctx.read_usize("_internal.prefill_us").unwrap_or(0);
-        let setup_us = ctx.read_usize("_internal.setup_us").unwrap_or(0);
-        let decode_us = ctx.read_usize("_internal.last_decode_us").unwrap_or(0);
+        let decode_us = read_internal_usize(ctx, INTERNAL_LAST_DECODE_US);
+        let (prefill_dur, setup_dur, decode_dur) = callback_timings_from_ctx(ctx, Some(decode_us));
 
-        let should_continue = on_token(
-            token,
-            std::time::Duration::from_micros(prefill_us as u64),
-            std::time::Duration::from_micros(setup_us as u64),
-            if decode_us > 0 {
-                Some(std::time::Duration::from_micros(decode_us as u64))
-            } else {
-                None
-            },
-        )?;
+        let should_continue = on_token(token, prefill_dur, setup_dur, decode_dur)?;
 
         if !should_continue {
             return Ok(WorkflowOpOutcome::Break);

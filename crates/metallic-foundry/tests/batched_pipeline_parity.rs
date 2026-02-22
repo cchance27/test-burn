@@ -181,7 +181,7 @@ fn test_batched_pipeline_parity() -> Result<(), Box<dyn std::error::Error>> {
     // --- STEP 1: FusedQkv ---
     println!("Testing FusedQkv...");
     use metallic_foundry::metals::gemv::step::GemvStrategy; // Import GemvStrategy
-    use metallic_foundry::{metals::gemv::qkv_step::*, spec::DynamicValue}; // Import DynamicValue
+    use metallic_foundry::{metals::qkv::*, spec::DynamicValue}; // Import DynamicValue
 
     // Create gamma tensor for RMSNorm (all ones for simple test)
     let gamma_cpu = Array2::from_shape_fn((1, d_model), |_| 1.0f32);

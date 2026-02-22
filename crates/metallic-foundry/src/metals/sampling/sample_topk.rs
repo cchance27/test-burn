@@ -3,6 +3,7 @@
 //! Fused Top-K + Top-P + Sampling kernel.
 //! Single-stage fusion: Min-heap selection -> Sorting -> Softmax -> Cumulative Sum -> Sampling.
 
+use metallic_env::{SAMPLE_PER_THREAD_M, SAMPLE_TPTG};
 use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
 use crate::types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize};
@@ -69,9 +70,10 @@ impl SampleTopK {
         const PER_THREAD_M_CLAMP_DEFAULT: u32 = 40;
         let effective_k = Self::normalize_top_k(k, vocab_size);
 
-        let threads_per_group = std::env::var("METALLIC_SAMPLE_TPTG")
+        let threads_per_group = SAMPLE_TPTG
+            .get()
             .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
+            .flatten()
             .filter(|&v| v > 0 && v <= THREADS_PER_GROUP_DEFAULT as usize)
             .unwrap_or(THREADS_PER_GROUP_DEFAULT as usize);
 
@@ -79,10 +81,7 @@ impl SampleTopK {
         // Preserve the full requested Top-K depth (up to clamp) through lane-local heaps.
         // This avoids dropping valid candidates when logits are concentrated in a subset of lanes.
         let default_m = effective_k.min(per_thread_m_clamp).max(1);
-        let override_m = std::env::var("METALLIC_SAMPLE_PER_THREAD_M")
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .filter(|&v| v >= 1);
+        let override_m = SAMPLE_PER_THREAD_M.get().ok().flatten().filter(|&v| v >= 1);
         let per_thread_m = override_m.unwrap_or(default_m).min(effective_k).min(per_thread_m_clamp).max(1);
 
         Self {
@@ -110,25 +109,5 @@ impl SampleTopK {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_sample_params_metal_struct() {
-        let def = SampleParams::METAL_STRUCT_DEF;
-        assert!(def.contains("struct SampleParams"));
-        assert!(def.contains("vocab_size"));
-        assert!(def.contains("per_thread_m"));
-    }
-
-    #[test]
-    fn top_k_zero_is_treated_as_greedy() {
-        assert_eq!(SampleTopK::normalize_top_k(0, 1024), 1);
-    }
-
-    #[test]
-    fn top_k_is_clamped_to_vocab_size() {
-        assert_eq!(SampleTopK::normalize_top_k(4096, 1024), 1024);
-    }
-}
+#[path = "sample_topk.test.rs"]
+mod tests;

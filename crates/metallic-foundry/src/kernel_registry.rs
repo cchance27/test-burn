@@ -17,30 +17,101 @@
 //! ```
 
 use std::{
-    hash::{Hash, Hasher}, sync::{Arc, OnceLock}, time::Duration
+    borrow::Cow, hash::{Hash, Hasher}, sync::{Arc, OnceLock}, time::Duration
 };
 
 use moka::sync::Cache;
 
 use crate::{MetalError, compound::CompiledCompoundKernel, types::MetalDevice};
 
+/// Open kernel-family identifier.
+///
+/// This intentionally accepts arbitrary names so first-party and third-party (WASM/WASI/ABI)
+/// backends can register families without touching Foundry core enums.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct KernelFamily(Cow<'static, str>);
+
+impl KernelFamily {
+    #[inline]
+    pub const fn static_name(name: &'static str) -> Self {
+        Self(Cow::Borrowed(name))
+    }
+
+    #[inline]
+    pub fn owned_name(name: impl Into<String>) -> Self {
+        Self(Cow::Owned(name.into()))
+    }
+
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for KernelFamily {
+    fn from(value: String) -> Self {
+        Self::owned_name(value)
+    }
+}
+
+impl From<&str> for KernelFamily {
+    fn from(value: &str) -> Self {
+        Self::owned_name(value.to_string())
+    }
+}
+
+/// Optional trait for typed key specs.
+pub trait TypedKernelCacheKey {
+    fn family(&self) -> KernelFamily;
+    fn variant(&self) -> String;
+}
+
+#[inline]
+pub fn key_from_typed(spec: &impl TypedKernelCacheKey) -> KernelCacheKey {
+    KernelCacheKey::from_family(spec.family(), spec.variant())
+}
+
 /// Cache key for compiled kernel templates.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct KernelCacheKey {
     /// Kernel family (e.g., "gemm", "gemv", "embedding")
-    pub family: &'static str,
+    pub family: String,
     /// Unique variant identifier (policy names, configs, etc.)
     pub variant: String,
 }
 
 impl KernelCacheKey {
     /// Create a new cache key with the given family and variant.
-    pub fn new(family: &'static str, variant: impl Into<String>) -> Self {
+    pub fn new(family: impl Into<String>, variant: impl Into<String>) -> Self {
         Self {
-            family,
+            family: family.into(),
             variant: variant.into(),
         }
     }
+
+    /// Create a key from a canonical [`KernelFamily`].
+    #[inline]
+    pub fn from_family(family: KernelFamily, variant: impl Into<String>) -> Self {
+        Self {
+            family: family.as_str().to_string(),
+            variant: variant.into(),
+        }
+    }
+}
+
+/// Shorthand constructor for kernel cache keys.
+///
+/// Usage:
+/// - `kernel_cache_key!("gemv", "row_q8_auto")`
+/// - `kernel_cache_key!("gemm", "m{}_n{}_k{}", m, n, k)`
+#[macro_export]
+macro_rules! kernel_cache_key {
+    ($family:expr, $variant:expr) => {
+        $crate::kernel_registry::KernelCacheKey::new($family, $variant)
+    };
+    ($family:expr, $fmt:literal, $($arg:tt)*) => {
+        $crate::kernel_registry::KernelCacheKey::new($family, format!($fmt, $($arg)*))
+    };
 }
 
 /// Pipeline cache key - includes device ID for multi-GPU safety.
@@ -111,9 +182,6 @@ pub struct KernelRegistry {
     kernels: Cache<KernelCacheKey, Arc<CompiledCompoundKernel>>,
     /// Compiled pipelines (Metal PSO objects).
     pipelines: Cache<PipelineCacheKey, Arc<Pipeline>>,
-    /// Configuration.
-    #[allow(dead_code)]
-    config: RegistryConfig,
 }
 
 impl KernelRegistry {
@@ -128,7 +196,6 @@ impl KernelRegistry {
                 .max_capacity(config.max_pipelines)
                 .time_to_idle(config.pipeline_ttl)
                 .build(),
-            config,
         }
     }
 
@@ -212,33 +279,5 @@ pub fn kernel_registry() -> &'static KernelRegistry {
     REGISTRY.get_or_init(|| KernelRegistry::new(RegistryConfig::default()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_kernel_cache_key_equality() {
-        let key1 = KernelCacheKey::new("gemm", "f16_f16_nn");
-        let key2 = KernelCacheKey::new("gemm", "f16_f16_nn");
-        let key3 = KernelCacheKey::new("gemm", "q8_f16_nn");
-
-        assert_eq!(key1, key2);
-        assert_ne!(key1, key3);
-    }
-
-    #[test]
-    fn test_registry_config_default() {
-        let config = RegistryConfig::default();
-        assert_eq!(config.max_kernels, 256);
-        assert_eq!(config.max_pipelines, 512);
-        assert_eq!(config.kernel_ttl, Duration::from_secs(600));
-    }
-
-    #[test]
-    fn test_cache_stats() {
-        let registry = KernelRegistry::new(RegistryConfig::default());
-        let stats = registry.stats();
-        assert_eq!(stats.kernel_count, 0);
-        assert_eq!(stats.pipeline_count, 0);
-    }
-}
+#[path = "kernel_registry.test.rs"]
+mod tests;

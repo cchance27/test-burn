@@ -1,5 +1,5 @@
 use crate::{
-    Foundry, error::MetalError, types::{MetalBuffer, MetalResourceOptions, TensorArg}, workflow::{
+    Foundry, error::MetalError, types::{MetalBuffer, MetalResourceOptions}, workflow::{
         Value, ops::{WorkflowOp, WorkflowOpOutcome}, runner::WorkflowExecutionContext, spec::Param
     }
 };
@@ -12,10 +12,7 @@ pub(crate) struct GraphForwardOp {
     position_offset_key: String,
     position: Option<Param<usize>>,
     apply_derived_globals: bool,
-    #[allow(dead_code)]
-    description: Option<String>,
     input_token_buffer: Option<MetalBuffer>,
-    input_token_arg: Option<TensorArg>,
 }
 
 impl GraphForwardOp {
@@ -28,9 +25,7 @@ impl GraphForwardOp {
             position_offset_key: spec.position_offset_key.unwrap_or_else(|| "position_offset".to_string()),
             position: spec.position,
             apply_derived_globals: spec.apply_derived_globals,
-            description: spec.description,
             input_token_buffer: None,
-            input_token_arg: None,
         }
     }
 }
@@ -90,14 +85,11 @@ impl WorkflowOp for GraphForwardOp {
                             .device
                             .new_buffer(4, MetalResourceOptions::StorageModeShared)
                             .expect("Failed to allocate graph_forward input token buffer");
-                        let arg = TensorArg::from_buffer(buf.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
                         self.input_token_buffer = Some(buf);
-                        self.input_token_arg = Some(arg);
                     }
                     let buf = self.input_token_buffer.as_ref().expect("input_token_buffer set");
                     buf.copy_from_slice(&[token]);
-                    let input_tensor = self.input_token_arg.as_ref().expect("input_token_arg set").clone();
-                    model.set_binding(bindings, fast_bindings, &self.input_ids_binding, input_tensor);
+                    model.bind_u32_input_window(bindings, fast_bindings, &self.input_ids_binding, buf.clone(), 1, 0);
                 }
             }
 

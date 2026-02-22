@@ -1,5 +1,7 @@
 use std::sync::OnceLock;
 
+use metallic_env::{FA_DECODE_KEYS_PER_WARP, FA_DECODE_SCALAR, FA_DECODE_TG_OUT, FA_DECODE_WARPS};
+
 use crate::MetalError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,12 +100,18 @@ impl FlashDecodeVariant {
 }
 
 fn parse_env_u32(key: &'static str) -> Option<u32> {
-    std::env::var(key).ok().and_then(|s| s.trim().parse::<u32>().ok())
+    match key {
+        "METALLIC_FA_DECODE_WARPS" => FA_DECODE_WARPS.get().ok().flatten(),
+        "METALLIC_FA_DECODE_KEYS_PER_WARP" => FA_DECODE_KEYS_PER_WARP.get().ok().flatten(),
+        _ => None,
+    }
 }
 
 fn parse_env_scalar() -> Option<FlashDecodeScalar> {
-    std::env::var("METALLIC_FA_DECODE_SCALAR")
+    FA_DECODE_SCALAR
+        .get()
         .ok()
+        .flatten()
         .and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
             "half2" => Some(FlashDecodeScalar::Half2),
             "half4" => Some(FlashDecodeScalar::Half4),
@@ -112,8 +120,10 @@ fn parse_env_scalar() -> Option<FlashDecodeScalar> {
 }
 
 fn parse_env_tg_out() -> Option<FlashDecodeTgOut> {
-    std::env::var("METALLIC_FA_DECODE_TG_OUT")
+    FA_DECODE_TG_OUT
+        .get()
         .ok()
+        .flatten()
         .and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
             "float" | "f32" | "tgf" => Some(FlashDecodeTgOut::Float),
             "half" | "f16" | "tgh" => Some(FlashDecodeTgOut::Half),

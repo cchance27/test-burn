@@ -249,7 +249,7 @@ fn benchmark_qwen25_shapes() {
                     n: vocab_subset,
                     k: hidden,
                     transpose_a: false,
-                    transpose_b: false, 
+                    transpose_b: false,
                     quant_b: TestQuantization::Q8,
                     iterations,
                 },

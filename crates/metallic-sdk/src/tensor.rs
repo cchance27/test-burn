@@ -30,7 +30,7 @@ pub enum Dtype {
 }
 
 impl Dtype {
-    #[must_use] 
+    #[must_use]
     pub fn size_bytes(&self) -> usize {
         match self {
             Dtype::F32 => 4,
@@ -47,7 +47,7 @@ impl Dtype {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn is_quantized(&self) -> bool {
         matches!(
             self,
@@ -70,7 +70,7 @@ impl Dtype {
     ///
     /// This is intentionally table-driven so loaders don't duplicate fragile
     /// `contains("Q4_0")` chains for every new quant.
-    #[must_use] 
+    #[must_use]
     pub fn parse_fuzzy(input: &str) -> Option<Self> {
         if let Ok(dtype) = Self::from_str(input) {
             return Some(dtype);
@@ -179,16 +179,5 @@ impl FromStr for Dtype {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Dtype;
-
-    #[test]
-    fn parse_fuzzy_handles_common_quant_aliases() {
-        assert_eq!(Dtype::parse_fuzzy("Q4_0"), Some(Dtype::Q4_0));
-        assert_eq!(Dtype::parse_fuzzy("q4_1"), Some(Dtype::Q4_1));
-        assert_eq!(Dtype::parse_fuzzy("q6k"), Some(Dtype::Q6_K));
-        assert_eq!(Dtype::parse_fuzzy("model-q8_0-gguf"), Some(Dtype::Q8_0));
-        assert_eq!(Dtype::parse_fuzzy("dtype=bf16"), Some(Dtype::BF16));
-    }
-}
+#[path = "tensor.test.rs"]
+mod tests;

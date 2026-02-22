@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{RmsNormParams, RmsNormParamsResolved};
 use crate::{
-    Foundry, MetalError, ResolvedSymbols, compound::{CompiledCompoundKernel, CompoundKernel}, fusion::MetalPolicy, policy::f16::PolicyF16, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, ResolvedSymbols, compound::CompiledCompoundKernel, fusion::MetalPolicy, metals::common::cache::get_or_build_policy_compound_kernel, policy::f16::PolicyF16, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 /// RMSNorm Step
@@ -56,7 +56,7 @@ impl Step for RmsNormStep {
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
         let input_name = bindings.interpolate(self.input.0.clone());
         let input_idx = symbols.get_or_create(input_name.clone());
-        let _input_scales_idx = symbols.get_or_create(format!("{input_name}_scales"));
+        let input_scales_idx = symbols.get_or_create(format!("{input_name}_scales"));
         let output_idx = symbols.get_or_create(bindings.interpolate(self.output.0.clone()));
         let gamma_idx = symbols.get_or_create(bindings.interpolate(self.gamma.0.clone()));
 
@@ -64,7 +64,7 @@ impl Step for RmsNormStep {
             step: self.clone(),
             input_resolved: ResolvedSymbols {
                 weights: input_idx,
-                scales: _input_scales_idx.into(),
+                scales: input_scales_idx.into(),
                 bias: None,
             },
             output_idx,
@@ -78,7 +78,7 @@ impl CompiledStep for CompiledRmsNormStep {
         &self,
         foundry: &mut Foundry,
         fast_bindings: &FastBindings,
-        _bindings: &TensorBindings,
+        bindings: &TensorBindings,
         _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
         let input = fast_bindings
@@ -104,11 +104,7 @@ impl CompiledStep for CompiledRmsNormStep {
         // 1. Model metadata (rms_eps global)
         // 2. DSL epsilon field
         // 3. Default 1e-6
-        let epsilon = _bindings
-            .get_var("rms_eps")
-            .and_then(|v| v.parse::<f32>().ok())
-            .or(self.step.epsilon)
-            .unwrap_or(1e-6);
+        let epsilon = bindings.get_f32_var("rms_eps").or(self.step.epsilon).unwrap_or(1e-6);
 
         let policy = crate::policy::resolve_policy(input.dtype);
         let loader = policy.loader_stage();
@@ -180,17 +176,13 @@ impl Default for RmsNormStandaloneStage {
 }
 
 fn get_rmsnorm_kernel(policy: Arc<dyn MetalPolicy>) -> Arc<CompiledCompoundKernel> {
-    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
-
-    let key = KernelCacheKey::new("rmsnorm_standalone", policy.short_name().to_string());
-    kernel_registry().get_or_build(key, || {
+    get_or_build_policy_compound_kernel("rmsnorm_standalone", policy, |policy| {
         let stage = RmsNormStandaloneStage {
             policy: policy.clone(),
             ..Default::default()
         };
-        CompoundKernel::new(&format!("rmsnorm_standalone_{}", policy.short_name()))
+        crate::metals::common::composition::manual_output(&format!("rmsnorm_standalone_{}", policy.short_name()))
             .main(stage)
-            .with_manual_output(true)
             .compile()
     })
 }

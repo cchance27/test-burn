@@ -10,6 +10,7 @@ mod forward;
 mod graph_forward;
 
 mod capture;
+mod common;
 mod prefill;
 mod ret;
 mod sample;

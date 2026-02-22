@@ -152,7 +152,7 @@ impl AppConfig {
         PROFILING_OVERRIDE_COUNT.load(Ordering::Acquire) > 0
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn force_enable_profiling_guard() -> ProfilingOverrideGuard {
         ProfilingOverrideGuard::enable()
     }

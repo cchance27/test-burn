@@ -1,18 +1,28 @@
 //! Process environment abstractions shared across Metallic instrumentation components.
 
+pub mod foundry;
 pub mod guard;
 pub mod instrument;
 pub mod value;
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use foundry::FoundryEnvVar;
 use instrument::InstrumentEnvVar;
 
 /// Namespaced environment variable identifiers used by instrumentation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EnvVar {
+    /// Environment variables specific to foundry/runtime execution.
+    Foundry(FoundryEnvVar),
     /// Environment variables specific to the instrumentation pipeline.
     Instrument(InstrumentEnvVar),
+}
+
+impl From<FoundryEnvVar> for EnvVar {
+    fn from(value: FoundryEnvVar) -> Self {
+        Self::Foundry(value)
+    }
 }
 
 impl From<InstrumentEnvVar> for EnvVar {
@@ -23,9 +33,10 @@ impl From<InstrumentEnvVar> for EnvVar {
 
 impl EnvVar {
     /// Retrieve the canonical environment variable key for the identifier.
-    #[must_use] 
+    #[must_use]
     pub const fn key(self) -> &'static str {
         match self {
+            EnvVar::Foundry(inner) => inner.key(),
             EnvVar::Instrument(inner) => inner.key(),
         }
     }

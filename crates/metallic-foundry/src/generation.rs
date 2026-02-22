@@ -46,100 +46,14 @@ impl Default for GenerationConfig {
     }
 }
 
-/// High-level end-to-end generation pipeline with token streaming support (Foundry backend)
-#[allow(clippy::too_many_arguments)]
-pub fn generate_streaming(
-    foundry: &mut crate::Foundry,
-    model: Arc<crate::model::CompiledModel>,
-    prompt: &str,
-    cfg: &GenerationConfig,
-    tx: &mpsc::Sender<AppEvent>,
-) -> Result<(), MetalError> {
-    let tokenizer = model.tokenizer()?;
-    let debug_tokenize = std::env::var("METALLIC_DEBUG_TOKENIZE").is_ok();
-    let disable_chat_template = std::env::var("METALLIC_DISABLE_CHAT_TEMPLATE").is_ok();
-    let prompt_tokens = if debug_tokenize {
-        let formatted = if disable_chat_template {
-            prompt.to_string()
-        } else {
-            tokenizer.format_single_turn_chat_prompt(prompt)?
-        };
-        let toks = tokenizer.encode(&formatted)?;
-        let head_n = 64usize.min(toks.len());
-        let decoded_head = tokenizer
-            .decode_lossless(&toks[..head_n])
-            .unwrap_or_else(|_| "<decode_error>".to_string());
-        let max_chars = 800usize;
-        let shown = formatted.chars().take(max_chars).collect::<String>();
-        let suffix = if formatted.chars().count() > max_chars {
-            "…(truncated)"
-        } else {
-            ""
-        };
-        eprintln!(
-            "[metallic][debug] encode_single_turn_chat_prompt disable_chat_template={} chars={} tokens={} head_ids={:?}\n[metallic][debug] decoded_head:\n{}\n[metallic][debug] formatted_prompt_head:\n{}{}",
-            disable_chat_template,
-            formatted.chars().count(),
-            toks.len(),
-            &toks[..head_n],
-            decoded_head,
-            shown,
-            suffix
-        );
-        toks
-    } else if disable_chat_template {
-        tokenizer.encode(prompt)?
-    } else {
-        tokenizer.encode_single_turn_chat_prompt(prompt)?
-    };
-    generate_streaming_from_tokens(foundry, model, &tokenizer, &prompt_tokens, cfg, tx)
-}
-
-fn system_prompt_from_env() -> Option<Arc<str>> {
-    std::env::var("METALLIC_SYSTEM_PROMPT")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(Arc::<str>::from)
-}
-
-fn build_single_turn_messages_value(_tokenizer: &BPETokenizer, prompt: &str) -> Value {
-    let mut user = FxHashMap::default();
-    user.insert("role".to_string(), Value::Text("user".into()));
-    user.insert("content".to_string(), Value::Text(prompt.into()));
-
-    let mut messages = Vec::with_capacity(2);
-    if let Some(system) = system_prompt_from_env() {
-        let mut sys = FxHashMap::default();
-        sys.insert("role".to_string(), Value::Text("system".into()));
-        sys.insert("content".to_string(), Value::Text(system));
-        messages.push(Value::Map(sys));
-    }
-    messages.push(Value::Map(user));
-    Value::Array(messages)
-}
-
-/// Streaming generation for the Foundry backend using pre-tokenized prompt ids.
-///
-/// Using pre-tokenized ids avoids re-tokenizing/formatting in the hot path and keeps perf metrics consistent.
-#[allow(clippy::too_many_arguments)]
-pub fn generate_streaming_from_tokens(
-    foundry: &mut crate::Foundry,
-    model: Arc<CompiledModel>,
-    tokenizer: &BPETokenizer,
-    prompt_tokens: &[u32],
-    cfg: &GenerationConfig,
-    tx: &mpsc::Sender<AppEvent>,
-) -> Result<(), MetalError> {
+/// Return the default token-driven text generation workflow bundled with Foundry.
+#[must_use]
+pub fn default_text_generation_workflow() -> WorkflowSpec {
     static WORKFLOW_JSON: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflows/text_generation.json"));
     static WORKFLOW: OnceLock<WorkflowSpec> = OnceLock::new();
-
-    let workflow = WORKFLOW.get_or_init(|| serde_json::from_str(WORKFLOW_JSON).expect("invalid text_generation workflow JSON"));
-
-    let mut models: FxHashMap<String, Arc<CompiledModel>> = FxHashMap::default();
-    models.insert("llm".to_string(), model);
-
-    generate_streaming_from_tokens_with_workflow(foundry, &models, tokenizer, prompt_tokens, cfg, tx, workflow.clone(), None)
+    WORKFLOW
+        .get_or_init(|| serde_json::from_str(WORKFLOW_JSON).expect("invalid text_generation workflow JSON"))
+        .clone()
 }
 
 /// Streaming generation for the Foundry backend using a caller-provided workflow + model map.
@@ -188,7 +102,7 @@ pub fn generate_streaming_from_tokens_with_workflow(
         inputs.insert("prompt_tokens".to_string(), Value::TokensU32(prompt_tokens.to_vec()));
     } else {
         return Err(MetalError::InvalidOperation(
-            "Workflow does not declare 'prompt_tokens' input; use generate_streaming_with_workflow_from_prompt()".into(),
+            "Workflow does not declare required 'prompt_tokens' input".into(),
         ));
     }
     inputs.insert("max_tokens".to_string(), Value::Usize(cfg.max_tokens));
@@ -215,83 +129,6 @@ pub fn generate_streaming_from_tokens_with_workflow(
             inputs.insert(name.clone(), value.clone());
         }
     }
-
-    let _outputs = runner.run_streaming(foundry, &wf_cfg.workflow, inputs, &mut callback)?;
-
-    let total_generation_time = generation_start.elapsed();
-    let _ = tx.send(AppEvent::GenerationComplete { total_generation_time });
-    Ok(())
-}
-
-/// Streaming generation for workflows that tokenize/format prompts inside the workflow graph.
-///
-/// This supports workflows like `workflows/multiturn_chat.json` that take `messages` input and run
-/// `format_chat` + `tokenize` inside the workflow.
-#[allow(clippy::too_many_arguments)]
-pub fn generate_streaming_with_workflow_from_prompt(
-    foundry: &mut crate::Foundry,
-    models: &FxHashMap<String, Arc<CompiledModel>>,
-    tokenizer: &BPETokenizer,
-    prompt: &str,
-    cfg: &GenerationConfig,
-    tx: &mpsc::Sender<AppEvent>,
-    workflow: WorkflowSpec,
-) -> Result<(), MetalError> {
-    let generation_start = Instant::now();
-
-    let mut decode_scratch = Vec::new();
-    let mut decoded_chunk = String::new();
-
-    let mut callback =
-        |token_id: u32, prefill_duration: Duration, setup_duration: Duration, iteration: Option<Duration>| -> Result<bool, MetalError> {
-            if let Some(text) = tokenizer.decode_token_arc(token_id, &mut decoded_chunk, &mut decode_scratch)?
-                && tx
-                    .send(AppEvent::Token {
-                        text,
-                        setup_duration: Some(setup_duration),
-                        prompt_processing: prefill_duration,
-                        iteration,
-                    })
-                    .is_err()
-            {
-                return Ok(false);
-            }
-            Ok(true)
-        };
-
-    let mut runner = WorkflowRunner::new(models.clone());
-    let wf_cfg = WorkflowRunnerConfig { workflow };
-
-    let mut inputs: FxHashMap<String, Value> = FxHashMap::default();
-    if wf_cfg.workflow.inputs.iter().any(|i| i.name == "messages") {
-        inputs.insert("messages".to_string(), build_single_turn_messages_value(tokenizer, prompt));
-    } else if wf_cfg.workflow.inputs.iter().any(|i| i.name == "prompt") {
-        inputs.insert("prompt".to_string(), Value::Text(prompt.into()));
-    } else {
-        return Err(MetalError::InvalidOperation(
-            "Workflow does not declare 'messages' or 'prompt' input; expected a prompt-driven workflow".into(),
-        ));
-    }
-
-    inputs.insert("max_tokens".to_string(), Value::Usize(cfg.max_tokens));
-    inputs.insert("temperature".to_string(), Value::F32(cfg.temperature));
-    inputs.insert("top_k".to_string(), Value::U32(cfg.top_k as u32));
-    inputs.insert("top_p".to_string(), Value::F32(cfg.top_p));
-    inputs.insert("min_p".to_string(), Value::F32(cfg.min_p));
-    inputs.insert("repeat_penalty".to_string(), Value::F32(cfg.repeat_penalty));
-    inputs.insert("repeat_last_n".to_string(), Value::Usize(cfg.repeat_last_n));
-    inputs.insert("presence_penalty".to_string(), Value::F32(cfg.presence_penalty));
-    inputs.insert("frequency_penalty".to_string(), Value::F32(cfg.frequency_penalty));
-
-    // Prefer runner auto-injection of `eos_token` (from the default model's tokenizer) when the workflow declares it.
-    if !wf_cfg.workflow.inputs.iter().any(|i| i.name == "eos_token") {
-        let eos = tokenizer
-            .special_tokens()
-            .eos_token_id
-            .ok_or_else(|| MetalError::InvalidOperation("Tokenizer metadata missing required 'eos_token_id'".to_string()))?;
-        inputs.insert("eos_token".to_string(), Value::U32(eos));
-    }
-    inputs.insert("seed".to_string(), Value::U32(cfg.seed.unwrap_or_else(rand::random)));
 
     let _outputs = runner.run_streaming(foundry, &wf_cfg.workflow, inputs, &mut callback)?;
 

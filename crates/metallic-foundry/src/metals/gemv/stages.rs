@@ -45,7 +45,7 @@ impl VectorWidth {
 /// - Each lane loads 8 elements per K chunk, all lanes cover 256 elements
 #[derive(Debug, Clone, DeriveStage)]
 #[stage(
-    includes("gemv/gemv.metal"),
+    includes("gemv/common.metal", "gemv/dot.metal", "gemv/vectorized_stage.metal", "gemv/scalar_output.metal"),
     policy_field = "policy",
     template_bindings(
         vec_width = "self.vector_width.elements()",
@@ -74,6 +74,7 @@ impl VectorWidth {
 "#,
     out_var = "partial_dot"
 )]
+// DEBT: fields are consumed by `#[derive(Stage)]` codegen and Metal emission, not direct Rust reads.
 #[allow(dead_code)]
 pub struct VectorizedDotStage {
     /// Policy for code generation (determines header, struct name, etc.)
@@ -149,7 +150,7 @@ impl VectorizedDotStage {
 /// This acts as a robust fallback or alternative to the vectorized stage.
 #[derive(Debug, Clone, DeriveStage)]
 #[stage(
-    includes("gemv/gemv.metal"),
+    includes("gemv/common.metal", "gemv/dot.metal", "gemv/vectorized_stage.metal", "gemv/scalar_output.metal"),
     policy_field = "policy",
     emit = r#"
     float {out_var} = run_gemv_canonical_stage<{policy_struct}>(
@@ -166,6 +167,7 @@ impl VectorizedDotStage {
 "#,
     out_var = "partial_dot"
 )]
+// DEBT: fields are consumed by `#[derive(Stage)]` codegen and Metal emission, not direct Rust reads.
 #[allow(dead_code)]
 pub struct CanonicalDotStage {
     #[arg(buffer = 0, metal_type = "const device uchar*")]
@@ -339,7 +341,7 @@ impl Default for WarpWriteOutputNoResidualStage {
 /// full memory coalescing without implicit vector loads.
 #[derive(Debug, Clone, DeriveStage)]
 #[stage(
-    includes("gemv/gemv.metal"),
+    includes("gemv/common.metal", "gemv/dot.metal", "gemv/vectorized_stage.metal", "gemv/scalar_output.metal"),
     policy_field = "policy",
     template_bindings(unroll = "self.unroll.max(1)"),
     emit = r#"
@@ -356,6 +358,7 @@ impl Default for WarpWriteOutputNoResidualStage {
 "#,
     out_var = "row_sum"
 )]
+// DEBT: fields are consumed by `#[derive(Stage)]` codegen and Metal emission, not direct Rust reads.
 #[allow(dead_code)]
 pub struct ScalarDotStage {
     #[arg(buffer = 0, metal_type = "const device uchar*")]

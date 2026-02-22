@@ -2,6 +2,7 @@
 //!
 //! Supports LLM, DiT, audio, video, MoE workloads via abstract context and eviction policies.
 
+use metallic_env::{FoundryEnvVar, KV_MEMORY_BUDGET_MB, MAX_CONTEXT_LEN, is_set};
 use sysinfo::System;
 
 use crate::{model::KvGeometry, spec::Architecture, types::Device};
@@ -103,9 +104,7 @@ impl ContextConfig {
     ///   These act as upper bounds and are clamped to the model max (never exceed the model).
     /// - If the model does not specify a max (0), we fall back to the cap/env/default.
     pub fn from_architecture(arch: &Architecture, override_len: Option<usize>) -> Self {
-        let env_cap = std::env::var("METALLIC_MAX_CONTEXT_LEN")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok());
+        let env_cap = MAX_CONTEXT_LEN.get().ok().flatten();
 
         let requested_cap = override_len.or(env_cap).filter(|v| *v > 0);
         let model_max: Option<usize> = (arch.max_seq_len() > 0).then_some(arch.max_seq_len());
@@ -118,7 +117,7 @@ impl ContextConfig {
         }
         .max(1);
 
-        let full_reserve = std::env::var("METALLIC_FULL_CONTEXT_RESERVE").is_ok();
+        let full_reserve = is_set(FoundryEnvVar::FullContextReserve);
         let growth_strategy = if full_reserve {
             GrowthStrategy::FullReserve
         } else {
@@ -130,9 +129,7 @@ impl ContextConfig {
             GrowthStrategy::GrowOnDemand { initial, .. } => initial.min(max_len),
         };
 
-        let budget_mb = std::env::var("METALLIC_KV_MEMORY_BUDGET_MB")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok());
+        let budget_mb = KV_MEMORY_BUDGET_MB.get().ok().flatten();
 
         let memory_budget = if let Some(mb) = budget_mb {
             MemoryBudget::Explicit(mb * 1024 * 1024)
@@ -258,76 +255,5 @@ impl ContextConfig {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::spec::Architecture;
-
-    fn mock_arch(max_seq_len: usize) -> Architecture {
-        use crate::spec::ArchValue;
-        let mut params = rustc_hash::FxHashMap::default();
-        params.insert("d_model".to_string(), ArchValue::USize(512));
-        params.insert("n_heads".to_string(), ArchValue::USize(8));
-        params.insert("n_kv_heads".to_string(), ArchValue::USize(2));
-        params.insert("n_layers".to_string(), ArchValue::USize(4));
-        params.insert("ff_dim".to_string(), ArchValue::USize(2048));
-        params.insert("vocab_size".to_string(), ArchValue::USize(1000));
-        params.insert("max_seq_len".to_string(), ArchValue::USize(max_seq_len));
-        params.insert("rope_base".to_string(), ArchValue::F32(10000.0));
-        params.insert("rms_eps".to_string(), ArchValue::F32(1e-6));
-
-        Architecture {
-            params,
-            tensor_names: Default::default(),
-            metadata_keys: Default::default(),
-            prepare: Default::default(),
-            weight_bindings: Vec::new(),
-            forward: Vec::new(),
-        }
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_context_config_priority() {
-        let arch = mock_arch(4096);
-
-        // 1. Default to model max
-        let config = ContextConfig::from_architecture(&arch, None);
-        assert_eq!(config.max_context_len, 4096);
-
-        // 2. DSL/runtime override acts as a cap
-        let config2 = ContextConfig::from_architecture(&arch, Some(2048));
-        assert_eq!(config2.max_context_len, 2048);
-
-        // 3. Env var acts as a cap
-        set_env_safe("METALLIC_MAX_CONTEXT_LEN", "1024");
-        let config3 = ContextConfig::from_architecture(&arch, None);
-        assert_eq!(config3.max_context_len, 1024);
-        unset_env_safe("METALLIC_MAX_CONTEXT_LEN");
-    }
-
-    fn set_env_safe(k: &str, v: &str) {
-        unsafe { std::env::set_var(k, v) }
-    }
-    fn unset_env_safe(k: &str) {
-        unsafe { std::env::remove_var(k) }
-    }
-
-    #[test]
-    fn test_alignment() {
-        assert_eq!(ContextConfig::align_capacity(0), 128);
-        assert_eq!(ContextConfig::align_capacity(1), 128);
-        assert_eq!(ContextConfig::align_capacity(127), 128);
-        assert_eq!(ContextConfig::align_capacity(128), 128);
-        assert_eq!(ContextConfig::align_capacity(129), 256);
-        assert_eq!(ContextConfig::align_capacity(200), 256);
-    }
-
-    #[test]
-    fn test_memory_estimation() {
-        let arch = mock_arch(2048);
-        let est = ContextConfig::estimate_kv_memory(&arch, 2048);
-        // Compact GQA (n_kv_heads=2): 4 * 2 * 2 * 2048 * 64 * 2 = 4,194,304 bytes
-        assert_eq!(est.kv_cache_bytes, 4194304);
-    }
-}
+#[path = "context.test.rs"]
+mod tests;

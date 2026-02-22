@@ -87,15 +87,5 @@ impl Kernel for RandomUniform {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_random_uniform_params_metal_struct() {
-        let def = RandomUniformParams::METAL_STRUCT_DEF;
-        assert!(def.contains("struct RandomUniformParams"));
-        assert!(def.contains("seed"));
-        assert!(def.contains("min_val"));
-    }
-}
+#[path = "random_uniform.test.rs"]
+mod tests;

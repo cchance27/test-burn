@@ -47,7 +47,7 @@ impl Default for ConsoleExporter {
 
 impl ConsoleExporter {
     /// Construct a new console exporter.
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
@@ -68,7 +68,7 @@ pub struct ChannelExporter {
 
 impl ChannelExporter {
     /// Create a new exporter using the provided channel sender.
-    #[must_use] 
+    #[must_use]
     pub fn new(sender: Sender<EnrichedMetricEvent>) -> Self {
         Self { sender }
     }

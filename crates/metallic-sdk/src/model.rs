@@ -42,7 +42,7 @@ impl AsRef<[u8]> for TensorData<'_> {
 }
 
 impl TensorData<'_> {
-    #[must_use] 
+    #[must_use]
     pub fn as_slice(&self) -> &[u8] {
         self.as_ref()
     }
@@ -59,7 +59,7 @@ pub enum MetadataValue<'a> {
 }
 
 impl MetadataValue<'_> {
-    #[must_use] 
+    #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::String(s) => Some(s.as_ref()),
@@ -67,7 +67,7 @@ impl MetadataValue<'_> {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             Self::Int(i) => Some(*i),
@@ -75,7 +75,7 @@ impl MetadataValue<'_> {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Self::Float(f) => Some(*f),

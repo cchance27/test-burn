@@ -2,10 +2,13 @@
 //!
 //! Tests the complete DSL pipeline: load JSON spec → resolve tensors → execute steps.
 
+use std::sync::Arc;
+
 use metallic_foundry::{
-    Foundry, model::ModelBuilder, spec::{ModelSpec, TensorBindings}
+    Foundry, generation::default_text_generation_workflow, model::{CompiledModel, ModelBuilder}, spec::{ModelSpec, TensorBindings}, workflow::{Value, WorkflowRunner}
 };
 use metallic_loader::ModelLoader;
+use rustc_hash::FxHashMap;
 
 /// Test that ModelSpec can parse a minimal JSON spec.
 #[test]
@@ -138,11 +141,13 @@ fn test_e2e_forward_pass() {
 
     // Load model via builder
     let loaded_model = ModelLoader::from_file(model_path).expect("Failed to load GGUF");
-    let model = ModelBuilder::new()
-        .with_spec(spec)
-        .with_model(loaded_model)
-        .build(&mut foundry)
-        .expect("Failed to build model");
+    let model = Arc::new(
+        ModelBuilder::new()
+            .with_spec(spec)
+            .with_model(loaded_model)
+            .build(&mut foundry)
+            .expect("Failed to build model"),
+    );
 
     eprintln!("Loaded model: {}", model.name());
 
@@ -230,26 +235,32 @@ fn test_e2e_forward_pass() {
     assert!(!bindings.is_empty(), "Should have some bindings");
     eprintln!("E2E test completed!");
 
-    // Now test actual token generation using the generate() method
+    // Now test token generation through the default text workflow path
     eprintln!("\n=== Testing Token Generation ===");
 
-    let eos = tokenizer
-        .special_tokens()
-        .eos_token_id
-        .expect("Tokenizer metadata missing required 'eos_token_id'");
-    let stop_tokens: Vec<u32> = vec![eos];
     let max_new_tokens = 50;
-
-    match model.generate(
-        &mut foundry,
-        &prompt_tokens,
-        max_new_tokens,
-        &stop_tokens,
-        0.7, // temperature
-        50,  // top_k
-        0.9, // top_p
-    ) {
-        Ok(generated) => {
+    let mut models: FxHashMap<String, Arc<CompiledModel>> = FxHashMap::default();
+    models.insert("llm".to_string(), model.clone());
+    let workflow = default_text_generation_workflow();
+    let mut runner = WorkflowRunner::new(models);
+    let mut inputs: FxHashMap<String, Value> = FxHashMap::default();
+    inputs.insert("prompt_tokens".to_string(), Value::TokensU32(prompt_tokens.clone()));
+    inputs.insert("max_tokens".to_string(), Value::Usize(max_new_tokens));
+    inputs.insert("temperature".to_string(), Value::F32(0.7));
+    inputs.insert("top_k".to_string(), Value::U32(50));
+    inputs.insert("top_p".to_string(), Value::F32(0.9));
+    inputs.insert("min_p".to_string(), Value::F32(0.05));
+    inputs.insert("repeat_penalty".to_string(), Value::F32(1.1));
+    inputs.insert("repeat_last_n".to_string(), Value::Usize(64));
+    inputs.insert("presence_penalty".to_string(), Value::F32(0.0));
+    inputs.insert("frequency_penalty".to_string(), Value::F32(0.0));
+    inputs.insert("seed".to_string(), Value::U32(42));
+    let mut generated: Vec<u32> = Vec::new();
+    match runner.run_streaming(&mut foundry, &workflow, inputs, |tok, _prefill, _setup, _iter| {
+        generated.push(tok);
+        Ok(true)
+    }) {
+        Ok(_outputs) => {
             eprintln!("Generated {} tokens: {:?}", generated.len(), generated);
             let decoded = tokenizer.decode(&generated).expect("Failed to decode generated tokens");
             eprintln!("Generated text:\n---\n{}\n---", decoded);

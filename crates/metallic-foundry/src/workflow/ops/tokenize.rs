@@ -86,31 +86,13 @@ impl WorkflowOp for TokenizeOp {
             tokens_delta
         };
 
-        if std::env::var("METALLIC_DEBUG_TOKENIZE").is_ok() || std::env::var("METALLIC_DEBUG_CHAT_TEMPLATE").is_ok() {
-            let max_chars = 800usize;
-            let shown = text.chars().take(max_chars).collect::<String>();
-            let suffix = if text.chars().count() > max_chars { "…(truncated)" } else { "" };
-
+        if metallic_instrumentation::logging::debug_tokenize_or_template_enabled() {
             let head_n = 64usize.min(tokens.len());
             let token_head = &tokens[..head_n];
             let decoded_head = tokenizer
                 .decode_lossless(token_head)
                 .unwrap_or_else(|_| "<decode_error>".to_string());
-
-            eprintln!(
-                "[metallic][debug] TokenizeOp mode={mode} input='{}' chars={} tokens={} head_ids={:?}\n[metallic][debug] decoded_head:\n{}{}",
-                self.input_var,
-                text.chars().count(),
-                tokens.len(),
-                token_head,
-                decoded_head,
-                if tokens.len() > head_n {
-                    "\n[metallic][debug] (decoded_head truncated to first 64 tokens)"
-                } else {
-                    ""
-                }
-            );
-            eprintln!("[metallic][debug] input_text_head:\n{}{}", shown, suffix);
+            metallic_instrumentation::logging::emit_tokenize_debug_snapshot(&self.input_var, mode, text, &tokens, &decoded_head);
         }
         ctx.values.insert(self.output_var.clone(), Value::TokensU32(tokens));
 

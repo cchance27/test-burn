@@ -5,6 +5,7 @@ pub mod config;
 pub mod event;
 pub mod exporters;
 pub mod gpu_profiler;
+pub mod logging;
 pub mod macros;
 pub mod memory_collector;
 pub mod memory_profiler;

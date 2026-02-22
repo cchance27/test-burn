@@ -29,7 +29,7 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Dict[str, float]]:
     cmd = ["./tools/run_throughput.sh"]
     
     # Pass through arguments
-    if args.q8: cmd.append("--q8")
+    if args.q8_0: cmd.append("--q8_0")
     if args.q4_0: cmd.append("--q4_0")
     if args.fp16: cmd.append("--fp16")
     if args.max_tokens: cmd.extend(["--max-tokens", str(args.max_tokens)])
@@ -91,7 +91,7 @@ def main():
     
     parser = argparse.ArgumentParser(description="Benchmark past git commits to find performance regressions.")
     parser.add_argument("--commits", type=int, default=5, help="Number of past commits to benchmark")
-    parser.add_argument("--q8", action="store_true", help="Run Q8 benchmark")
+    parser.add_argument("--q8_0", action="store_true", help="Run Q8_0 benchmark")
     parser.add_argument("--q4_0", action="store_true", help="Run Q4_0 benchmark")
     parser.add_argument("--fp16", action="store_true", help="Run FP16 benchmark")
     parser.add_argument("--max-tokens", type=int, default=256, help="Max tokens (default: 256)")

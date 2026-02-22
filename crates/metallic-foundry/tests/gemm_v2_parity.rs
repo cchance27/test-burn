@@ -281,7 +281,14 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
         TestQuantization::Q8 => {
             let (w, s) = quantize_q8(&b_data, cfg.n, cfg.k, cfg.transpose_b);
             let blocks_per_k = cfg.k.div_ceil(32);
-            (Some(SimpleQ8Tensor { data: w, scales: s, blocks_per_k }), None)
+            (
+                Some(SimpleQ8Tensor {
+                    data: w,
+                    scales: s,
+                    blocks_per_k,
+                }),
+                None,
+            )
         }
         TestQuantization::Q4 => (None, None),
         TestQuantization::F16 => {
@@ -406,17 +413,23 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
             let s_dims = vec![cfg.n, cfg.k.div_ceil(32)];
 
             // Create Metal buffers for Q8 data
-            let w_buf = foundry.device.new_buffer_with_bytes(
-                metallic_foundry::types::nonnull_void_ptr_from_slice(&q8.data, "Q8_W").unwrap(),
-                q8.data.len(),
-                metallic_foundry::types::MetalResourceOptions::StorageModeShared,
-            ).unwrap();
-            
-            let s_buf = foundry.device.new_buffer_with_bytes(
-                metallic_foundry::types::nonnull_void_ptr_from_slice(&q8.scales, "Q8_S").unwrap(),
-                q8.scales.len(),
-                metallic_foundry::types::MetalResourceOptions::StorageModeShared,
-            ).unwrap();
+            let w_buf = foundry
+                .device
+                .new_buffer_with_bytes(
+                    metallic_foundry::types::nonnull_void_ptr_from_slice(&q8.data, "Q8_W").unwrap(),
+                    q8.data.len(),
+                    metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+                )
+                .unwrap();
+
+            let s_buf = foundry
+                .device
+                .new_buffer_with_bytes(
+                    metallic_foundry::types::nonnull_void_ptr_from_slice(&q8.scales, "Q8_S").unwrap(),
+                    q8.scales.len(),
+                    metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+                )
+                .unwrap();
 
             let b_data_arg = TensorArg::from_buffer(
                 w_buf,
@@ -1106,20 +1119,30 @@ fn test_gemm_v2_step_runtime_policy_selection_q8() {
     // Create B tensor (Q8)
     let (w, s) = quantize_q8(&b_data, n, k, transpose_b);
     let blocks_per_k = k.div_ceil(32);
-    let q8_tensor = SimpleQ8Tensor { data: w, scales: s, blocks_per_k };
+    let q8_tensor = SimpleQ8Tensor {
+        data: w,
+        scales: s,
+        blocks_per_k,
+    };
 
     // Convert Q8 tensor parts to Foundry TensorArgs
-    let w_buf = foundry.device.new_buffer_with_bytes(
-        metallic_foundry::types::nonnull_void_ptr_from_slice(&q8_tensor.data, "Q8_W").unwrap(),
-        q8_tensor.data.len(),
-        metallic_foundry::types::MetalResourceOptions::StorageModeShared,
-    ).unwrap();
-    
-    let s_buf = foundry.device.new_buffer_with_bytes(
-        metallic_foundry::types::nonnull_void_ptr_from_slice(&q8_tensor.scales, "Q8_S").unwrap(),
-        q8_tensor.scales.len(),
-        metallic_foundry::types::MetalResourceOptions::StorageModeShared,
-    ).unwrap();
+    let w_buf = foundry
+        .device
+        .new_buffer_with_bytes(
+            metallic_foundry::types::nonnull_void_ptr_from_slice(&q8_tensor.data, "Q8_W").unwrap(),
+            q8_tensor.data.len(),
+            metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+        )
+        .unwrap();
+
+    let s_buf = foundry
+        .device
+        .new_buffer_with_bytes(
+            metallic_foundry::types::nonnull_void_ptr_from_slice(&q8_tensor.scales, "Q8_S").unwrap(),
+            q8_tensor.scales.len(),
+            metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+        )
+        .unwrap();
 
     let b_dims = vec![n, k.div_ceil(32) * 32];
     let s_dims = vec![n, k.div_ceil(32)];

@@ -4,11 +4,6 @@ use crate::{
     }
 };
 
-fn ignore_eos_stop() -> bool {
-    static IGNORE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *IGNORE.get_or_init(|| std::env::var("METALLIC_IGNORE_EOS_STOP").is_ok_and(|v| v != "0"))
-}
-
 pub(crate) struct CheckEosOp {
     input: String,
     output: String,
@@ -39,7 +34,7 @@ impl WorkflowOp for CheckEosOp {
 
         let eos = ctx.resolve_param_u32(&self.eos_token)?;
 
-        let is_eos = !ignore_eos_stop() && token == eos;
+        let is_eos = !metallic_instrumentation::logging::ignore_eos_stop_enabled() && token == eos;
         ctx.values.insert(self.output.clone(), Value::Bool(is_eos));
 
         Ok(WorkflowOpOutcome::Continue)

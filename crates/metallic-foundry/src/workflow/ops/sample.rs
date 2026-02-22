@@ -1,8 +1,13 @@
 use half::f16;
+use metallic_env::SAMPLE_CPU_FALLBACK;
 
 use crate::{
     error::MetalError, metals::sampling::{ApplyRepetitionPenalty, RepetitionStateIngest, RepetitionStateInit, RepetitionStateUpdateFromToken, SampleTopK}, types::{MetalBuffer, MetalResourceOptions, TensorArg}, workflow::{
-        Value, ops::{WorkflowOp, WorkflowOpOutcome}, runner::WorkflowExecutionContext, spec::Param
+        Value, ops::{
+            WorkflowOp, WorkflowOpOutcome, common::{
+                INTERNAL_DECODE_BATCH_IDX, INTERNAL_DECODE_BATCH_SIZE, INTERNAL_LAST_DECODE_US, err_missing_input, write_internal_usize
+            }
+        }, runner::WorkflowExecutionContext, spec::Param
     }
 };
 
@@ -92,57 +97,13 @@ fn effective_penalty_window(repeat_last_n: usize, max_tokens: usize) -> usize {
     boosted.min(1024)
 }
 
-fn parse_env_bool(value: &str) -> bool {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let lowered = trimmed.to_ascii_lowercase();
-    !matches!(lowered.as_str(), "0" | "false" | "no" | "off")
-}
-
 fn sample_cpu_fallback_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("METALLIC_SAMPLE_CPU_FALLBACK")
-            .ok()
-            .is_some_and(|v| parse_env_bool(&v))
-    })
+    *ENABLED.get_or_init(|| SAMPLE_CPU_FALLBACK.get().ok().flatten().unwrap_or(false))
 }
 
 fn sample_cpu_fallback_from_ctx(ctx: &WorkflowExecutionContext<'_>) -> Option<bool> {
     ctx.values.get("sample_cpu_fallback").and_then(|v| v.as_bool())
-}
-
-fn sample_debug_logits_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("METALLIC_DEBUG_SAMPLE_LOGITS")
-            .ok()
-            .is_some_and(|v| parse_env_bool(&v))
-    })
-}
-
-fn sample_debug_top_n() -> usize {
-    static TOP_N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *TOP_N.get_or_init(|| {
-        std::env::var("METALLIC_DEBUG_SAMPLE_LOGITS_TOPN")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(8)
-    })
-}
-
-fn sample_debug_max_steps() -> u32 {
-    static MAX_STEPS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *MAX_STEPS.get_or_init(|| {
-        std::env::var("METALLIC_DEBUG_SAMPLE_LOGITS_MAX_STEPS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u32>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(64)
-    })
 }
 
 fn read_logits_f32(ctx: &mut WorkflowExecutionContext<'_>, logits_arg: &TensorArg, vocab_size: usize) -> Result<Vec<f32>, MetalError> {
@@ -373,7 +334,7 @@ impl WorkflowOp for SampleOp {
             .get(&self.logits_var)
             .and_then(|v| v.as_tensor())
             .cloned()
-            .ok_or_else(|| MetalError::InvalidOperation(format!("SampleOp missing logits variable '{}' (Tensor)", self.logits_var)))?;
+            .ok_or_else(|| err_missing_input("SampleOp", &self.logits_var, "Tensor"))?;
 
         let temp = ctx.resolve_param_f32(&self.temperature)?;
         let top_k = ctx.resolve_param_u32(&self.top_k)?;
@@ -389,14 +350,14 @@ impl WorkflowOp for SampleOp {
 
         self.step = self.step.wrapping_add(1);
 
-        let in_batched_decode_loop = ctx.values.contains_key("_internal.decode_batch_size");
+        let in_batched_decode_loop = ctx.values.contains_key(INTERNAL_DECODE_BATCH_SIZE);
         let decode_batch_size = ctx
             .values
-            .get("_internal.decode_batch_size")
+            .get(INTERNAL_DECODE_BATCH_SIZE)
             .and_then(|v| v.as_usize())
             .unwrap_or(1)
             .max(1);
-        let decode_batch_idx = ctx.values.get("_internal.decode_batch_idx").and_then(|v| v.as_usize()).unwrap_or(0);
+        let decode_batch_idx = ctx.values.get(INTERNAL_DECODE_BATCH_IDX).and_then(|v| v.as_usize()).unwrap_or(0);
 
         // Allocate and reuse output buffers. In batched decode, we need one buffer per iteration
         // so the loop can read back all tokens after the capture completes.
@@ -561,7 +522,9 @@ impl WorkflowOp for SampleOp {
             ctx.foundry.run(&penalty_kernel)?;
         }
 
-        let debug_logits = sample_debug_logits_enabled() && self.step <= sample_debug_max_steps() && !in_batched_decode_loop;
+        let debug_logits = metallic_instrumentation::logging::debug_sample_logits_enabled()
+            && self.step <= metallic_instrumentation::logging::debug_sample_logits_max_steps()
+            && !in_batched_decode_loop;
         let cpu_fallback = sample_cpu_fallback_from_ctx(ctx).unwrap_or_else(sample_cpu_fallback_enabled) && !in_batched_decode_loop;
         let logits_snapshot = if debug_logits || cpu_fallback {
             Some(read_logits_f32(ctx, &logits_arg, vocab_size as usize)?)
@@ -594,45 +557,21 @@ impl WorkflowOp for SampleOp {
         } else {
             let token = out_buffer.read_scalar::<u32>();
             if debug_logits && let Some(logits) = logits_snapshot.as_ref() {
-                debug_log_sample(self.step, token, logits, sample_debug_top_n(), eos_token);
+                debug_log_sample(
+                    self.step,
+                    token,
+                    logits,
+                    metallic_instrumentation::logging::debug_sample_logits_top_n(),
+                    eos_token,
+                );
             }
             ctx.values.insert(self.output_var.clone(), Value::U32(token));
         }
-        ctx.values.insert(
-            "_internal.last_decode_us".to_string(),
-            Value::Usize(decode_start.elapsed().as_micros() as usize),
-        );
+        write_internal_usize(ctx, INTERNAL_LAST_DECODE_US, decode_start.elapsed().as_micros() as usize);
 
         Ok(WorkflowOpOutcome::Continue)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{effective_penalty_window, filter_prompt_tokens_for_penalty};
-
-    #[test]
-    fn eos_token_is_excluded_from_prompt_penalty_state() {
-        let prompt = vec![151644, 8948, 151645, 123, 151645, 42];
-        let filtered = filter_prompt_tokens_for_penalty(&prompt, Some(151645));
-        assert_eq!(filtered.as_ref(), &[151644, 8948, 123, 42]);
-    }
-
-    #[test]
-    fn prompt_tokens_are_untouched_without_eos() {
-        let prompt = vec![1, 2, 3, 4];
-        let filtered = filter_prompt_tokens_for_penalty(&prompt, Some(151645));
-        assert_eq!(filtered.as_ref(), prompt.as_slice());
-    }
-
-    #[test]
-    fn uncapped_generation_boosts_small_repeat_window() {
-        assert_eq!(effective_penalty_window(64, 0), 256);
-        assert_eq!(effective_penalty_window(300, 0), 300);
-    }
-
-    #[test]
-    fn capped_generation_keeps_requested_window() {
-        assert_eq!(effective_penalty_window(64, 256), 64);
-    }
-}
+#[path = "sample.test.rs"]
+mod tests;

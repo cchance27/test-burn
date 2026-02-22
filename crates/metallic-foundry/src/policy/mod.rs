@@ -78,7 +78,7 @@ pub trait MetalPolicyRuntime: crate::fusion::MetalPolicy + Send + Sync + Debug {
 }
 
 pub mod activation;
-pub(crate) mod block_quant;
+mod block_quant;
 pub mod f16;
 pub mod f32;
 pub mod f64;

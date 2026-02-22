@@ -7,9 +7,9 @@ use super::{
     stages::{VectorizedDotStage, WarpWriteOutputNoResidualStage}, step::GemvStrategy
 };
 use crate::{
-    Foundry, MetalError, compound::{
-        CompiledCompoundKernel, CompoundKernel, Layout, stages::{WarpLayoutStage, WarpReduceStage}
-    }, fusion::MetalPolicy, metals::rmsnorm::stages::RmsNormComputeStage, spec::{CompiledStep, DynamicValue, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, TensorArg}
+    Foundry, MetalError, compound::{CompiledCompoundKernel, stages::WarpReduceStage}, fusion::MetalPolicy, metals::{
+        common::{cache::get_or_build_policy_compound_kernel, composition::manual_output_row_major}, rmsnorm::stages::RmsNormComputeStage
+    }, spec::{CompiledStep, DynamicValue, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, TensorArg}
 };
 
 /// Fused GEMV Step: RMSNorm(Input) -> GEMV(Input_Norm, Weights) -> Output
@@ -79,7 +79,7 @@ impl Step for FusedGemvStep {
         let input_idx = symbols.get_or_create(bindings.interpolate(self.input.0.clone()));
         let weights_name = bindings.interpolate(self.weights.0.clone());
         let weights_idx = symbols.get_or_create(weights_name.clone());
-        let _weights_scales_idx = symbols.get_or_create(format!("{weights_name}_scales"));
+        let weights_scales_idx = symbols.get_or_create(format!("{weights_name}_scales"));
         let output_idx = symbols.get_or_create(bindings.interpolate(self.output.0.clone()));
         let gamma_idx = symbols.get_or_create(bindings.interpolate(self.gamma.0.clone()));
         let bias_idx = self.bias.as_ref().map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
@@ -88,7 +88,7 @@ impl Step for FusedGemvStep {
             step: self.clone(),
             weights_resolved: crate::spec::ResolvedSymbols {
                 weights: weights_idx,
-                scales: _weights_scales_idx.into(),
+                scales: weights_scales_idx.into(),
                 bias: None,
             },
             input_idx,
@@ -156,7 +156,7 @@ impl CompiledStep for CompiledFusedGemvStep {
             has_bias,
             alpha: 1.0,
             gamma: TensorArg::from_tensor(gamma),
-            epsilon: bindings.get_var("rms_eps").and_then(|v| v.parse::<f32>().ok()).unwrap_or(1e-6),
+            epsilon: bindings.get_f32_var_or("rms_eps", 1e-6),
         };
 
         let kernel = get_fused_gemv_kernel(self.step.strategy, policy);
@@ -185,20 +185,12 @@ impl CompiledStep for CompiledFusedGemvStep {
 }
 
 fn get_fused_gemv_kernel(_strategy: GemvStrategy, policy: Arc<dyn MetalPolicy>) -> Arc<CompiledCompoundKernel> {
-    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
+    get_or_build_policy_compound_kernel("fused_gemv_rmsnorm", policy, move |policy| {
+        let kernel_name = format!("fused_gemv_rmsnorm_{}", policy.short_name());
 
-    let variant = policy.short_name().to_string();
-    let key = KernelCacheKey::new("fused_gemv_rmsnorm", variant);
-
-    let policy_clone = policy.clone();
-    kernel_registry().get_or_build(key, move || {
-        let kernel_name = format!("fused_gemv_rmsnorm_{}", policy_clone.short_name());
-
-        CompoundKernel::new(&kernel_name)
-            .with_manual_output(true)
-            .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8)) // Defines row_idx, lane_id
+        manual_output_row_major(&kernel_name, 8)
             .prologue(RmsNormComputeStage::new(2, 4, 11))
-            .main(VectorizedDotStage::new(policy_clone.clone()).with_norm("inv_rms"))
+            .main(VectorizedDotStage::new(policy.clone()).with_norm("inv_rms"))
             .epilogue(WarpReduceStage::sum("partial_dot", "row_sum"))
             .epilogue(WarpWriteOutputNoResidualStage::new())
             .compile()

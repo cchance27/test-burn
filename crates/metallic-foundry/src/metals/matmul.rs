@@ -74,46 +74,6 @@ impl Default for MatMulStep {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn matmul_step_defaults_round_trip() {
-        let json = r#"{
-            "a": "a",
-            "b": "b",
-            "output": "output",
-            "m": 1,
-            "n": 1,
-            "k": 1,
-            "transpose_a": false,
-            "transpose_b": false,
-            "weights_per_block": 32
-        }"#;
-
-        let step: MatMulStep = serde_json::from_str(json).unwrap();
-        assert_eq!(step.alpha, 1.0);
-        assert_eq!(step.beta, 0.0);
-
-        let json2 = r#"{
-            "a": "a",
-            "b": "b",
-            "output": "output",
-            "m": 1,
-            "n": 1,
-            "k": 1,
-            "transpose_a": false,
-            "transpose_b": false,
-            "alpha": 0.25,
-            "beta": 0.75
-        }"#;
-        let step2: MatMulStep = serde_json::from_str(json2).unwrap();
-        assert_eq!(step2.alpha, 0.25);
-        assert_eq!(step2.beta, 0.75);
-    }
-}
-
 // =============================================================================
 // Compiled Wrapper
 // =============================================================================
@@ -163,8 +123,6 @@ impl CompiledStep for CompiledMatMulStep {
 #[typetag::serde(name = "MatMul")]
 impl Step for MatMulStep {
     fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
-        use crate::spec::{FastBindings, SymbolTable};
-
         let mut symbols = SymbolTable::new();
         let compiled = self.compile(bindings, &mut symbols);
         let mut fast_bindings = FastBindings::new(symbols.len());
@@ -275,3 +233,6 @@ impl Step for MatMulStep {
         })]
     }
 }
+
+#[path = "matmul.test.rs"]
+mod tests;

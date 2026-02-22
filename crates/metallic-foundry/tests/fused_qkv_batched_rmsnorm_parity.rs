@@ -1,6 +1,6 @@
 use half::f16;
 use metallic_foundry::{
-    Foundry, metals::gemv::qkv_step::FusedQkvStep, spec::{DynamicValue, Step, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}
+    Foundry, metals::qkv::FusedQkvStep, spec::{DynamicValue, Step, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}
 };
 use ndarray::Array2;
 use rand::{Rng, SeedableRng, rngs::StdRng};

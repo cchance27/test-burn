@@ -135,6 +135,16 @@ impl TensorBindings {
         self.int_globals.get(key).copied()
     }
 
+    /// Parse a variable as f32 from current scopes/globals.
+    pub fn get_f32_var(&self, key: &str) -> Option<f32> {
+        self.get_var(key).and_then(|v| v.parse::<f32>().ok())
+    }
+
+    /// Parse a variable as f32 with default fallback.
+    pub fn get_f32_var_or(&self, key: &str, default: f32) -> f32 {
+        self.get_f32_var(key).unwrap_or(default)
+    }
+
     /// Interpolate a string using current variables (e.g. "blk.{i}.weight" -> "blk.0.weight").
     pub fn interpolate(&self, mut s: String) -> String {
         // Simple scan for {key}

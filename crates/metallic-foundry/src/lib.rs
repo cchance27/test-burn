@@ -4,6 +4,7 @@ use std::any::{Any, TypeId};
 
 pub use error::MetalError;
 use instrument::CaptureMetrics;
+use metallic_env::DUMP_METAL_SOURCE_DIR;
 use rustc_hash::FxHashMap;
 pub use spec::*;
 pub use tensor::*;
@@ -542,7 +543,7 @@ pub fn compile_pipeline<K: Kernel>(device: &MetalDevice, kernel: &K) -> Result<M
 
     process_lines(&mut full_source, &main_content, kernel.function_name());
 
-    if let Ok(dump_dir) = std::env::var("METALLIC_DUMP_METAL_SOURCE_DIR") {
+    if let Ok(Some(dump_dir)) = DUMP_METAL_SOURCE_DIR.get() {
         let mut safe_name = function_name
             .chars()
             .map(|c| {

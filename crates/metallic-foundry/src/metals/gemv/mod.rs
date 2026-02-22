@@ -1,9 +1,8 @@
 use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 use serde::{Deserialize, Serialize};
 
+mod config;
 pub mod fused_step;
-pub mod qkv_stages;
-pub mod qkv_step;
 pub mod stages;
 pub mod step;
 
@@ -36,6 +35,12 @@ fn default_batch() -> DynamicValue<u32> {
 #[kernel(
     source = "gemv/gemv.metal",
     function = "gemv_kernel",
+    include = [
+        "gemv/common.metal",
+        "gemv/dot.metal",
+        "gemv/vectorized_stage.metal",
+        "gemv/scalar_output.metal"
+    ],
     args = GemvV2Params,
     step = false,
     execute = false

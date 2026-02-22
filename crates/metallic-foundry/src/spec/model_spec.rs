@@ -87,13 +87,13 @@ pub struct LayerTensorNames {
 /// Architecture configuration and execution graph.
 #[derive(Debug, Deserialize)]
 pub struct Architecture {
-    /// Generic parameters inferred from GGUF metadata or provided in the DSL.
+    /// Generic parameters inferred from loader metadata or provided in the DSL.
     #[serde(flatten)]
     pub params: FxHashMap<String, ArchValue>,
-    /// Tensor naming conventions for GGUF loading
+    /// Tensor naming conventions for source-model tensor loading.
     #[serde(default)]
     pub tensor_names: TensorNames,
-    /// Optional GGUF metadata key mapping used to infer baseline architecture values.
+    /// Optional metadata key mapping used to infer baseline architecture values.
     ///
     /// If absent, the loader falls back to a built-in key set (DEBT).
     #[serde(default)]
@@ -101,7 +101,7 @@ pub struct Architecture {
     /// Executor preparation plan (globals + intermediates + KV caches).
     #[serde(default)]
     pub prepare: PrepareSpec,
-    /// Weight tensors the executor must bind from GGUF before inference.
+    /// Weight tensors the executor must bind from the loaded model before inference.
     ///
     /// This is used to avoid hardcoding architecture-specific weight binding logic
     /// in the executor (e.g. which weights are "canonical" vs row-major).
@@ -114,7 +114,7 @@ pub struct Architecture {
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct MetadataKeysSpec {
-    /// Map from architecture field name -> ordered list of GGUF keys (first match wins).
+    /// Map from architecture field name -> ordered list of metadata keys (first match wins).
     ///
     /// Expected field names (current): d_model, n_heads, n_kv_heads, n_layers, ff_dim, vocab_size, max_seq_len,
     /// rope_base, rms_eps.
@@ -122,7 +122,7 @@ pub struct MetadataKeysSpec {
     pub keys: FxHashMap<String, Vec<String>>,
 }
 
-/// A value inferred from GGUF metadata or provided in the DSL.
+/// A value inferred from loader metadata or provided in the DSL.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ArchValue {
     USize(usize),
@@ -183,10 +183,10 @@ impl<'de> serde::Deserialize<'de> for ArchValue {
     }
 }
 
-/// Baseline architecture values inferred from GGUF metadata.
+/// Baseline architecture values inferred from loader metadata.
 ///
 /// The executor uses the following precedence:
-/// GGUF baseline < DSL overrides < runtime overrides.
+/// Loader baseline < DSL overrides < runtime overrides.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ArchitectureDefaults {
     pub values: FxHashMap<String, ArchValue>,
@@ -219,7 +219,7 @@ impl ArchitectureDefaults {
 }
 
 impl Architecture {
-    /// Apply GGUF-derived baseline values to this spec.
+    /// Apply loader-derived baseline values to this spec.
     ///
     /// Fields that are zero/unset in the DSL are filled from `defaults`.
     /// Non-zero fields are treated as DSL overrides and preserved.
@@ -354,7 +354,7 @@ pub struct TensorAllocSpec {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct WeightBindingSpec {
-    /// Key used to resolve a GGUF tensor name via `Architecture.tensor_names`.
+    /// Key used to resolve a source tensor name via `Architecture.tensor_names`.
     ///
     /// Examples:
     /// - "embedding"
@@ -365,7 +365,7 @@ pub struct WeightBindingSpec {
     pub logical_name: String,
     #[serde(default)]
     pub repeat: Option<RepeatAllocSpec>,
-    /// Optional fallback: if the GGUF tensor is missing, bind a zero vector of this length (F16).
+    /// Optional fallback: if the source tensor is missing, bind a zero vector of this length (F16).
     ///
     /// Intended for optional biases.
     #[serde(default)]
@@ -378,7 +378,7 @@ pub struct WeightBindingSpec {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[derive(Default)]
 pub enum WeightLayoutSpec {
-    /// Bind weights as-is (row-major / GGUF native layout).
+    /// Bind weights as-is (row-major / source native layout).
     #[default]
     RowMajor,
     /// Bind weights in canonical k-block-major layout (used by some GEMV/GEMM variants).
@@ -399,8 +399,8 @@ impl ModelSpec {
 }
 
 impl TensorNames {
-    /// Find the first matching tensor name from a GGUF model's tensor list.
-    pub fn resolve(&self, key: &str, layer_idx: Option<usize>, available: &FxHashMap<String, ()>) -> Option<String> {
+    /// Find the first matching tensor name using an existence predicate.
+    pub fn resolve_with(&self, key: &str, layer_idx: Option<usize>, exists: impl Fn(&str) -> bool) -> Option<String> {
         let candidates = match key {
             "embedding" => &self.embedding,
             "output_weight" => &self.output_weight,
@@ -437,10 +437,15 @@ impl TensorNames {
             } else {
                 pattern.clone()
             };
-            if available.contains_key(&name) {
+            if exists(&name) {
                 return Some(name);
             }
         }
         None
+    }
+
+    /// Find the first matching tensor name from an available tensor-name set.
+    pub fn resolve(&self, key: &str, layer_idx: Option<usize>, available: &FxHashMap<String, ()>) -> Option<String> {
+        self.resolve_with(key, layer_idx, |name| available.contains_key(name))
     }
 }

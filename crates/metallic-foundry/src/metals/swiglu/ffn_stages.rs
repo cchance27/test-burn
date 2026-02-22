@@ -11,7 +11,13 @@ use crate::{
 /// Dual projection stage for FFN (gate + up) with optional RMSNorm fusion.
 #[derive(Debug, Clone, Stage)]
 #[stage(
-    includes("gemv/gemv.metal", "swiglu/ffn_stages.metal"),
+    includes(
+        "gemv/common.metal",
+        "gemv/dot.metal",
+        "gemv/vectorized_stage.metal",
+        "gemv/scalar_output.metal",
+        "swiglu/ffn_stages.metal"
+    ),
     policy_field = "policy",
     template_bindings(
         vec_width = "self.vector_width.elements()",
@@ -23,6 +29,7 @@ use crate::{
 "#,
     out_var = "gu_partial"
 )]
+// DEBT: fields are consumed by `#[derive(Stage)]` codegen and Metal emission, not direct Rust reads.
 #[allow(dead_code)]
 pub struct FfnDualProjectStage {
     #[arg(buffer = 0)]
@@ -105,6 +112,7 @@ pub struct FfnWarpReduceStage;
 "#,
     out_var = "void"
 )]
+// DEBT: fields are consumed by `#[derive(Stage)]` codegen and Metal emission, not direct Rust reads.
 #[allow(dead_code)]
 pub struct FfnSwigluWriteStage {
     #[arg(buffer = 5, output)]
@@ -153,34 +161,5 @@ impl FfnSwigluWriteStage {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::{FfnDualProjectStage, FfnSwigluWriteStage};
-    use crate::{
-        compound::Stage, policy::{activation::Activation, f16::PolicyF16}
-    };
-
-    #[test]
-    fn dual_project_emit_and_policy_metadata() {
-        let stage = FfnDualProjectStage::new(Arc::new(PolicyF16)).with_norm("inv_rms");
-        let (out, code) = stage.emit("unused");
-
-        assert_eq!(out, "gu_partial");
-        assert!(code.contains("run_ffn_dual_project_stage<PolicyF16, 8, true>"));
-        assert!(code.contains("gamma, inv_rms"));
-        assert_eq!(stage.policy_meta().map(|m| m.struct_name), Some("PolicyF16"));
-    }
-
-    #[test]
-    fn swiglu_write_emit_and_activation_metadata() {
-        let stage = FfnSwigluWriteStage::new().with_activation(Activation::ReLU);
-        let includes = stage.includes();
-        let (_, code) = stage.emit("gu_final");
-
-        assert_eq!(includes, vec!["swiglu/swiglu.metal", "policies/activations.metal"]);
-        assert!(code.contains("run_swiglu_write_stage<ActivationReLU>(gu_final"));
-        assert_eq!(stage.activation_meta(), Some(Activation::ReLU));
-    }
-}
+#[path = "ffn_stages.test.rs"]
+mod tests;

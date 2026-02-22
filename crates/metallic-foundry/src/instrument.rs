@@ -2,10 +2,8 @@ use std::sync::{
     OnceLock, atomic::{AtomicBool, AtomicU64, Ordering}
 };
 
+use metallic_env::{FOUNDRY_PER_KERNEL_PROFILING, FoundryEnvVar, RECORD_CB_GPU_TIMING, is_set};
 use rustc_hash::FxHashMap;
-
-pub(crate) const METALLIC_RECORD_CB_GPU_TIMING_ENV: &str = "METALLIC_RECORD_CB_GPU_TIMING";
-pub(crate) const METALLIC_FOUNDRY_PER_KERNEL_PROFILING_ENV: &str = "METALLIC_FOUNDRY_PER_KERNEL_PROFILING";
 
 // Real-time profiling state for Foundry (toggled by Ctrl+P in TUI)
 static PROFILING_STATE: AtomicBool = AtomicBool::new(false);
@@ -29,16 +27,6 @@ pub fn toggle_profiling_state() -> bool {
 }
 
 #[inline]
-fn parse_env_bool(value: &str) -> bool {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let lowered = trimmed.to_ascii_lowercase();
-    !matches!(lowered.as_str(), "0" | "false" | "no" | "off")
-}
-
-#[inline]
 pub(crate) fn record_cb_gpu_timing_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -48,13 +36,10 @@ pub(crate) fn record_cb_gpu_timing_enabled() -> bool {
         // - Attaching completion handlers for every command buffer can materially impact throughput
         //   in tight decode loops (especially when decode-batching is disabled / batch_size=1).
         // - Enable explicitly via env var or when profiling is enabled.
-        std::env::var(METALLIC_RECORD_CB_GPU_TIMING_ENV)
-            .ok()
-            .map(|value| parse_env_bool(&value))
-            .unwrap_or_else(|| {
-                use metallic_instrumentation::config::AppConfig;
-                AppConfig::try_global().map(|c| c.enable_profiling).unwrap_or(false)
-            })
+        RECORD_CB_GPU_TIMING.get().ok().flatten().unwrap_or_else(|| {
+            use metallic_instrumentation::config::AppConfig;
+            AppConfig::try_global().map(|c| c.enable_profiling).unwrap_or(false)
+        })
     })
 }
 
@@ -73,7 +58,7 @@ pub(crate) fn foundry_metrics_enabled() -> bool {
         // metrics in normal throughput mode (profiling off) when JSONL/console sinks are enabled, and we want
         // the same for Foundry so we can diagnose batching vs GPU kernel time deltas without forcing per-kernel
         // synchronization.
-        cfg.enable_console_metrics || cfg.metrics_jsonl_path.is_some() || std::env::var("METALLIC_TUI_MODE").is_ok()
+        cfg.enable_console_metrics || cfg.metrics_jsonl_path.is_some() || is_set(FoundryEnvVar::TuiMode)
     })
 }
 
@@ -99,11 +84,7 @@ pub(crate) fn foundry_per_kernel_profiling_enabled() -> bool {
 
     // Fall back to env var + config check (cached internally by OnceLock)
     static ENV_OVERRIDE: OnceLock<Option<bool>> = OnceLock::new();
-    let env_override = *ENV_OVERRIDE.get_or_init(|| {
-        std::env::var(METALLIC_FOUNDRY_PER_KERNEL_PROFILING_ENV)
-            .ok()
-            .map(|value| parse_env_bool(&value))
-    });
+    let env_override = *ENV_OVERRIDE.get_or_init(|| FOUNDRY_PER_KERNEL_PROFILING.get().ok().flatten());
 
     if let Some(explicit) = env_override {
         use metallic_instrumentation::config::AppConfig;
@@ -166,31 +147,5 @@ pub(crate) fn summarize_kernel_counts(metrics: &CaptureMetrics, max_entries: usi
     summary
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_env_bool() {
-        for value in ["1", "true", "TRUE", "yes", "on", " 1 ", " tRuE "] {
-            assert!(parse_env_bool(value), "expected truthy: {value}");
-        }
-
-        for value in ["", " ", "0", "false", "FALSE", "no", "off", " 0 "] {
-            assert!(!parse_env_bool(value), "expected falsy: {value}");
-        }
-    }
-
-    #[test]
-    fn test_summarize_kernel_counts_is_deterministic() {
-        let mut metrics = CaptureMetrics::new(0);
-        metrics.record_kernel("b");
-        metrics.record_kernel("a");
-        metrics.record_kernel("b");
-
-        let summary = summarize_kernel_counts(&metrics, 8);
-        assert_eq!(summary.get("dispatches").unwrap(), "3");
-        assert_eq!(summary.get("k00").unwrap(), "b:2");
-        assert_eq!(summary.get("k01").unwrap(), "a:1");
-    }
-}
+#[path = "instrument.test.rs"]
+mod tests;

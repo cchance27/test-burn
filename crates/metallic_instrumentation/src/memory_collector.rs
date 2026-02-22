@@ -14,7 +14,7 @@ pub struct MemoryCollector {
 
 impl MemoryCollector {
     /// Create a new memory collector.
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self { enabled: true }
     }
@@ -25,7 +25,7 @@ impl MemoryCollector {
     }
 
     /// Check if memory collection is enabled.
-    #[must_use] 
+    #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }

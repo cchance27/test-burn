@@ -9,7 +9,9 @@ use metallic_macros::{KernelArgs, MetalStruct};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Foundry, MetalError, compound::{CompiledCompoundKernel, CompoundKernel}, fusion::MetalPolicy, metals::mma::stages::{GemmEpilogueStage, MmaLoopStage, TileConfig, TileLayoutStage, TileLoadAStage, TileLoadBStage}, policy::activation::Activation, spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, compound::CompiledCompoundKernel, fusion::MetalPolicy, metals::{
+        common::{cache::get_or_build_compound_kernel, composition::manual_output}, mma::stages::{GemmEpilogueStage, MmaLoopStage, TileConfig, TileLayoutStage, TileLoadAStage, TileLoadBStage}
+    }, policy::activation::Activation, spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 // =============================================================================
@@ -164,7 +166,7 @@ pub fn build_gemm_kernel(key: GemmKernelKey) -> CompiledCompoundKernel {
     let a_policy = crate::policy::resolve_policy_by_name(&key.a_quant).expect("Unknown policy A");
     let b_policy = crate::policy::resolve_policy_by_name(&key.b_quant).expect("Unknown policy B");
 
-    CompoundKernel::new(&name)
+    manual_output(&name)
         .prologue(TileLayoutStage::new(key.config, key.transpose_a, key.transpose_b))
         // A loader uses a_quant policy
         // Coerce Arc<dyn MetalPolicyRuntime> to Arc<dyn MetalPolicy> by creating new Arc or unsafe cast?
@@ -175,7 +177,6 @@ pub fn build_gemm_kernel(key: GemmKernelKey) -> CompiledCompoundKernel {
         .prologue(TileLoadBStage::new(b_policy.clone(), key.transpose_b))
         .main(MmaLoopStage::new().with_k_aligned(false))
         .epilogue(epilogue)
-        .with_manual_output(true)
         .compile()
 }
 
@@ -191,8 +192,6 @@ pub fn get_gemm_kernel(
     has_bias: bool,
     activation: Activation,
 ) -> Arc<CompiledCompoundKernel> {
-    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
-
     let gemm_key = GemmKernelKey {
         a_quant: a_quant.short_name().to_string(),
         b_quant: b_quant.short_name().to_string(),
@@ -205,9 +204,7 @@ pub fn get_gemm_kernel(
     };
 
     let variant = format!("{:?}", gemm_key);
-    let key = KernelCacheKey::new("gemm", variant);
-
-    kernel_registry().get_or_build(key, || build_gemm_kernel(gemm_key))
+    get_or_build_compound_kernel("gemm", variant, || build_gemm_kernel(gemm_key))
 }
 
 /// Dispatch configuration for GEMM kernels.
@@ -351,28 +348,5 @@ impl CompiledStep for super::CompiledGemmV2Step {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_gemm_params_simple() {
-        let params = GemmParams::simple(128, 256, 64, false, false, TileConfig::Default);
-        assert_eq!(params.m, 128);
-        assert_eq!(params.n, 256);
-        assert_eq!(params.k, 64);
-        assert_eq!(params.tiles_m, 4); // 128 / 32
-        assert_eq!(params.tiles_n, 8); // 256 / 32
-        assert_eq!(params.gemm_k_iterations, 4); // 64 / 16
-        assert_eq!(params.gemm_k_remainder, 0);
-    }
-
-    #[test]
-    fn test_gemm_params_unaligned() {
-        let params = GemmParams::simple(100, 200, 50, false, false, TileConfig::Default);
-        assert_eq!(params.tiles_m, 4); // ceil(100 / 32)
-        assert_eq!(params.tiles_n, 7); // ceil(200 / 32)
-        assert_eq!(params.gemm_k_iterations, 3); // 50 / 16
-        assert_eq!(params.gemm_k_remainder, 2); // 50 % 16
-    }
-}
+#[path = "step.test.rs"]
+mod tests;

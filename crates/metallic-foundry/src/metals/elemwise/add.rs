@@ -5,7 +5,7 @@
 use metallic_macros::{Kernel, KernelArgs, MetalStruct, Stage as DeriveStage};
 
 use crate::{
-    compound::{CompiledCompoundKernel, CompoundKernel}, spec::DynamicValue, types::TensorArg
+    compound::CompiledCompoundKernel, metals::common::{cache::get_or_build_compound_kernel, composition::manual_output}, spec::DynamicValue, types::TensorArg
 };
 
 /// Parameters for ElemwiseAdd kernel.
@@ -70,13 +70,8 @@ impl ElemwiseAdd {
 
     /// Get a compiled kernel for residual addition or standalone broadcast add.
     pub fn get_kernel() -> std::sync::Arc<CompiledCompoundKernel> {
-        use crate::kernel_registry::{KernelCacheKey, kernel_registry};
-        let key = KernelCacheKey::new("elemwise", "add_broadcast");
-        kernel_registry().get_or_build(key, || {
-            CompoundKernel::new("elemwise_add_broadcast")
-                .main(ElemwiseAdd::stage())
-                .with_manual_output(true)
-                .compile()
+        get_or_build_compound_kernel("elemwise", "add_broadcast", || {
+            manual_output("elemwise_add_broadcast").main(ElemwiseAdd::stage()).compile()
         })
     }
 }
@@ -105,6 +100,7 @@ pub struct ElemwiseAddStage {
 
 /// Arguments for dispatching the unified ElemwiseAdd kernel.
 #[derive(Debug, KernelArgs)]
+// DEBT: retained as an explicit ABI args container for future direct-dispatch call sites.
 #[allow(dead_code)]
 pub struct ElemwiseAddArgs {
     #[arg(buffer = 0)]
@@ -119,14 +115,5 @@ pub struct ElemwiseAddArgs {
     pub b_len: u32,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_elemwise_add_params_metal_struct() {
-        let def = ElemwiseAddParams::METAL_STRUCT_DEF;
-        assert!(def.contains("struct ElemwiseAddParams"));
-        assert!(def.contains("total_elements"));
-    }
-}
+#[path = "add.test.rs"]
+mod tests;

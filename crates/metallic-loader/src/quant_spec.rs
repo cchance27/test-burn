@@ -7,7 +7,7 @@ pub struct QuantBlockSpec {
 }
 
 impl QuantBlockSpec {
-    #[must_use] 
+    #[must_use]
     pub const fn new(weights_per_block: usize, block_bytes: usize) -> Self {
         Self {
             weights_per_block,
@@ -34,7 +34,7 @@ pub const TQ1_0_SPEC: QuantBlockSpec = QuantBlockSpec::new(GGML_QK_K, 2 + 4 * 13
 pub const TQ2_0_SPEC: QuantBlockSpec = QuantBlockSpec::new(GGML_QK_K, 2 + GGML_QK_K / 4);
 pub const MXFP4_SPEC: QuantBlockSpec = QuantBlockSpec::new(32, 1 + 16);
 
-#[must_use] 
+#[must_use]
 pub fn block_quant_spec_for_dtype(dtype: Dtype) -> Option<QuantBlockSpec> {
     match dtype {
         Dtype::Q4_0 => Some(Q4_0_SPEC),
@@ -53,7 +53,7 @@ pub fn block_quant_spec_for_dtype(dtype: Dtype) -> Option<QuantBlockSpec> {
     }
 }
 
-#[must_use] 
+#[must_use]
 pub fn quantized_tensor_storage_bytes_for_dtype(dtype: Dtype, dims: &[usize]) -> Option<usize> {
     let spec = block_quant_spec_for_dtype(dtype)?;
     let element_count = dims.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d))?;
@@ -61,19 +61,5 @@ pub fn quantized_tensor_storage_bytes_for_dtype(dtype: Dtype, dims: &[usize]) ->
     blocks.checked_mul(spec.block_bytes)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn q6_k_spec_matches_ggml_block_constants() {
-        assert_eq!(Q6_K_SPEC.weights_per_block, 256);
-        assert_eq!(Q6_K_SPEC.block_bytes, 210);
-    }
-
-    #[test]
-    fn q6_k_storage_size_matches_known_tensor_shape() {
-        let size = quantized_tensor_storage_bytes_for_dtype(Dtype::Q6_K, &[4864, 896]).expect("q6_k size");
-        assert_eq!(size, 3_575_040);
-    }
-}
+#[path = "quant_spec.test.rs"]
+mod tests;

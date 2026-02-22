@@ -4,22 +4,24 @@ use crate::{
     Foundry, compound::Layout, tensor::Dtype, types::{MetalResourceOptions, TensorArg}
 };
 
+// DEBT: keep full axis enum for upcoming non-canonical/transpose loaders.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PackedAxis {
+pub(super) enum PackedAxis {
     Dim0,
     Dim1,
 }
 
+// DEBT: keep affine variant reserved for Q*_1 mins/affine plane support.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ScaleModel {
+pub(super) enum ScaleModel {
     ScaleOnly,
     Affine, // DEBT: add affine plane/mins output when _1 policies are implemented.
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct BlockQuantLayout {
+pub(super) struct BlockQuantLayout {
     pub packed_axis: PackedAxis,
     pub scale_model: ScaleModel,
 }
@@ -33,7 +35,7 @@ impl BlockQuantLayout {
     }
 }
 
-pub(crate) trait BlockQuantCodec {
+pub(super) trait BlockQuantCodec {
     const SOURCE_DTYPE: Dtype;
     const SCALES_DTYPE: Dtype;
     const WEIGHTS_PER_BLOCK: usize;
@@ -46,15 +48,16 @@ pub(crate) trait BlockQuantCodec {
 }
 
 #[inline]
-pub(crate) fn canonical_dst_block_idx(src_block_idx: usize, blocks_per_k: usize, target_n: usize) -> usize {
+pub(super) fn canonical_dst_block_idx(src_block_idx: usize, blocks_per_k: usize, target_n: usize) -> usize {
     let row = src_block_idx / blocks_per_k;
     let block = src_block_idx - row * blocks_per_k;
     block * target_n + row
 }
 
 #[inline]
+// DEBT: kept as a typed generic helper for policy tests and codec bring-up.
 #[allow(dead_code)]
-pub(crate) fn split_blocks<const BLOCK_BYTES: usize, const SCALE_BYTES: usize, const DATA_BYTES: usize>(
+pub(super) fn split_blocks<const BLOCK_BYTES: usize, const SCALE_BYTES: usize, const DATA_BYTES: usize>(
     raw: &[u8],
     blocks_per_k: usize,
     target_n: usize,
@@ -86,13 +89,13 @@ pub(crate) fn split_blocks<const BLOCK_BYTES: usize, const SCALE_BYTES: usize, c
     }
 }
 
-pub(crate) struct LoadedBlockQuant2D {
+pub(super) struct LoadedBlockQuant2D {
     pub weights: TensorArg,
     pub scales: TensorArg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct BlockQuantRuntimeSpec {
+pub(super) struct BlockQuantRuntimeSpec {
     pub weight_dtype: Dtype,
     pub scales_dtype: Dtype,
     pub weights_per_block: usize,
@@ -104,7 +107,7 @@ pub(crate) struct BlockQuantRuntimeSpec {
 
 #[inline]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn split_blocks_runtime(
+pub(super) fn split_blocks_runtime(
     raw: &[u8],
     blocks_per_k: usize,
     target_n: usize,
@@ -140,8 +143,9 @@ pub(crate) fn split_blocks_runtime(
 }
 
 #[inline]
+// DEBT: kept as a generic loader hook for future compile-time codec specializations.
 #[allow(dead_code)]
-pub(crate) fn load_block_quant_2d<const WPB: usize, const BLOCK_BYTES: usize, const SCALE_BYTES: usize, const DATA_BYTES: usize>(
+pub(super) fn load_block_quant_2d<const WPB: usize, const BLOCK_BYTES: usize, const SCALE_BYTES: usize, const DATA_BYTES: usize>(
     foundry: &mut Foundry,
     model: &dyn LoadedModel,
     source_tensor_name: &str,
@@ -169,7 +173,7 @@ pub(crate) fn load_block_quant_2d<const WPB: usize, const BLOCK_BYTES: usize, co
 }
 
 #[inline]
-pub(crate) fn load_block_quant_2d_with_codec<C: BlockQuantCodec>(
+pub(super) fn load_block_quant_2d_with_codec<C: BlockQuantCodec>(
     foundry: &mut Foundry,
     model: &dyn LoadedModel,
     source_tensor_name: &str,
@@ -194,7 +198,7 @@ pub(crate) fn load_block_quant_2d_with_codec<C: BlockQuantCodec>(
 }
 
 #[inline]
-pub(crate) fn load_block_quant_2d_runtime(
+pub(super) fn load_block_quant_2d_runtime(
     foundry: &mut Foundry,
     model: &dyn LoadedModel,
     source_tensor_name: &str,

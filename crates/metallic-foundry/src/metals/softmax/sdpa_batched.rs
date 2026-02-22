@@ -1,7 +1,7 @@
 use metallic_macros::{KernelArgs, Stage};
 
 use crate::{
-    compound::{CompiledCompoundKernel, CompoundKernel, stages::LayoutStage}, types::TensorArg
+    compound::{CompiledCompoundKernel, stages::LayoutStage}, metals::common::cache::get_or_build_compound_kernel, types::TensorArg
 };
 
 const SOFTMAX_SDPA_BATCHED_METAL: &str = include_str!("softmax_sdpa_batched.metal");
@@ -127,21 +127,15 @@ impl SoftmaxSdpaBatchedNormStage {
 }
 
 pub fn get_softmax_v2_sdpa_batched_kernel() -> std::sync::Arc<CompiledCompoundKernel> {
-    use crate::{
-        compound::stages::SimdStage, kernel_registry::{KernelCacheKey, kernel_registry}
-    };
-
-    let key = KernelCacheKey::new("softmax_sdpa_batched", "v2");
-
-    kernel_registry().get_or_build(key, || {
-        CompoundKernel::new("softmax_v2_sdpa_batched")
+    use crate::compound::stages::SimdStage;
+    get_or_build_compound_kernel("softmax_sdpa_batched", "v2", || {
+        crate::metals::common::composition::manual_output("softmax_v2_sdpa_batched")
             .prologue(LayoutStage::row_major())
             .prologue(SoftmaxSdpaBatchedMaxStage::new("matrix"))
             .prologue(SimdStage::reduce_max("local_max", "row_max"))
             .prologue(SoftmaxSdpaBatchedSumStage::new("row_max"))
             .prologue(SimdStage::reduce_sum("local_sum", "row_sum"))
             .main(SoftmaxSdpaBatchedNormStage::new("row_max", "row_sum"))
-            .with_manual_output(true)
             .compile()
     })
 }

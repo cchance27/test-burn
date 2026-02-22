@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::stages::{SoftmaxMaxStage, SoftmaxNormStage, SoftmaxSumStage};
 use crate::{
-    Foundry, MetalError, compound::{CompiledCompoundKernel, CompoundKernel, stages::LayoutStage}, spec::{CompiledStep, DynamicValue, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, compound::{CompiledCompoundKernel, stages::LayoutStage}, metals::common::{cache::get_or_build_compound_kernel, composition::manual_output}, spec::{CompiledStep, DynamicValue, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,14 +19,9 @@ pub struct SoftmaxV2Step {
 
 // Static cache for the kernel template
 pub fn get_softmax_v2_kernel() -> std::sync::Arc<CompiledCompoundKernel> {
-    use crate::{
-        compound::stages::SimdStage, kernel_registry::{KernelCacheKey, kernel_registry}
-    };
-
-    let key = KernelCacheKey::new("softmax", "v2_fused");
-
-    kernel_registry().get_or_build(key, || {
-        CompoundKernel::new("softmax_v2_fused")
+    use crate::compound::stages::SimdStage;
+    get_or_build_compound_kernel("softmax", "v2_fused", || {
+        manual_output("softmax_v2_fused")
             // Layout: emit row/col indices
             .prologue(LayoutStage::row_major())
             // Phase 1: Compute local max, then reduce
@@ -37,7 +32,6 @@ pub fn get_softmax_v2_kernel() -> std::sync::Arc<CompiledCompoundKernel> {
             .prologue(SimdStage::reduce_sum("local_sum", "row_sum"))
             // Phase 3: Normalize and write
             .main(SoftmaxNormStage::new("row_max", "row_sum"))
-            .with_manual_output(true)
             .compile()
     })
 }

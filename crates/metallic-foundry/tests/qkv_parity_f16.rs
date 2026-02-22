@@ -7,8 +7,8 @@ use std::sync::Arc;
 use half::f16;
 use metallic_foundry::{
     Foundry, compound::{CompoundKernel, Layout, stages::WarpLayoutStage}, metals::{
-        gemv::{
-            qkv_stages::{MultiWarpReduceStage, MultiWriteOutputStage, ParallelProjectStage}, qkv_step::FusedQkvArgs
+        qkv::{
+            stages::{MultiWarpReduceStage, MultiWriteOutputStage, ParallelProjectStage}, step::FusedQkvArgs
         }, rmsnorm::stages::RmsNormComputeStage
     }, policy::f16::PolicyF16, storage::Pooled, tensor::{F16, Tensor, TensorInit}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
@@ -213,7 +213,6 @@ fn test_qkv_parity_f16() {
 /// If this test hangs, it confirms the deadlock is in batched execution.
 #[test]
 fn test_qkv_parity_f16_batched() {
-
     eprintln!("=== Testing FusedQkv in BATCHED mode ===");
 
     let mut foundry = Foundry::new().unwrap();

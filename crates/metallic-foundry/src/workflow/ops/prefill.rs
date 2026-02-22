@@ -1,6 +1,12 @@
+use metallic_env::{FoundryEnvVar, is_set};
+
 use crate::{
-    Foundry, error::MetalError, types::TensorArg, workflow::{
-        Value, ops::{WorkflowOp, WorkflowOpOutcome}, runner::WorkflowExecutionContext
+    Foundry, error::MetalError, model::CompiledModel, workflow::{
+        Value, ops::{
+            WorkflowOp, WorkflowOpOutcome, common::{
+                INTERNAL_END_POS, INTERNAL_KV_PREFIX_BASE_KEY, INTERNAL_KV_PREFIX_KEY, INTERNAL_LAST_PREFILL_M, INTERNAL_PREFILL_US, INTERNAL_PROMPT_LEN, INTERNAL_SETUP_US, INTERNAL_START_POS, err_missing_input, write_internal_usize
+            }
+        }, runner::WorkflowExecutionContext
     }
 };
 
@@ -15,8 +21,6 @@ pub(crate) struct PrefillOp {
     m_key: String,
     seq_len_key: String,
     apply_derived_globals: bool,
-    #[allow(dead_code)]
-    description: Option<String>,
 }
 
 impl PrefillOp {
@@ -32,27 +36,7 @@ impl PrefillOp {
             m_key: spec.m_key.unwrap_or_else(|| "m".to_string()),
             seq_len_key: spec.seq_len_key.unwrap_or_else(|| "seq_len".to_string()),
             apply_derived_globals: spec.apply_derived_globals,
-            description: spec.description,
         }
-    }
-
-    fn prefill_config() -> (usize, usize) {
-        const DEFAULT_MAX_PREFILL_CHUNK: usize = 32;
-        const DEFAULT_PREFILL_CHUNK_SIZE: usize = 32;
-        const MAX_ALLOWED: usize = 512;
-
-        let read = |var: &str| -> Option<usize> { std::env::var(var).ok().and_then(|v| v.trim().parse::<usize>().ok()) };
-        let mut max_prefill_chunk = read("METALLIC_MAX_PREFILL_CHUNK").unwrap_or(DEFAULT_MAX_PREFILL_CHUNK);
-        let mut prefill_chunk_size = read("METALLIC_PREFILL_CHUNK_SIZE").unwrap_or(DEFAULT_PREFILL_CHUNK_SIZE);
-
-        max_prefill_chunk = max_prefill_chunk.clamp(1, MAX_ALLOWED);
-        prefill_chunk_size = prefill_chunk_size.clamp(1, MAX_ALLOWED);
-
-        if prefill_chunk_size > max_prefill_chunk {
-            max_prefill_chunk = prefill_chunk_size;
-        }
-
-        (max_prefill_chunk, prefill_chunk_size)
     }
 }
 
@@ -67,7 +51,7 @@ impl WorkflowOp for PrefillOp {
             .values
             .get(&self.input)
             .and_then(|v| v.as_tokens_u32())
-            .ok_or_else(|| MetalError::InvalidOperation(format!("Workflow prefill missing input '{}' (u32[])", self.input)))?;
+            .ok_or_else(|| err_missing_input("PrefillOp", &self.input, "u32[]"))?;
 
         if prompt_tokens_full.is_empty() {
             return Err(MetalError::InvalidShape("prefill requires non-empty prompt_tokens".into()));
@@ -77,12 +61,12 @@ impl WorkflowOp for PrefillOp {
         let prefill_mode = self.mode.clone().unwrap_or_else(|| "delta".to_string());
         let kv_prefix_key = ctx
             .values
-            .get("_internal.kv_prefix_key")
+            .get(INTERNAL_KV_PREFIX_KEY)
             .and_then(|v| v.as_text())
             .map(|v| v.to_string());
         let kv_prefix_base_key = ctx
             .values
-            .get("_internal.kv_prefix_base_key")
+            .get(INTERNAL_KV_PREFIX_BASE_KEY)
             .and_then(|v| v.as_text())
             .map(|v| v.to_string());
         let setup_start = std::time::Instant::now();
@@ -236,25 +220,28 @@ impl WorkflowOp for PrefillOp {
                 )));
             }
 
-            let input_ids_full_arg = session.bindings.get("input_ids_full")?;
-            let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap();
+            let input_ids_full = model.binding_buffer_clone(&session.bindings, "input_ids_full")?;
             input_ids_full.copy_from_slice_offset(prompt_tokens, start_pos);
 
             // Defaults for decode (m=1, seq_len=1). Prefill overrides these per chunk.
-            model.set_int_global(&mut session.bindings, &self.m_key, 1);
-            model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
-            model.set_int_global(&mut session.bindings, &self.position_offset_key, start_pos);
-            if self.apply_derived_globals {
-                model.apply_derived_globals(&mut session.bindings);
-            }
+            model.set_runtime_window_globals_with_keys(
+                &mut session.bindings,
+                &self.m_key,
+                &self.seq_len_key,
+                &self.position_offset_key,
+                1,
+                1,
+                start_pos,
+                self.apply_derived_globals,
+            );
 
             let profiling_per_kernel = crate::instrument::foundry_per_kernel_profiling_enabled();
-            let disable_batched_prefill_env = std::env::var("METALLIC_DISABLE_BATCHED_PREFILL").is_ok();
+            let disable_batched_prefill_env = is_set(FoundryEnvVar::DisableBatchedPrefill);
             let disable_batched_prefill = profiling_per_kernel || disable_batched_prefill_env;
-            let debug_sync = std::env::var("METALLIC_DEBUG_FORWARD_SYNC").is_ok();
+            let debug_sync = is_set(FoundryEnvVar::DebugForwardSync);
 
             let max_prefill_chunk = session.bindings.get_int_global("max_prefill_chunk").unwrap_or(32).max(1);
-            let (_, mut prefill_chunk_size) = Self::prefill_config();
+            let (_, mut prefill_chunk_size) = CompiledModel::prefill_config();
             prefill_chunk_size = prefill_chunk_size.min(max_prefill_chunk).max(1);
             tracing::debug!(
                 target: "metallic_foundry::workflow::ops::prefill",
@@ -275,18 +262,7 @@ impl WorkflowOp for PrefillOp {
             let input_ids_key = self.input_ids_binding.as_str();
             let (execution_mode, effective_chunk_size, chunk_count) = if !disable_batched_prefill {
                 let execution_mode = "batched";
-                let chunk_size = {
-                    let rebalance_chunk_size = |prompt_len: usize, requested: usize, max_allowed: usize| -> usize {
-                        let requested = requested.max(1).min(max_allowed.max(1));
-                        if prompt_len <= 1 {
-                            return 1;
-                        }
-                        let chunks = prompt_len.div_ceil(requested);
-                        let balanced = prompt_len.div_ceil(chunks);
-                        balanced.max(1).min(max_allowed)
-                    };
-                    rebalance_chunk_size(prompt_len, prefill_chunk_size, max_prefill_chunk)
-                };
+                let chunk_size = CompiledModel::rebalance_prefill_chunk_size(prompt_len, prefill_chunk_size, max_prefill_chunk);
                 let chunk_count = if prompt_len == 0 {
                     0
                 } else {
@@ -317,18 +293,24 @@ impl WorkflowOp for PrefillOp {
                         foundry.start_capture()?;
                     }
 
-                    model.set_int_global(&mut session.bindings, &self.m_key, m);
-                    model.set_int_global(&mut session.bindings, &self.seq_len_key, m);
-                    model.set_int_global(&mut session.bindings, &self.position_offset_key, base_pos);
-                    if self.apply_derived_globals {
-                        model.apply_derived_globals(&mut session.bindings);
-                    }
-
-                    let input_ids_full_arg = session.bindings.get("input_ids_full")?;
-                    let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap().clone();
-                    let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![m], vec![1]);
-                    tensor_input.offset = base_pos * 4;
-                    model.set_binding(&mut session.bindings, &mut session.fast_bindings, input_ids_key, tensor_input);
+                    model.set_runtime_window_globals_with_keys(
+                        &mut session.bindings,
+                        &self.m_key,
+                        &self.seq_len_key,
+                        &self.position_offset_key,
+                        m,
+                        m,
+                        base_pos,
+                        self.apply_derived_globals,
+                    );
+                    model.bind_u32_input_window(
+                        &mut session.bindings,
+                        &mut session.fast_bindings,
+                        input_ids_key,
+                        input_ids_full.clone(),
+                        m,
+                        base_pos,
+                    );
 
                     model.forward(foundry, &mut session.bindings, &session.fast_bindings)?;
 
@@ -360,8 +342,16 @@ impl WorkflowOp for PrefillOp {
                     chunk_count,
                     "prefill running tokenwise chunk schedule"
                 );
-                model.set_int_global(&mut session.bindings, &self.m_key, 1);
-                model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
+                model.set_runtime_window_globals_with_keys(
+                    &mut session.bindings,
+                    &self.m_key,
+                    &self.seq_len_key,
+                    &self.position_offset_key,
+                    1,
+                    1,
+                    start_pos,
+                    false,
+                );
 
                 for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(prefill_chunk_size).enumerate() {
                     let base_pos = start_pos + chunk_idx * prefill_chunk_size;
@@ -372,16 +362,24 @@ impl WorkflowOp for PrefillOp {
 
                     for i in 0..chunk_tokens.len() {
                         let pos = base_pos + i;
-                        model.set_int_global(&mut session.bindings, &self.position_offset_key, pos);
-                        if self.apply_derived_globals {
-                            model.apply_derived_globals(&mut session.bindings);
-                        }
-
-                        let input_ids_full_arg = session.bindings.get("input_ids_full")?;
-                        let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap().clone();
-                        let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![1], vec![1]);
-                        tensor_input.offset = pos * 4;
-                        model.set_binding(&mut session.bindings, &mut session.fast_bindings, input_ids_key, tensor_input);
+                        model.set_runtime_window_globals_with_keys(
+                            &mut session.bindings,
+                            &self.m_key,
+                            &self.seq_len_key,
+                            &self.position_offset_key,
+                            1,
+                            1,
+                            pos,
+                            self.apply_derived_globals,
+                        );
+                        model.bind_u32_input_window(
+                            &mut session.bindings,
+                            &mut session.fast_bindings,
+                            input_ids_key,
+                            input_ids_full.clone(),
+                            1,
+                            pos,
+                        );
 
                         model.forward(foundry, &mut session.bindings, &session.fast_bindings)?;
                     }
@@ -420,21 +418,26 @@ impl WorkflowOp for PrefillOp {
             }
 
             // Reset to decode mode for autoregressive decode (M=1).
-            model.set_int_global(&mut session.bindings, &self.m_key, 1);
-            model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
-            model.set_int_global(&mut session.bindings, &self.position_offset_key, start_pos + prompt_len);
-            if self.apply_derived_globals {
-                model.apply_derived_globals(&mut session.bindings);
-            }
+            model.set_runtime_window_globals_with_keys(
+                &mut session.bindings,
+                &self.m_key,
+                &self.seq_len_key,
+                &self.position_offset_key,
+                1,
+                1,
+                start_pos + prompt_len,
+                self.apply_derived_globals,
+            );
 
             // Ensure input_ids is bound to any valid U32 buffer; decode stage overwrites it to sampled-token buffers.
-            {
-                let input_ids_full_arg = session.bindings.get("input_ids_full")?;
-                let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap().clone();
-                let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![1], vec![1]);
-                tensor_input.offset = 0;
-                model.set_binding(&mut session.bindings, &mut session.fast_bindings, input_ids_key, tensor_input);
-            }
+            model.bind_u32_input_window(
+                &mut session.bindings,
+                &mut session.fast_bindings,
+                input_ids_key,
+                input_ids_full.clone(),
+                1,
+                0,
+            );
 
             // Extract logits for use in subsequent ops.
             let mut logits_arg = session.bindings.get(&self.logits_binding)?.clone();
@@ -495,13 +498,12 @@ impl WorkflowOp for PrefillOp {
             "prefill completed"
         );
 
-        ctx.values.insert("_internal.start_pos".to_string(), Value::Usize(start_pos));
-        ctx.values.insert("_internal.prompt_len".to_string(), Value::Usize(prompt_len));
-        ctx.values.insert("_internal.end_pos".to_string(), Value::Usize(end_pos));
-        ctx.values
-            .insert("_internal.last_prefill_m".to_string(), Value::Usize(last_prefill_m));
-        ctx.values.insert("_internal.prefill_us".to_string(), Value::Usize(prefill_us));
-        ctx.values.insert("_internal.setup_us".to_string(), Value::Usize(setup_us));
+        write_internal_usize(ctx, INTERNAL_START_POS, start_pos);
+        write_internal_usize(ctx, INTERNAL_PROMPT_LEN, prompt_len);
+        write_internal_usize(ctx, INTERNAL_END_POS, end_pos);
+        write_internal_usize(ctx, INTERNAL_LAST_PREFILL_M, last_prefill_m);
+        write_internal_usize(ctx, INTERNAL_PREFILL_US, prefill_us);
+        write_internal_usize(ctx, INTERNAL_SETUP_US, setup_us);
         ctx.values.insert(self.logits_binding.clone(), Value::Tensor(logits_arg));
 
         if let Some(out) = &self.output_pos {
@@ -561,36 +563,5 @@ fn apply_delta_cache_hit<'a>(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::apply_delta_cache_hit;
-
-    #[test]
-    fn partial_base_hit_uses_suffix_prefill() {
-        let prompt_tokens_full = [10_u32, 11, 12, 13, 14, 15, 16, 17];
-        let mut start_pos = 0usize;
-        let mut prompt_tokens = &prompt_tokens_full[..];
-        let mut token_source = "delta_input";
-        let mut cache_hit_prefix_tokens = 0usize;
-        let mut cache_lookup_path = "miss";
-
-        apply_delta_cache_hit(
-            &prompt_tokens_full,
-            &mut start_pos,
-            &mut prompt_tokens,
-            &mut token_source,
-            &mut cache_hit_prefix_tokens,
-            &mut cache_lookup_path,
-            5,
-            "key_base",
-            "delta_cache_key_base_suffix",
-            "delta_cache_key_base_full_replay_last",
-        );
-
-        assert_eq!(start_pos, 5);
-        assert_eq!(prompt_tokens, &prompt_tokens_full[5..]);
-        assert_eq!(token_source, "delta_cache_key_base_suffix");
-        assert_eq!(cache_hit_prefix_tokens, 5);
-        assert_eq!(cache_lookup_path, "key_base");
-    }
-}
+#[path = "prefill.test.rs"]
+mod tests;

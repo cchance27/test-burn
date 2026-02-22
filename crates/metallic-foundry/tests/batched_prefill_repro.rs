@@ -1,7 +1,12 @@
-use std::{path::PathBuf, sync::Once};
+use std::{
+    path::PathBuf, sync::{Arc, Once}
+};
 
-use metallic_foundry::{BPETokenizer, Foundry, MetalError, model::ModelBuilder};
+use metallic_foundry::{
+    BPETokenizer, Foundry, MetalError, generation::default_text_generation_workflow, model::{CompiledModel, ModelBuilder}, workflow::{Value, WorkflowRunner}
+};
 use metallic_loader::ModelLoader;
+use rustc_hash::FxHashMap;
 
 const MODEL_SPEC_PATH: &str = "../../models/qwen25.json";
 const GGUF_PATH: &str = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
@@ -22,6 +27,44 @@ fn get_model_paths() -> (PathBuf, PathBuf) {
 fn load_tokenizer(path: &std::path::PathBuf) -> Result<BPETokenizer, MetalError> {
     let model = ModelLoader::from_file(path).map_err(|e| MetalError::OperationFailed(format!("{:?}", e)))?;
     BPETokenizer::from_metadata(model.metadata())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_default_workflow_generate(
+    foundry: &mut Foundry,
+    model: Arc<CompiledModel>,
+    prompt_tokens: &[u32],
+    max_new_tokens: usize,
+    temperature: f32,
+    top_k: u32,
+    top_p: f32,
+    min_p: f32,
+    repeat_penalty: f32,
+    repeat_last_n: usize,
+    seed: u32,
+) -> Result<Vec<u32>, MetalError> {
+    let mut models: FxHashMap<String, Arc<CompiledModel>> = FxHashMap::default();
+    models.insert("llm".to_string(), model);
+    let workflow = default_text_generation_workflow();
+    let mut runner = WorkflowRunner::new(models);
+    let mut inputs: FxHashMap<String, Value> = FxHashMap::default();
+    inputs.insert("prompt_tokens".to_string(), Value::TokensU32(prompt_tokens.to_vec()));
+    inputs.insert("max_tokens".to_string(), Value::Usize(max_new_tokens));
+    inputs.insert("temperature".to_string(), Value::F32(temperature));
+    inputs.insert("top_k".to_string(), Value::U32(top_k));
+    inputs.insert("top_p".to_string(), Value::F32(top_p));
+    inputs.insert("min_p".to_string(), Value::F32(min_p));
+    inputs.insert("repeat_penalty".to_string(), Value::F32(repeat_penalty));
+    inputs.insert("repeat_last_n".to_string(), Value::Usize(repeat_last_n));
+    inputs.insert("presence_penalty".to_string(), Value::F32(0.0));
+    inputs.insert("frequency_penalty".to_string(), Value::F32(0.0));
+    inputs.insert("seed".to_string(), Value::U32(seed));
+    let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
+    let _ = runner.run_streaming(foundry, &workflow, inputs, |tok, _prefill, _setup, _iter| {
+        generated.push(tok);
+        Ok(true)
+    })?;
+    Ok(generated)
 }
 
 #[test]
@@ -58,7 +101,9 @@ fn test_batched_prefill_multiturn_consistency() -> Result<(), Box<dyn std::error
     let mut prompt2 = tokenizer.encode(&format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n", long_user_input))?;
 
     // Remove BOS
-    if let Some(bos) = tokenizer.special_tokens().bos_token_id && prompt2.first() == Some(&bos) {
+    if let Some(bos) = tokenizer.special_tokens().bos_token_id
+        && prompt2.first() == Some(&bos)
+    {
         prompt2.remove(0);
     }
 
@@ -69,10 +114,12 @@ fn test_batched_prefill_multiturn_consistency() -> Result<(), Box<dyn std::error
     {
         // Reset session for fresh start
         let loaded_1 = ModelLoader::from_file(&gguf_path).unwrap();
-        let model_baseline = ModelBuilder::new()
-            .with_spec_file(&spec_path)?
-            .with_model(loaded_1)
-            .build(&mut foundry)?;
+        let model_baseline = Arc::new(
+            ModelBuilder::new()
+                .with_spec_file(&spec_path)?
+                .with_model(loaded_1)
+                .build(&mut foundry)?,
+        );
 
         unsafe {
             std::env::set_var("METALLIC_DISABLE_BATCHED_PREFILL", "1");
@@ -80,11 +127,11 @@ fn test_batched_prefill_multiturn_consistency() -> Result<(), Box<dyn std::error
         }
 
         // Turn 1
-        let out1 = model_baseline.generate(&mut foundry, &prompt1, 20, &[], 0.0, 1, 1.0)?;
+        let out1 = run_default_workflow_generate(&mut foundry, model_baseline.clone(), &prompt1, 20, 0.0, 1, 1.0, 0.0, 1.0, 64, 42)?;
         baseline_tokens.extend(out1);
 
         // Turn 2
-        let out2 = model_baseline.generate(&mut foundry, &prompt2, 20, &[], 0.0, 1, 1.0)?;
+        let out2 = run_default_workflow_generate(&mut foundry, model_baseline.clone(), &prompt2, 20, 0.0, 1, 1.0, 0.0, 1.0, 64, 42)?;
         baseline_tokens.extend(out2);
     }
 
@@ -93,10 +140,12 @@ fn test_batched_prefill_multiturn_consistency() -> Result<(), Box<dyn std::error
     let mut test_tokens = Vec::new();
     {
         let loaded_2 = ModelLoader::from_file(&gguf_path).unwrap();
-        let model_test = ModelBuilder::new()
-            .with_spec_file(&spec_path)?
-            .with_model(loaded_2)
-            .build(&mut foundry)?;
+        let model_test = Arc::new(
+            ModelBuilder::new()
+                .with_spec_file(&spec_path)?
+                .with_model(loaded_2)
+                .build(&mut foundry)?,
+        );
 
         unsafe {
             std::env::remove_var("METALLIC_FORCE_BATCHED_PREFILL");
@@ -104,11 +153,11 @@ fn test_batched_prefill_multiturn_consistency() -> Result<(), Box<dyn std::error
         }
 
         // Turn 1
-        let out1 = model_test.generate(&mut foundry, &prompt1, 20, &[], 0.0, 1, 1.0)?;
+        let out1 = run_default_workflow_generate(&mut foundry, model_test.clone(), &prompt1, 20, 0.0, 1, 1.0, 0.0, 1.0, 64, 42)?;
         test_tokens.extend(out1);
 
         // Turn 2 -- This is where we expect divergence if bug exists
-        let out2 = model_test.generate(&mut foundry, &prompt2, 20, &[], 0.0, 1, 1.0)?;
+        let out2 = run_default_workflow_generate(&mut foundry, model_test.clone(), &prompt2, 20, 0.0, 1, 1.0, 0.0, 1.0, 64, 42)?;
         test_tokens.extend(out2);
     }
 

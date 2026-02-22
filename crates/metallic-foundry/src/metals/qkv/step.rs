@@ -1,13 +1,10 @@
-use std::sync::{Arc, Once};
+use std::sync::Once;
 
 use metallic_macros::KernelArgs;
 use serde::{Deserialize, Serialize};
 
-use super::step::GemvStrategy;
 use crate::{
-    Foundry, MetalError, compound::{CompiledCompoundKernel, CompoundKernel, stages::WarpLayoutStage}, fusion::MetalPolicy, metals::{
-        gemv::qkv_stages::{MultiWarpReduceStage, MultiWriteOutputStage, ParallelProjectStage}, rmsnorm::stages::RmsNormComputeStage
-    }, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::TensorArg
+    Foundry, MetalError, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::TensorArg
 };
 
 /// Fused QKV Step: RMSNorm(Input) -> Parallel QKV Projection -> 3 Outputs
@@ -100,25 +97,6 @@ pub struct FusedQkvArgs {
 
 static MIXED_QKV_FALLBACK_WARN_ONCE: Once = Once::new();
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FusedQkvKernelVariant {
-    NoNorm,
-    RmsNorm,
-}
-
-impl FusedQkvKernelVariant {
-    fn select(has_norm: bool) -> Self {
-        if has_norm { Self::RmsNorm } else { Self::NoNorm }
-    }
-
-    fn norm_suffix(self) -> &'static str {
-        match self {
-            Self::NoNorm => "",
-            Self::RmsNorm => "_rmsnorm",
-        }
-    }
-}
-
 #[typetag::serde(name = "FusedQkv")]
 impl Step for FusedQkvStep {
     fn name(&self) -> &'static str {
@@ -148,15 +126,15 @@ impl Step for FusedQkvStep {
         let input_idx = symbols.get_or_create(bindings.interpolate(self.input.0.clone()));
         let w_q_name = bindings.interpolate(self.w_q.0.clone());
         let w_q_idx = symbols.get_or_create(w_q_name.clone());
-        let _w_q_scales_idx = symbols.get_or_create(format!("{w_q_name}_scales"));
+        let w_q_scales_idx = symbols.get_or_create(format!("{w_q_name}_scales"));
 
         let w_k_name = bindings.interpolate(self.w_k.0.clone());
         let w_k_idx = symbols.get_or_create(w_k_name.clone());
-        let _w_k_scales_idx = symbols.get_or_create(format!("{w_k_name}_scales"));
+        let w_k_scales_idx = symbols.get_or_create(format!("{w_k_name}_scales"));
 
         let w_v_name = bindings.interpolate(self.w_v.0.clone());
         let w_v_idx = symbols.get_or_create(w_v_name.clone());
-        let _w_v_scales_idx = symbols.get_or_create(format!("{w_v_name}_scales"));
+        let w_v_scales_idx = symbols.get_or_create(format!("{w_v_name}_scales"));
 
         let out_q_idx = symbols.get_or_create(bindings.interpolate(self.out_q.0.clone()));
         let out_k_idx = symbols.get_or_create(bindings.interpolate(self.out_k.0.clone()));
@@ -184,19 +162,19 @@ impl Step for FusedQkvStep {
             w_q_name,
             w_q_resolved: ResolvedSymbols {
                 weights: w_q_idx,
-                scales: _w_q_scales_idx.into(),
+                scales: w_q_scales_idx.into(),
                 bias: None,
             },
             w_k_name,
             w_k_resolved: ResolvedSymbols {
                 weights: w_k_idx,
-                scales: _w_k_scales_idx.into(),
+                scales: w_k_scales_idx.into(),
                 bias: None,
             },
             w_v_name,
             w_v_resolved: ResolvedSymbols {
                 weights: w_v_idx,
-                scales: _w_v_scales_idx.into(),
+                scales: w_v_scales_idx.into(),
                 bias: None,
             },
             out_q_idx,
@@ -279,7 +257,7 @@ impl CompiledStep for CompiledFusedQkvStep {
                     crate::metals::rmsnorm::RmsNormParamsResolved {
                         feature_dim: k_dim,
                         total_elements: input_elems as u32,
-                        epsilon: bindings.get_var("rms_eps").and_then(|v| v.parse::<f32>().ok()).unwrap_or(1e-6),
+                        epsilon: bindings.get_f32_var_or("rms_eps", 1e-6),
                     },
                 )?;
                 normalized
@@ -311,7 +289,7 @@ impl CompiledStep for CompiledFusedQkvStep {
                 };
                 let output = out_arg;
 
-                let kernel = super::step::get_gemv_v2_kernel(
+                let kernel = get_gemv_v2_kernel(
                     policy,
                     crate::compound::Layout::Canonical {
                         expected_k: k_dim as usize,
@@ -320,7 +298,7 @@ impl CompiledStep for CompiledFusedQkvStep {
                     self.step.strategy,
                     crate::policy::activation::Activation::None,
                 );
-                let gemv_args = super::step::GemvV2Args {
+                let gemv_args = GemvV2Args {
                     weights,
                     scale_bytes,
                     input: proj_input.clone(),
@@ -431,10 +409,10 @@ impl CompiledStep for CompiledFusedQkvStep {
             b_v,
             has_bias,
             gamma,
-            epsilon: bindings.get_var("rms_eps").and_then(|v| v.parse::<f32>().ok()).unwrap_or(1e-6),
+            epsilon: bindings.get_f32_var_or("rms_eps", 1e-6),
         };
 
-        let kernel = get_fused_qkv_kernel(self.step.strategy, policy, self.gamma_idx.is_some());
+        let kernel = super::kernels::get_fused_qkv_kernel(self.step.strategy, policy, self.gamma_idx.is_some());
 
         // Manual dispatch to support M dimension (batch)
         const WARPS_PER_TG: usize = 8;
@@ -454,50 +432,4 @@ impl CompiledStep for CompiledFusedQkvStep {
     fn name(&self) -> &'static str {
         "FusedQkv"
     }
-}
-
-fn get_fused_qkv_kernel(strategy: GemvStrategy, policy: Arc<dyn MetalPolicy>, has_norm: bool) -> Arc<CompiledCompoundKernel> {
-    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
-
-    let qkv_variant = FusedQkvKernelVariant::select(has_norm);
-    let variant = format!(
-        "{:?}_{}_{}",
-        strategy,
-        policy.short_name(),
-        matches!(qkv_variant, FusedQkvKernelVariant::RmsNorm)
-    )
-    .to_lowercase();
-    let key = KernelCacheKey::new("fused_qkv", variant);
-
-    let policy_clone = policy.clone();
-    kernel_registry().get_or_build(key, move || {
-        let kernel_name = format!("fused_qkv{}_{}", qkv_variant.norm_suffix(), policy_clone.short_name());
-        let vec_width = policy_clone.optimization_hints().vector_load_size;
-
-        let mut compound = CompoundKernel::new(&kernel_name)
-            .with_manual_output(true)
-            .prologue(WarpLayoutStage::canonical().with_warps(8).with_elems_per_thread(vec_width as u32));
-
-        if matches!(qkv_variant, FusedQkvKernelVariant::RmsNorm) {
-            compound = compound.prologue(RmsNormComputeStage::new(6, 7, 19)); // Stage 1: RMSNorm compute
-        }
-
-        // Stage 2: QKV Projection
-        let vw = match vec_width {
-            4 => super::stages::VectorWidth::Vec4,
-            8 => super::stages::VectorWidth::Vec8,
-            _ => panic!("Unsupported vector width: {}", vec_width),
-        };
-
-        let mut proj = ParallelProjectStage::new(policy_clone.clone()).with_vector_width(vw);
-        if matches!(qkv_variant, FusedQkvKernelVariant::RmsNorm) {
-            proj = proj.with_norm("inv_rms");
-        }
-        compound = compound.main(proj);
-
-        compound
-            .epilogue(MultiWarpReduceStage) // Stage 3: Reduction
-            .epilogue(MultiWriteOutputStage::new()) // Stage 4: Write Out
-            .compile()
-    })
 }

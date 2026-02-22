@@ -10,6 +10,43 @@ pub(crate) mod gguf;
 
 mod loader;
 pub use loader::ModelLoader;
+use rustc_hash::FxHashSet;
+
+/// Loader-side tensor-name index for fast, format-agnostic binding resolution.
+///
+/// Foundry/runtime can use this to resolve logical tensor candidates without
+/// coupling directly to source-format-specific internals (GGUF today, others later).
+#[derive(Debug, Clone, Default)]
+pub struct TensorNameIndex {
+    names: FxHashSet<String>,
+}
+
+impl TensorNameIndex {
+    /// Build an index from a loaded model's exposed tensor names.
+    pub fn from_model(model: &dyn LoadedModel) -> Self {
+        let names = model.tensor_names().into_iter().collect();
+        Self { names }
+    }
+
+    /// Returns true if a tensor name exists in the loaded model.
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+
+    /// Return the first candidate tensor name that exists in this model.
+    pub fn resolve_first<'a, I>(&self, candidates: I) -> Option<String>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        for candidate in candidates {
+            if self.contains(candidate) {
+                return Some(candidate.to_string());
+            }
+        }
+        None
+    }
+}
 
 // --- Testing Utilities ---
 

@@ -1,5 +1,6 @@
 use std::sync::OnceLock;
 
+use metallic_env::FOUNDRY_TRACE;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -8,16 +9,9 @@ use crate::{
     }, types::KernelArg
 };
 
-const METALLIC_FOUNDRY_TRACE_ENV: &str = "METALLIC_FOUNDRY_TRACE";
-
 fn foundry_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var(METALLIC_FOUNDRY_TRACE_ENV)
-            .ok()
-            .map(|v| v.trim() != "0")
-            .unwrap_or(false)
-    })
+    *ENABLED.get_or_init(|| FOUNDRY_TRACE.get().ok().flatten().unwrap_or(false))
 }
 
 /// A step that repeats a sequence of sub-steps.

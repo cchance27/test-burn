@@ -1,14 +1,11 @@
-use std::sync::{
-    Arc, atomic::{AtomicU32, Ordering}
-};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use half::f16;
+use metallic_env::{FoundryEnvVar, SDPA_DEBUG_ONLINE_COMPARE_MIN_KV, SDPA_DEBUG_ONLINE_COMPARE_PREFILL_MIN_KV, is_set};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Foundry, MetalError, constants, metals::{
-        flashattention, gemm::step::{GemmParams, GemmV2Args, gemm_dispatch_config, get_gemm_kernel}, mma::stages::TileConfig, softmax::{SoftmaxV2SdpaBatchedArgs, get_softmax_v2_sdpa_batched_kernel}
-    }, policy::activation::Activation, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::{Pooled, View}, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::{DispatchConfig, GridSize, KernelArg, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, metals::flashattention, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::{Pooled, View}, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::{KernelArg, TensorArg}
 };
 
 /// FlashAttention Step (formerly SdpaStep).
@@ -86,77 +83,6 @@ impl Step for FlashAttentionStep {
     }
 }
 
-/// Fallback/Reference SDPA op (Materialized).
-///
-/// Uses standard GEMM -> Softmax -> GEMM pipeline.
-/// Used for correctness verification and fallbacks when FlashAttention is unsupported (e.g. odd head dims).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SdpaReferenceStep {
-    pub q: Ref,
-    pub k: Ref,
-    pub v: Ref,
-    pub output: Ref,
-    #[serde(default)]
-    pub causal: bool,
-    pub query_offset: DynamicValue<u32>,
-    pub n_heads: DynamicValue<u32>,
-    pub head_dim: DynamicValue<u32>,
-    pub kv_seq_len: DynamicValue<u32>,
-    #[serde(default)]
-    pub m: DynamicValue<u32>,
-    #[serde(default)]
-    pub kv_head_major: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct CompiledSdpaReferenceStep {
-    pub step: SdpaReferenceStep,
-    pub q_idx: usize,
-    pub k_idx: usize,
-    pub v_idx: usize,
-    pub output_idx: usize,
-}
-
-#[typetag::serde(name = "SdpaReference")]
-impl Step for SdpaReferenceStep {
-    fn name(&self) -> &'static str {
-        "SdpaReference"
-    }
-
-    fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
-        let mut symbols = SymbolTable::new();
-        let compiled = self.compile(bindings, &mut symbols);
-        let mut fast_bindings = FastBindings::new(symbols.len());
-
-        for (name, symbol_id) in symbols.iter() {
-            if let Ok(tensor) = bindings.get(name) {
-                fast_bindings.set(*symbol_id, tensor);
-            }
-        }
-
-        for step in compiled {
-            step.execute(foundry, &fast_bindings, bindings, &symbols)?;
-        }
-
-        Ok(())
-    }
-
-    fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
-        let q_idx = symbols.get_or_create(bindings.interpolate(self.q.0.clone()));
-        let k_idx = symbols.get_or_create(bindings.interpolate(self.k.0.clone()));
-        let v_idx = symbols.get_or_create(bindings.interpolate(self.v.0.clone()));
-        let output_idx = symbols.get_or_create(bindings.interpolate(self.output.0.clone()));
-
-        vec![Box::new(CompiledSdpaReferenceStep {
-            step: self.clone(),
-            q_idx,
-            k_idx,
-            v_idx,
-            output_idx,
-        })]
-    }
-}
-
 impl CompiledStep for CompiledFlashAttentionStep {
     fn execute(
         &self,
@@ -178,10 +104,10 @@ impl CompiledStep for CompiledFlashAttentionStep {
         let q_offset_val = self.step.query_offset.resolve(bindings);
         let m_raw = self.step.m.resolve(bindings);
         let m = m_raw.max(1);
-        let debug_sdpa = std::env::var_os("METALLIC_DEBUG_SDPA").is_some();
-        let force_materialized = std::env::var_os("METALLIC_SDPA_FORCE_MATERIALIZED").is_some();
-        let disable_fa = std::env::var_os("METALLIC_DISABLE_FA").is_some() || std::env::var_os("METALLIC_SDPA_DISABLE_ONLINE").is_some();
-        let verbose_sdpa = std::env::var_os("METALLIC_DEBUG_SDPA_VERBOSE").is_some();
+        let debug_sdpa = is_set(FoundryEnvVar::DebugSdpa);
+        let force_materialized = is_set(FoundryEnvVar::SdpaForceMaterialized);
+        let disable_fa = is_set(FoundryEnvVar::DisableFa) || is_set(FoundryEnvVar::SdpaDisableOnline);
+        let verbose_sdpa = is_set(FoundryEnvVar::DebugSdpaVerbose);
 
         // Ultra-light progress indicator for decode hangs: keep track of the last observed `kv_seq_len`.
         // This is only used for env-gated logging.
@@ -196,7 +122,7 @@ impl CompiledStep for CompiledFlashAttentionStep {
             ));
         }
 
-        let verbose_all = std::env::var_os("METALLIC_DEBUG_SDPA_VERBOSE_ALL").is_some();
+        let verbose_all = is_set(FoundryEnvVar::DebugSdpaVerboseAll);
         if debug_sdpa && verbose_sdpa && (verbose_all || m == 1) {
             tracing::info!(
                 target: "metallic_foundry::metals::sdpa",
@@ -231,7 +157,7 @@ impl CompiledStep for CompiledFlashAttentionStep {
             if debug_sdpa && verbose_sdpa {
                 tracing::info!(target: "metallic_foundry::metals::sdpa", "FlashAttention forced -> reference (materialized)");
             }
-            return execute_sdpa_reference(
+            return super::reference::execute_sdpa_reference(
                 foundry,
                 q,
                 k,
@@ -251,7 +177,7 @@ impl CompiledStep for CompiledFlashAttentionStep {
                 if debug_sdpa {
                     tracing::info!(target: "metallic_foundry::metals::sdpa", "FlashAttention disabled -> reference");
                 }
-                return execute_sdpa_reference(
+                return super::reference::execute_sdpa_reference(
                     foundry,
                     q,
                     k,
@@ -272,7 +198,7 @@ impl CompiledStep for CompiledFlashAttentionStep {
                 if debug_sdpa {
                     tracing::info!(target: "metallic_foundry::metals::sdpa", "FlashAttention m=1 but causal offset mismatch -> reference");
                 }
-                return execute_sdpa_reference(
+                return super::reference::execute_sdpa_reference(
                     foundry,
                     q,
                     k,
@@ -333,7 +259,7 @@ impl CompiledStep for CompiledFlashAttentionStep {
                         "FlashAttention requested but tensor layout unsupported -> reference (materialized)"
                     );
                 }
-                return execute_sdpa_reference(
+                return super::reference::execute_sdpa_reference(
                     foundry,
                     q,
                     k,
@@ -350,11 +276,8 @@ impl CompiledStep for CompiledFlashAttentionStep {
 
             // Optional debug validation
             static DEBUG_ONLINE_COMPARE_ONCE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let debug_compare = std::env::var_os("METALLIC_SDPA_DEBUG_ONLINE_COMPARE").is_some();
-            let min_kv: u32 = std::env::var("METALLIC_SDPA_DEBUG_ONLINE_COMPARE_MIN_KV")
-                .ok()
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let debug_compare = is_set(FoundryEnvVar::SdpaDebugOnlineCompare);
+            let min_kv: u32 = SDPA_DEBUG_ONLINE_COMPARE_MIN_KV.get().ok().flatten().unwrap_or(0);
             if debug_compare && kv_seq_len >= min_kv && DEBUG_ONLINE_COMPARE_ONCE.fetch_add(1, Ordering::Relaxed) == 0 {
                 let out_tmp = FoundryTensor::<F16, Pooled>::new(foundry, output.dims().to_vec(), TensorInit::Uninitialized)?;
 
@@ -371,7 +294,7 @@ impl CompiledStep for CompiledFlashAttentionStep {
                     1,
                     self.step.kv_head_major,
                 )?;
-                execute_sdpa_reference(
+                super::reference::execute_sdpa_reference(
                     foundry,
                     q,
                     k,
@@ -460,11 +383,8 @@ impl CompiledStep for CompiledFlashAttentionStep {
 
                 // Optional debug validation
                 static DEBUG_ONLINE_COMPARE_PREFILL_ONCE: AtomicU32 = AtomicU32::new(0);
-                let debug_compare_prefill = std::env::var_os("METALLIC_SDPA_DEBUG_ONLINE_COMPARE_PREFILL").is_some();
-                let min_kv: u32 = std::env::var("METALLIC_SDPA_DEBUG_ONLINE_COMPARE_PREFILL_MIN_KV")
-                    .ok()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(0);
+                let debug_compare_prefill = is_set(FoundryEnvVar::SdpaDebugOnlineComparePrefill);
+                let min_kv: u32 = SDPA_DEBUG_ONLINE_COMPARE_PREFILL_MIN_KV.get().ok().flatten().unwrap_or(0);
                 if debug_compare_prefill && kv_seq_len >= min_kv && DEBUG_ONLINE_COMPARE_PREFILL_ONCE.fetch_add(1, Ordering::Relaxed) == 0 {
                     tracing::warn!("FlashAttention debug compare prefill triggered (skipping implementation for brevity)");
                 }
@@ -487,7 +407,7 @@ impl CompiledStep for CompiledFlashAttentionStep {
         if debug_sdpa && verbose_sdpa {
             tracing::info!(target: "metallic_foundry::metals::sdpa", "FlashAttention -> reference (materialized) (prefill/fallback)");
         }
-        execute_sdpa_reference(
+        super::reference::execute_sdpa_reference(
             foundry,
             q,
             k,
@@ -507,277 +427,6 @@ impl CompiledStep for CompiledFlashAttentionStep {
     }
 }
 
-impl CompiledStep for CompiledSdpaReferenceStep {
-    fn execute(
-        &self,
-        foundry: &mut Foundry,
-        fast_bindings: &FastBindings,
-        bindings: &TensorBindings,
-        _symbols: &SymbolTable,
-    ) -> Result<(), MetalError> {
-        let q = fast_bindings.get(self.q_idx).ok_or(MetalError::InputNotFound("q".into()))?;
-        let k = fast_bindings.get(self.k_idx).ok_or(MetalError::InputNotFound("k".into()))?;
-        let v = fast_bindings.get(self.v_idx).ok_or(MetalError::InputNotFound("v".into()))?;
-        let output = fast_bindings
-            .get(self.output_idx)
-            .ok_or(MetalError::InputNotFound("output".into()))?;
-
-        let head_dim = self.step.head_dim.resolve(bindings);
-        let kv_seq_len = self.step.kv_seq_len.resolve(bindings);
-        let n_heads = self.step.n_heads.resolve(bindings);
-        let q_offset_val = self.step.query_offset.resolve(bindings);
-        let m = self.step.m.resolve(bindings).max(1);
-
-        if !self.step.kv_head_major {
-            return Err(MetalError::OperationNotSupported(
-                "SdpaReference only supports kv_head_major=true for now".into(),
-            ));
-        }
-
-        execute_sdpa_reference(
-            foundry,
-            q,
-            k,
-            v,
-            output,
-            n_heads,
-            head_dim,
-            kv_seq_len,
-            q_offset_val,
-            m,
-            self.step.causal,
-        )
-    }
-
-    fn name(&self) -> &'static str {
-        "SdpaReference"
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn execute_sdpa_reference(
-    foundry: &mut Foundry,
-    q: &TensorArg,
-    k: &TensorArg,
-    v: &TensorArg,
-    output: &TensorArg,
-    n_heads: u32,
-    head_dim: u32,
-    kv_seq_len: u32,
-    q_offset_val: u32,
-    m: u32,
-    causal: bool,
-) -> Result<(), MetalError> {
-    let scale = 1.0 / (head_dim as f32).sqrt();
-    let d_model = n_heads
-        .checked_mul(head_dim)
-        .ok_or_else(|| MetalError::OperationNotSupported("d_model overflow".into()))? as usize;
-
-    // Layout reconciliation:
-    //
-    // SDPA reference uses GEMM batched over heads (gid.z = head index). That means we must provide:
-    // - `batch_stride_*`: offset from head to head in elements
-    // - `ld*`: row stride (elements) within a head slice
-    //
-    // Foundry frequently carries fixed-capacity token-major metadata for Q/Out (e.g. [1, 32, d_model]),
-    // while the *buffer contents* may be head-major packed over the true `m` (written by fused KV prep).
-    // FlashAttention prefill already handles that ambiguity; the reference path must match it or
-    // `METALLIC_DISABLE_FA=1` will silently change semantics.
-    let (q_batch_stride, q_row_stride) = {
-        let dims = q.dims();
-        let strides = q.strides();
-
-        match dims {
-            // Flat token-major packed: [m * d_model]
-            [len] if strides.len() == 1 && *len >= (m as usize) * d_model => (head_dim as i64, d_model as i32),
-            // Fixed-capacity token-major metadata, but head-major packed contents over true `m`.
-            // Buffer is interpreted as: [n_heads, m, head_dim] contiguous.
-            [1, _m_cap, dm0] if *dm0 == d_model && strides.len() == 3 => {
-                let q_head_stride = (m as i64) * (head_dim as i64);
-                (q_head_stride, head_dim as i32)
-            }
-            // Token-major packed: [m, d_model] (or fixed-capacity [m_cap, d_model]).
-            [rows, dm0] if *dm0 == d_model && strides.len() == 2 && *rows >= m as usize => {
-                // Base for head h is offset by h*head_dim within the row; row stride is d_model.
-                (head_dim as i64, d_model as i32)
-            }
-            // Token-major explicit head: [m, n_heads, head_dim]
-            [rows, h, d] if *h == n_heads as usize && *d == head_dim as usize && strides.len() == 3 && *rows >= m as usize => {
-                // Base for head h is offset by stride(H); row stride is stride(M).
-                (strides[1] as i64, strides[0] as i32)
-            }
-            // Head-major: [n_heads, m, head_dim]
-            [h, rows, d] if *h == n_heads as usize && *d == head_dim as usize && strides.len() == 3 && *rows >= m as usize => {
-                ((m as i64) * (head_dim as i64), head_dim as i32)
-            }
-            _ => {
-                return Err(MetalError::OperationNotSupported(format!(
-                    "SdpaReference Q layout unsupported: dims={dims:?} strides={strides:?} (expected token-major [m,d_model] or fixed-cap [1,m_cap,d_model] with head-major contents)"
-                )));
-            }
-        }
-    };
-
-    let (out_batch_stride, out_row_stride) = {
-        let dims = output.dims();
-        let strides = output.strides();
-
-        match dims {
-            // Flat token-major packed output: [m * d_model]
-            [len] if strides.len() == 1 && *len >= (m as usize) * d_model => (head_dim as i64, d_model as i32),
-            // Token-major packed output: [m, d_model] or fixed-capacity [m_cap, d_model]
-            [rows, dm0] if *dm0 == d_model && strides.len() == 2 && *rows >= m as usize => (head_dim as i64, d_model as i32),
-            [1, rows, dm0] if *dm0 == d_model && strides.len() == 3 && *rows >= m as usize => (head_dim as i64, d_model as i32),
-            // Token-major explicit head output: [m, n_heads, head_dim]
-            [rows, h, d] if *h == n_heads as usize && *d == head_dim as usize && strides.len() == 3 && *rows >= m as usize => {
-                (strides[1] as i64, strides[0] as i32)
-            }
-            // Head-major output: [n_heads, m, head_dim]
-            [h, rows, d] if *h == n_heads as usize && *d == head_dim as usize && strides.len() == 3 && *rows >= m as usize => {
-                ((m as i64) * (head_dim as i64), head_dim as i32)
-            }
-            _ => {
-                return Err(MetalError::OperationNotSupported(format!(
-                    "SdpaReference output layout unsupported: dims={dims:?} strides={strides:?}"
-                )));
-            }
-        }
-    };
-
-    // Use default tile config (32x32) - auto_select was causing regression.
-    let tile_config = TileConfig::default();
-    let (bm, _, _, _, _) = tile_config.tile_sizes();
-
-    let scratch_layout = crate::compound::layout::TiledLayout::sdpa_scratch(n_heads, m, kv_seq_len, bm);
-    let (scores_all, probs_all) = crate::metals::sdpa::scratch::get_sdpa_scratch_f16(foundry, scratch_layout)?;
-
-    // Softmax scaling is applied in QK GEMM (alpha=scale). For softmax itself we use 1.0.
-    let scale_arg = constants::f16_scalar(foundry, f16::ONE)?;
-
-    // K/V can be a tightly packed history [H, kv_seq_len, D] or a cache view [H, capacity, D].
-    let k_seq_stride = k.dims().get(1).copied().unwrap_or(kv_seq_len as usize);
-    let v_seq_stride = v.dims().get(1).copied().unwrap_or(kv_seq_len as usize);
-    // Unused let d_model_dim = (n_heads as usize) * (head_dim as usize);
-
-    // QK^T GEMM kernel
-    let qk_gemm_kernel = get_gemm_kernel(
-        Arc::new(crate::policy::f16::PolicyF16),
-        Arc::new(crate::policy::f16::PolicyF16),
-        false,
-        true, // transpose_b (K^T)
-        tile_config,
-        true,  // has_alpha_beta (scale)
-        false, // has_bias
-        Activation::None,
-    );
-
-    // PV GEMM kernel (unused explicitly here but part of the conceptual pipeline)
-    let _av_gemm_kernel_unused = get_gemm_kernel(
-        Arc::new(crate::policy::f16::PolicyF16),
-        Arc::new(crate::policy::f16::PolicyF16),
-        false,
-        false,
-        tile_config,
-        false,
-        false,
-        Activation::None,
-    );
-
-    // GEMM 1: Q @ K^T -> Scores (into head-major strided scratch)
-    let mut qk_params = GemmParams::simple(m as i32, kv_seq_len as i32, head_dim as i32, false, true, tile_config);
-    qk_params.lda = q_row_stride;
-    qk_params.batch_stride_a = q_batch_stride;
-    qk_params.batch_stride_b = (k_seq_stride as i64) * (head_dim as i64);
-    qk_params.batch_stride_c = scratch_layout.head_stride as i64;
-    qk_params.batch_stride_d = scratch_layout.head_stride as i64;
-
-    let qk_dispatch = {
-        let base = gemm_dispatch_config(&qk_params, tile_config);
-        DispatchConfig {
-            grid: GridSize::new(qk_params.tiles_n as usize, qk_params.tiles_m as usize, n_heads as usize),
-            group: base.group,
-        }
-    };
-
-    let qk_args = GemmV2Args {
-        a: TensorArg::from_tensor(q),
-        b: TensorArg::from_tensor(k),
-        d: scores_all.clone(),
-        c: scores_all.clone(),
-        bias: scores_all.clone(),     // Dummy
-        b_scales: scores_all.clone(), // Dummy
-        weights_per_block: 32,
-        params: qk_params,
-        alpha: scale,
-        beta: 0.0,
-        b_is_canonical: 0,
-    };
-    foundry.run(&qk_gemm_kernel.clone().bind_arc(qk_args, qk_dispatch))?;
-
-    // Softmax: flatten heads into row dimension, dispatch once (over padded_m).
-    let softmax_sdpa_kernel = get_softmax_v2_sdpa_batched_kernel();
-    let softmax_dispatch = DispatchConfig {
-        grid: GridSize::d1((n_heads as usize) * (scratch_layout.padded_m as usize)),
-        group: ThreadgroupSize::d1(256),
-    };
-    let softmax_args = SoftmaxV2SdpaBatchedArgs {
-        input: scores_all.clone(),
-        scale: scale_arg.clone(),
-        output: probs_all.clone(),
-        seq_k: kv_seq_len,
-        causal: if causal { 1 } else { 0 },
-        query_offset: q_offset_val,
-        rows_per_batch: scratch_layout.padded_m,
-    };
-    foundry.run(&softmax_sdpa_kernel.clone().bind_arc(softmax_args, softmax_dispatch))?;
-
-    // GEMM 2: Probs @ V -> Output
-    let av_gemm_kernel = get_gemm_kernel(
-        Arc::new(crate::policy::f16::PolicyF16),
-        Arc::new(crate::policy::f16::PolicyF16),
-        false,
-        false, // V is normal orientation
-        tile_config,
-        false, // no scale
-        false, // no bias
-        Activation::None,
-    );
-
-    let mut av_params = GemmParams::simple(m as i32, head_dim as i32, kv_seq_len as i32, false, false, tile_config);
-    av_params.ldc = out_row_stride;
-    av_params.ldd = out_row_stride;
-    av_params.batch_stride_a = scratch_layout.head_stride as i64; // Probs (head-major)
-    av_params.batch_stride_b = (v_seq_stride as i64) * (head_dim as i64); // V
-    av_params.batch_stride_c = out_batch_stride;
-    av_params.batch_stride_d = out_batch_stride;
-
-    let av_dispatch = {
-        let base = gemm_dispatch_config(&av_params, tile_config);
-        DispatchConfig {
-            grid: GridSize::new(av_params.tiles_n as usize, av_params.tiles_m as usize, n_heads as usize),
-            group: base.group,
-        }
-    };
-
-    let av_args = GemmV2Args {
-        a: probs_all.clone(),
-        b: TensorArg::from_tensor(v),
-        d: TensorArg::from_tensor(output),
-        c: TensorArg::from_tensor(output),
-        bias: TensorArg::from_tensor(output),     // Dummy
-        b_scales: TensorArg::from_tensor(output), // Dummy
-        weights_per_block: 32,
-        params: av_params,
-        alpha: 1.0,
-        beta: 0.0,
-        b_is_canonical: 0,
-    };
-
-    foundry.run(&av_gemm_kernel.clone().bind_arc(av_args, av_dispatch))?;
-
-    Ok(())
-}
-
 // Backward compatibility or legacy re-exports if needed, but for now we assume fresh usage.
 pub type SdpaStep = FlashAttentionStep;
-pub type SdpaMaterializedStep = SdpaReferenceStep;
+pub type SdpaMaterializedStep = super::reference::SdpaReferenceStep;

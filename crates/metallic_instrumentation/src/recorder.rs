@@ -38,7 +38,7 @@ pub struct MetricsLayer {
 
 impl MetricsLayer {
     /// Construct a new metrics layer using the provided exporters.
-    #[must_use] 
+    #[must_use]
     pub fn new(exporters: Vec<Box<dyn MetricExporter>>) -> Self {
         Self {
             exporters: Arc::new(exporters),

@@ -1,5 +1,6 @@
 pub mod attention;
 pub mod channel;
+pub mod common;
 pub mod elemwise;
 pub mod embedding;
 pub mod flashattention;
@@ -10,6 +11,7 @@ pub mod kv_prep;
 pub mod kv_rearrange;
 pub mod matmul;
 pub mod mma;
+pub mod qkv;
 pub mod repeat_kv_heads;
 pub mod rmsnorm;
 pub mod rope;

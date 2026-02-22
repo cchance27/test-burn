@@ -25,7 +25,7 @@ pub struct CachedMemoryProfiler {
 
 impl CachedMemoryProfiler {
     /// Create a new cached memory profiler.
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         // Get the current process ID once and cache it
         let pid = get_current_pid().expect("Failed to get current process ID");
@@ -55,7 +55,7 @@ impl CachedMemoryProfiler {
     /// Get the current process memory usage in bytes.
     /// This is the main method that should be called from the generation loop.
     /// Uses caching to avoid expensive system calls on every invocation.
-    #[must_use] 
+    #[must_use]
     pub fn get_process_memory_usage(&self) -> u64 {
         let now = Instant::now();
 
@@ -91,7 +91,7 @@ impl CachedMemoryProfiler {
     }
 
     /// Get the cached process ID
-    #[must_use] 
+    #[must_use]
     pub fn get_pid(&self) -> Pid {
         self.cached_pid
     }
@@ -115,20 +115,5 @@ pub fn global_cached_memory_profiler() -> &'static CachedMemoryProfiler {
     INSTANCE.get_or_init(CachedMemoryProfiler::new)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cached_memory_profiler_creation() {
-        let profiler = CachedMemoryProfiler::new();
-        assert!(profiler.get_pid().as_u32() != 0); // PID should be valid
-    }
-
-    #[test]
-    fn test_get_process_memory_usage() {
-        let profiler = CachedMemoryProfiler::new();
-        let memory = profiler.get_process_memory_usage();
-        assert!(memory > 0); // Process should have some memory usage
-    }
-}
+#[path = "memory_profiler.test.rs"]
+mod tests;

@@ -443,7 +443,7 @@ impl GpuProfiler {
             .and_then(std::sync::Weak::upgrade)
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn profile_compute(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
@@ -455,7 +455,7 @@ impl GpuProfiler {
         Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend, None)
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn profile_compute_with_data(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
@@ -468,7 +468,7 @@ impl GpuProfiler {
         Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend, Some(data))
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn profile_blit(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _encoder: &Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>,
@@ -480,7 +480,7 @@ impl GpuProfiler {
         Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend, None)
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn profile_command_buffer(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         op_name: String,
@@ -491,7 +491,7 @@ impl GpuProfiler {
         Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend, None)
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn profile_command_buffer_with_data(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         op_name: String,

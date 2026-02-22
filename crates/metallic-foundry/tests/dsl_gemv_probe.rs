@@ -64,7 +64,10 @@ fn gguf_tensor_f32(model: &dyn LoadedModel, name: &str) -> Result<(Vec<f32>, Vec
     Ok((data, dims, data_type))
 }
 
-fn gguf_tensor_f32_any_rank(model: &dyn LoadedModel, name: &str) -> Result<(Vec<f32>, Vec<usize>, metallic_foundry::tensor::Dtype), MetalError> {
+fn gguf_tensor_f32_any_rank(
+    model: &dyn LoadedModel,
+    name: &str,
+) -> Result<(Vec<f32>, Vec<usize>, metallic_foundry::tensor::Dtype), MetalError> {
     let info = model
         .tensor_info(name)
         .ok_or_else(|| MetalError::InvalidShape(format!("Tensor '{}' not found", name)))?;
@@ -400,34 +403,48 @@ fn test_dsl_gemv_probe_layer0() -> Result<(), MetalError> {
             return Ok(());
         }
     };
-    let proj_out_f32 = proj_out
-        .as_ref()
-        .and_then(|t| read_f16_buffer(t).ok().map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>()));
-    let gate_f32 = gate_out
-        .as_ref()
-        .and_then(|t| read_f16_buffer(t).ok().map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>()));
-    let up_f32 = up_out
-        .as_ref()
-        .and_then(|t| read_f16_buffer(t).ok().map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>()));
-    let ffn_out_f32 = ffn_out
-        .as_ref()
-        .and_then(|t| read_f16_buffer(t).ok().map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>()));
+    let proj_out_f32 = proj_out.as_ref().and_then(|t| {
+        read_f16_buffer(t)
+            .ok()
+            .map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>())
+    });
+    let gate_f32 = gate_out.as_ref().and_then(|t| {
+        read_f16_buffer(t)
+            .ok()
+            .map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>())
+    });
+    let up_f32 = up_out.as_ref().and_then(|t| {
+        read_f16_buffer(t)
+            .ok()
+            .map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>())
+    });
+    let ffn_out_f32 = ffn_out.as_ref().and_then(|t| {
+        read_f16_buffer(t)
+            .ok()
+            .map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>())
+    });
 
-    let norm_out_f32 = bindings
-        .get("norm_out")
-        .ok()
-        .and_then(|t| read_f16_buffer(&t).ok().map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>()));
-    let ffn_norm_f32 = bindings
-        .get("ffn_norm_out")
-        .ok()
-        .and_then(|t| read_f16_buffer(&t).ok().map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>()));
+    let norm_out_f32 = bindings.get("norm_out").ok().and_then(|t| {
+        read_f16_buffer(&t)
+            .ok()
+            .map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>())
+    });
+    let ffn_norm_f32 = bindings.get("ffn_norm_out").ok().and_then(|t| {
+        read_f16_buffer(&t)
+            .ok()
+            .map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>())
+    });
 
     let model_ref = dsl_model.weights().model();
     let available = gguf_available(model_ref);
     let layer = 0usize;
 
     if let Some(norm_vec) = norm_out_f32.as_ref() {
-        let qkv_probes = [("layer.attn_q", &q_f32, norm_vec), ("layer.attn_k", &k_f32, norm_vec), ("layer.attn_v", &v_f32, norm_vec)];
+        let qkv_probes = [
+            ("layer.attn_q", &q_f32, norm_vec),
+            ("layer.attn_k", &k_f32, norm_vec),
+            ("layer.attn_v", &v_f32, norm_vec),
+        ];
 
         for (key, dsl_out, vector_x) in qkv_probes {
             let gguf_name = arch
@@ -494,7 +511,9 @@ fn test_dsl_gemv_probe_layer0() -> Result<(), MetalError> {
             report_layout_diff(key, &cpu_nk, &cpu_kn, dsl_out)?;
         }
     } else {
-        eprintln!("Skipping FFN gate/up probes: one or more of 'ffn_norm_out'/'gate'/'up' bindings not materialized in current fused graph.");
+        eprintln!(
+            "Skipping FFN gate/up probes: one or more of 'ffn_norm_out'/'gate'/'up' bindings not materialized in current fused graph."
+        );
     }
 
     // FFN down projection (swiglu output -> ffn_out)

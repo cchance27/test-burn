@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use metallic_env::{FoundryEnvVar, is_set};
 use metallic_loader::ModelLoader;
 use rustc_hash::FxHashMap;
 use tracing;
@@ -400,7 +401,7 @@ impl WorkflowRunner {
             return_key: None,
         };
 
-        let debug_ops = std::env::var("METALLIC_DEBUG_WORKFLOW_OPS").is_ok();
+        let debug_ops = is_set(FoundryEnvVar::DebugWorkflowOps);
         for cop in compiled.iter_mut() {
             if debug_ops {
                 tracing::info!(target: "metallic_foundry::workflow::runner", "Workflow begin_run op={}", cop.name);
@@ -426,23 +427,5 @@ impl WorkflowRunner {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::should_override_with_inferred_eos;
-
-    #[test]
-    fn inferred_eos_used_when_not_explicitly_supplied() {
-        assert!(should_override_with_inferred_eos(false, Some(42), Some(42)));
-        assert!(should_override_with_inferred_eos(false, None, Some(42)));
-    }
-
-    #[test]
-    fn inferred_eos_used_when_supplied_value_matches_workflow_default() {
-        assert!(should_override_with_inferred_eos(true, Some(42), Some(42)));
-    }
-
-    #[test]
-    fn explicit_non_default_eos_is_preserved() {
-        assert!(!should_override_with_inferred_eos(true, Some(2), Some(42)));
-    }
-}
+#[path = "runner.test.rs"]
+mod tests;

@@ -1,5 +1,6 @@
 use std::sync::{OnceLock, RwLock};
 
+use metallic_env::{FoundryEnvVar, is_set};
 use metallic_sdk::debug::op_metrics_enabled;
 use rustc_hash::FxHashMap;
 use serde::de::DeserializeOwned;
@@ -11,13 +12,13 @@ use super::{
 };
 use crate::error::MetalError;
 
-pub(crate) struct CompiledWorkflow {
-    pub(crate) ops: Vec<CompiledOp>,
+pub(super) struct CompiledWorkflow {
+    pub(super) ops: Vec<CompiledOp>,
 }
 
-pub(crate) struct CompiledOp {
-    pub name: String,
-    pub op: Box<dyn WorkflowOp>,
+pub(super) struct CompiledOp {
+    pub(super) name: String,
+    pub(super) op: Box<dyn WorkflowOp>,
 }
 
 struct MemoizedOp {
@@ -109,7 +110,7 @@ impl WorkflowOp for MemoizedOp {
         ctx: &mut super::runner::WorkflowExecutionContext<'_>,
         on_token: &mut dyn FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
     ) -> Result<super::ops::WorkflowOpOutcome, MetalError> {
-        if self.spec.disable_in_tui && std::env::var("METALLIC_TUI_MODE").is_ok() {
+        if self.spec.disable_in_tui && is_set(FoundryEnvVar::TuiMode) {
             return self.inner.execute(ctx, on_token);
         }
 
@@ -186,7 +187,6 @@ fn get_registry() -> &'static RwLock<FxHashMap<String, OpBuilder>> {
 }
 
 /// Registers a new operation into the global registry.
-#[allow(dead_code)]
 pub fn register_op<F>(name: impl Into<String>, builder: F)
 where
     F: Fn(serde_json::Value) -> Result<Box<dyn WorkflowOp>, MetalError> + Send + Sync + 'static,
@@ -330,12 +330,12 @@ fn compile_steps(steps: &[WorkflowStepSpec]) -> Result<Vec<CompiledOp>, MetalErr
 }
 
 impl CompiledWorkflow {
-    pub(crate) fn compile(workflow: &WorkflowSpec) -> Result<Self, MetalError> {
+    pub(super) fn compile(workflow: &WorkflowSpec) -> Result<Self, MetalError> {
         let ops = compile_steps(&workflow.steps)?;
         Ok(Self { ops })
     }
 
-    pub(crate) fn reset(&mut self) {
+    pub(super) fn reset(&mut self) {
         for op in &mut self.ops {
             op.op.reset();
         }

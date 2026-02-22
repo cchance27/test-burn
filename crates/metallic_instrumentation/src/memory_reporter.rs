@@ -13,7 +13,7 @@ pub struct MemoryReporter {
 
 impl MemoryReporter {
     /// Create a new memory reporter.
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self {
             collector: MemoryCollector::new(),

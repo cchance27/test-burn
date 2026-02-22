@@ -30,3 +30,30 @@ The following are design goals and rules for our Agents and Developers for the p
 - When reviewing json files, use jq, grep and other bash commands, if more advanced parsing is needed use a python one liner, as json files could be extremely large so cating them or reading those files directly could be a major issue.
 - When reviewing logs or csv files use bash commands (grep, awk, sed, cut, sort etc), as the files may be very large so reading them or catting them is ill advised. 
 - When executing cargo commands make sure to use options like -q and --message-format=short to minimize output and maximize context usage.
+
+## Maintainability Rules (New Baseline)
+
+- Maintainability work must preserve PERFORMANCE/LATENCY first, then memory usage, while improving DX.
+- Baseline snapshot (2026-02-22): `272` `.rs` files, `34` files over `500` lines, `7` files over `1000` lines, and `50` files with inline `#[cfg(test)]` or `mod tests`.
+- Line-count targets for Rust source files:
+  - Line-count limits apply to production/source modules, not dedicated test files (`*.test.rs` or crate `tests/` trees).
+  - Soft limit: `500` lines per `.rs` file.
+  - Warning threshold: `700` lines; new code should be split unless there is a documented performance reason.
+  - Hard review threshold: `1000` lines; splitting is required unless explicitly approved with rationale.
+- Prefer module decomposition over monolith files:
+  - Use directory modules with `mod.rs` and focused sub-files by responsibility.
+  - Keep internal details private (`pub(crate)` or private) and expose stable surface area via curated `pub use` in `mod.rs`.
+  - Avoid interface leakage across domains; only export what downstream code needs.
+- Unit test file organization standard:
+  - Prefer separate unit test files next to implementation: `something.rs` and `something.test.rs`.
+  - Parent module should include test file with path mapping, for example: `#[path = "something.test.rs"] mod something_test;`.
+  - Test files should use crate-level gate `#![cfg(test)]` to avoid scattering `#[cfg(test)]` across imports/items.
+  - Do not duplicate test gating: if `something.test.rs` has `#![cfg(test)]`, do not also add `#[cfg(test)]` at the include callsite.
+  - Keep integration tests in crate `tests/` directories; unit tests stay colocated with the module they validate.
+- Environment variable access standard:
+  - Use `metallic-env` for all environment reads/writes in crate code (typed descriptors and helpers like `is_set`).
+  - Avoid direct `std::env::{var,var_os,set_var,remove_var}` in production code except inside `metallic-env` itself.
+- Refactoring policy for maintainability:
+  - During feature work, if a touched file is already above `500` lines, opportunistically split by SRP boundaries.
+  - Eliminate obvious duplication by extracting small reusable primitives.
+  - Keep behavior identical unless change is intentional and covered by tests.

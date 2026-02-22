@@ -229,8 +229,6 @@ pub struct PrefillSpec {
     pub seq_len_key: Option<String>,
     #[serde(default = "default_true")]
     pub apply_derived_globals: bool,
-    #[serde(default)]
-    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -248,8 +246,6 @@ pub struct ForwardSpec {
     pub update_globals: FxHashMap<String, Param<usize>>,
     #[serde(default = "default_true")]
     pub apply_derived_globals: bool,
-    #[serde(default)]
-    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -485,8 +481,6 @@ pub struct GraphForwardSpec {
     pub position: Option<Param<usize>>,
     #[serde(default = "default_true")]
     pub apply_derived_globals: bool,
-    #[serde(default)]
-    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

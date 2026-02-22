@@ -12,8 +12,6 @@ pub(crate) struct ForwardOp {
     outputs: FxHashMap<String, String>,
     update_globals: FxHashMap<String, Param<usize>>,
     apply_derived_globals: bool,
-    #[allow(dead_code)]
-    description: Option<String>,
 }
 
 impl ForwardOp {
@@ -24,7 +22,6 @@ impl ForwardOp {
             outputs: spec.outputs,
             update_globals: spec.update_globals,
             apply_derived_globals: spec.apply_derived_globals,
-            description: spec.description,
         }
     }
 }

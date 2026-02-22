@@ -1,8 +1,14 @@
 use std::collections::VecDeque;
 
+use metallic_env::FOUNDRY_DECODE_BATCH_SIZE;
+
 use crate::{
     error::MetalError, types::TensorArg, workflow::{
-        ops::{WorkflowOp, WorkflowOpOutcome}, runner::WorkflowExecutionContext, spec::Param
+        Value, ops::{
+            WorkflowOp, WorkflowOpOutcome, common::{
+                INTERNAL_DECODE_BATCH_IDX, INTERNAL_DECODE_BATCH_SIZE, begin_run_nested, callback_timings_from_ctx, condition_as_bool, err_invalid_input_type, remove_internal, reset_nested, write_internal_usize
+            }
+        }, runner::WorkflowExecutionContext, spec::Param
     }
 };
 
@@ -24,12 +30,8 @@ impl IfOp {
 
 impl WorkflowOp for IfOp {
     fn begin_run(&mut self, ctx: &mut WorkflowExecutionContext<'_>) -> Result<(), MetalError> {
-        for op in &mut self.then_ops {
-            op.begin_run(ctx)?;
-        }
-        for op in &mut self.else_ops {
-            op.begin_run(ctx)?;
-        }
+        begin_run_nested(&mut self.then_ops, ctx)?;
+        begin_run_nested(&mut self.else_ops, ctx)?;
         Ok(())
     }
 
@@ -38,22 +40,7 @@ impl WorkflowOp for IfOp {
         ctx: &mut WorkflowExecutionContext<'_>,
         on_token: &mut dyn FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
     ) -> Result<WorkflowOpOutcome, MetalError> {
-        let cond_val = ctx
-            .values
-            .get(&self.condition)
-            .ok_or_else(|| MetalError::InvalidOperation(format!("IfOp missing condition variable '{}'", self.condition)))?;
-
-        let should_run_then = match cond_val {
-            crate::workflow::Value::Bool(b) => *b,
-            crate::workflow::Value::U32(v) => *v != 0,
-            crate::workflow::Value::Usize(v) => *v != 0,
-            _ => {
-                return Err(MetalError::InvalidOperation(format!(
-                    "IfOp condition '{}' is not a boolean or integer",
-                    self.condition
-                )));
-            }
-        };
+        let should_run_then = condition_as_bool(ctx, "IfOp", &self.condition)?;
 
         let ops = if should_run_then { &mut self.then_ops } else { &mut self.else_ops };
 
@@ -68,12 +55,8 @@ impl WorkflowOp for IfOp {
     }
 
     fn reset(&mut self) {
-        for op in &mut self.then_ops {
-            op.reset();
-        }
-        for op in &mut self.else_ops {
-            op.reset();
-        }
+        reset_nested(&mut self.then_ops);
+        reset_nested(&mut self.else_ops);
     }
 }
 
@@ -95,10 +78,7 @@ impl WhileOp {
 
 impl WorkflowOp for WhileOp {
     fn begin_run(&mut self, ctx: &mut WorkflowExecutionContext<'_>) -> Result<(), MetalError> {
-        for op in &mut self.body_ops {
-            op.begin_run(ctx)?;
-        }
-        Ok(())
+        begin_run_nested(&mut self.body_ops, ctx)
     }
 
     fn execute(
@@ -121,23 +101,7 @@ impl WorkflowOp for WhileOp {
                 break;
             }
 
-            // If the condition is a variable name, we lookup the variable.
-            let cond_val = ctx
-                .values
-                .get(&self.condition)
-                .ok_or_else(|| MetalError::InvalidOperation(format!("WhileOp missing condition variable '{}'", self.condition)))?;
-
-            let should_run = match cond_val {
-                crate::workflow::Value::Bool(b) => *b,
-                crate::workflow::Value::U32(v) => *v != 0,
-                crate::workflow::Value::Usize(v) => *v != 0,
-                _ => {
-                    return Err(MetalError::InvalidOperation(format!(
-                        "WhileOp condition '{}' is not a boolean or integer",
-                        self.condition
-                    )));
-                }
-            };
+            let should_run = condition_as_bool(ctx, "WhileOp", &self.condition)?;
 
             if !should_run {
                 break;
@@ -170,31 +134,15 @@ impl WorkflowOp for WhileOp {
     }
 
     fn reset(&mut self) {
-        for op in &mut self.body_ops {
-            op.reset();
-        }
+        reset_nested(&mut self.body_ops);
     }
-}
-
-fn ignore_eos_stop() -> bool {
-    static IGNORE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *IGNORE.get_or_init(|| std::env::var("METALLIC_IGNORE_EOS_STOP").is_ok_and(|v| v != "0"))
-}
-
-fn debug_stream_poll_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("METALLIC_DEBUG_STREAM_POLL").is_ok_and(|v| v != "0"))
 }
 
 fn default_decode_batch_size() -> usize {
     static DEFAULT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *DEFAULT.get_or_init(|| {
         const MAX: usize = 256;
-        std::env::var("METALLIC_FOUNDRY_DECODE_BATCH_SIZE")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(1)
-            .clamp(1, MAX)
+        FOUNDRY_DECODE_BATCH_SIZE.get().ok().flatten().unwrap_or(1).clamp(1, MAX)
     })
 }
 
@@ -245,10 +193,7 @@ impl WhileBatchedOp {
 
 impl WorkflowOp for WhileBatchedOp {
     fn begin_run(&mut self, ctx: &mut WorkflowExecutionContext<'_>) -> Result<(), MetalError> {
-        for op in &mut self.body_ops {
-            op.begin_run(ctx)?;
-        }
-        Ok(())
+        begin_run_nested(&mut self.body_ops, ctx)
     }
 
     fn execute(
@@ -270,11 +215,10 @@ impl WorkflowOp for WhileBatchedOp {
         batch_size = batch_size.max(1);
 
         // Internal knobs for downstream ops (e.g. SampleOp) to avoid scalar readback in-batch.
-        ctx.values
-            .insert("_internal.decode_batch_size".to_string(), crate::workflow::Value::Usize(batch_size));
+        write_internal_usize(ctx, INTERNAL_DECODE_BATCH_SIZE, batch_size);
 
         let eos = ctx.resolve_param_u32(&self.eos_token)?;
-        let stop_on_eos = !ignore_eos_stop();
+        let stop_on_eos = !metallic_instrumentation::logging::ignore_eos_stop_enabled();
 
         let mut stream_reader = if let Some(name) = self.stream_channel.as_deref() {
             let chan =
@@ -301,7 +245,7 @@ impl WorkflowOp for WhileBatchedOp {
         };
         let mut drained_tokens: Vec<u32> = Vec::with_capacity(batch_size);
         let poll_us = self.stream_poll_interval_us.max(1) as u64;
-        if std::env::var("METALLIC_DEBUG_WORKFLOW_OPS").is_ok() && self.stream_channel.is_some() {
+        if metallic_instrumentation::logging::debug_workflow_ops_enabled() && self.stream_channel.is_some() {
             tracing::info!(
                 target: "metallic_foundry::workflow::ops",
                 "WhileBatchedOp stream_channel={:?} async_poll={} poll_us={} batch_size={}",
@@ -353,27 +297,18 @@ impl WorkflowOp for WhileBatchedOp {
             }
 
             if let Some(val) = ctx.values.get_mut(output_tokens) {
-                if let crate::workflow::Value::TokensU32(vec) = val {
+                if let Value::TokensU32(vec) = val {
                     vec.push(token);
                 } else {
-                    return Err(MetalError::InvalidOperation(format!(
-                        "WhileBatchedOp output '{}' is not a TokensU32 list",
-                        output_tokens
-                    )));
+                    return Err(err_invalid_input_type("WhileBatchedOp", output_tokens, "TokensU32"));
                 }
             } else {
-                ctx.values
-                    .insert(output_tokens.to_string(), crate::workflow::Value::TokensU32(vec![token]));
+                ctx.values.insert(output_tokens.to_string(), Value::TokensU32(vec![token]));
             }
 
-            let prefill_us = ctx.read_usize("_internal.prefill_us").unwrap_or(0);
-            let setup_us = ctx.read_usize("_internal.setup_us").unwrap_or(0);
-            on_token(
-                token,
-                std::time::Duration::from_micros(prefill_us as u64),
-                std::time::Duration::from_micros(setup_us as u64),
-                decode_duration,
-            )
+            let decode_override_us = decode_duration.map(|d| d.as_micros() as usize);
+            let (prefill_dur, setup_dur, fallback_decode) = callback_timings_from_ctx(ctx, decode_override_us);
+            on_token(token, prefill_dur, setup_dur, decode_duration.or(fallback_decode))
         }
 
         let mut iter = 0usize;
@@ -385,22 +320,7 @@ impl WorkflowOp for WhileBatchedOp {
             }
 
             // Condition is still a variable lookup (bool/int), matching WhileOp semantics.
-            let cond_val = ctx
-                .values
-                .get(&self.condition)
-                .ok_or_else(|| MetalError::InvalidOperation(format!("WhileBatchedOp missing condition variable '{}'", self.condition)))?;
-
-            let should_run = match cond_val {
-                crate::workflow::Value::Bool(b) => *b,
-                crate::workflow::Value::U32(v) => *v != 0,
-                crate::workflow::Value::Usize(v) => *v != 0,
-                _ => {
-                    return Err(MetalError::InvalidOperation(format!(
-                        "WhileBatchedOp condition '{}' is not a boolean or integer",
-                        self.condition
-                    )));
-                }
-            };
+            let should_run = condition_as_bool(ctx, "WhileBatchedOp", &self.condition)?;
             if !should_run {
                 break;
             }
@@ -423,8 +343,7 @@ impl WorkflowOp for WhileBatchedOp {
             };
 
             for batch_idx in 0..chunk {
-                ctx.values
-                    .insert("_internal.decode_batch_idx".to_string(), crate::workflow::Value::Usize(batch_idx));
+                ctx.values.insert(INTERNAL_DECODE_BATCH_IDX.to_string(), Value::Usize(batch_idx));
 
                 for op in &mut self.body_ops {
                     match op.execute(ctx, on_token)? {
@@ -458,7 +377,7 @@ impl WorkflowOp for WhileBatchedOp {
             }
 
             let cmd = ctx.foundry.end_capture()?;
-            let debug_poll = debug_stream_poll_enabled();
+            let debug_poll = metallic_instrumentation::logging::debug_stream_poll_enabled();
 
             if let Some(r) = stream_reader.as_mut().filter(|_| self.stream_async_poll) {
                 // Pipelined async mode:
@@ -606,16 +525,14 @@ impl WorkflowOp for WhileBatchedOp {
         }
 
         // Clean up internal hints (best-effort; keep DX clean when debugging state dumps).
-        ctx.values.remove("_internal.decode_batch_idx");
-        ctx.values.remove("_internal.decode_batch_size");
+        remove_internal(ctx, INTERNAL_DECODE_BATCH_IDX);
+        remove_internal(ctx, INTERNAL_DECODE_BATCH_SIZE);
 
         Ok(WorkflowOpOutcome::Continue)
     }
 
     fn reset(&mut self) {
-        for op in &mut self.body_ops {
-            op.reset();
-        }
+        reset_nested(&mut self.body_ops);
     }
 }
 

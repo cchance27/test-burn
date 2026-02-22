@@ -55,10 +55,7 @@ fn test_elemwise_add_broadcast() {
         max_diff_cpu = max_diff_cpu.max((cpu_result[i].to_f32() - foundry_result[i].to_f32()).abs());
     }
 
-    println!(
-        "[ElemwiseAdd] CPU vs Foundry: {:.6}",
-        max_diff_cpu
-    );
+    println!("[ElemwiseAdd] CPU vs Foundry: {:.6}", max_diff_cpu);
     assert!(max_diff_cpu <= TOLERANCE);
 }
 
@@ -92,10 +89,7 @@ fn test_arange() {
         max_diff_cpu = max_diff_cpu.max((cpu_result[i].to_f32() - foundry_result[i].to_f32()).abs());
     }
 
-    println!(
-        "[Arange] CPU vs Foundry: {:.6}",
-        max_diff_cpu
-    );
+    println!("[Arange] CPU vs Foundry: {:.6}", max_diff_cpu);
     assert!(max_diff_cpu <= TOLERANCE);
 }
 
@@ -129,10 +123,7 @@ fn test_ones() {
         max_diff_cpu = max_diff_cpu.max((cpu_result[i].to_f32() - foundry_result[i].to_f32()).abs());
     }
 
-    println!(
-        "[Ones] CPU vs Foundry: {:.6}",
-        max_diff_cpu
-    );
+    println!("[Ones] CPU vs Foundry: {:.6}", max_diff_cpu);
     assert!(max_diff_cpu <= TOLERANCE);
 }
 
@@ -159,11 +150,7 @@ fn test_random_uniform() {
 
     // Check range
     for i in foundry_result.iter().take(length) {
-        assert!(
-            (min_val..=max_val).contains(&i.to_f32()),
-            "Value {} out of range",
-            i.to_f32()
-        );
+        assert!((min_val..=max_val).contains(&i.to_f32()), "Value {} out of range", i.to_f32());
     }
 
     println!("[RandomUniform] Foundry values within range");

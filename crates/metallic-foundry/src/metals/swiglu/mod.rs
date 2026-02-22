@@ -10,7 +10,11 @@ use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
 use crate::{spec::DynamicValue, types::TensorArg};
 
+mod config;
 pub mod ffn_stages;
+pub mod ffn_step;
+mod kernels;
+mod runtime;
 pub mod stages;
 pub mod step;
 
@@ -119,16 +123,5 @@ impl Swiglu {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_swiglu_params_metal_struct() {
-        let def = SwigluParams::METAL_STRUCT_DEF;
-        assert!(def.contains("struct SwigluParams"));
-        assert!(def.contains("total_elements"));
-        assert!(def.contains("bias_len"));
-        assert!(def.contains("vector_width"));
-    }
-}
+#[path = "mod.test.rs"]
+mod tests;

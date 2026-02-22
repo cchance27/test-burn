@@ -12,6 +12,46 @@ The kernel system is built around three primary abstractions:
 
 ---
 
+## Metals Module Standard (2026-02-22 Baseline)
+
+This is the maintainability baseline for kernel-family refactors in `crates/metallic-foundry/src/metals`.
+
+### Rust module shape (preferred)
+
+For major families (`flashattention`, `gemv`, `swiglu`, `sdpa`, `gemm`), use:
+
+- `mod.rs`: curated exports and local module wiring.
+- `step.rs`: DSL-facing step wiring and orchestration only.
+- `runtime.rs` or `dispatch.rs`: launch/config/stride resolution and execution flow.
+- `variants.rs`: variant policy and env override resolution.
+- `kernels.rs` or `cache.rs`: cache-key + build/get-or-create logic.
+- `build.rs` (optional): explicit compound stage-chain assembly helpers.
+
+Keep family-internal details private, and export only the stable surface needed by downstream modules.
+
+### File-size guardrails
+
+- Soft target: `< 500` lines for production Rust source files.
+- Warning threshold: `>= 700` lines.
+- Hard review threshold: `>= 1000` lines unless explicitly approved with rationale.
+- Dedicated test files (`*.test.rs`, `tests/`) are excluded from these limits.
+
+### Composition and cache-keying conventions
+
+- Prefer small shared helpers for repeated `CompoundKernel` scaffolding.
+- Keep cache key construction callsite-local and explicit via `kernel_cache_key!`.
+- Avoid hardcoded global kernel-family enums so external kernel providers can register arbitrary families.
+
+### PR checklist for kernel-family changes
+
+1. Preserve performance and latency behavior first; avoid semantic drift in refactor-only changes.
+2. Keep `step.rs` orchestration-focused; move math/layout/dispatch details into helpers.
+3. Reuse shared helpers before copying stage-chain or cache wiring logic.
+4. Keep module exports minimal and intentional (`pub(crate)`/private by default).
+5. Run `cargo check -q --message-format=short -p metallic-foundry` before handoff.
+
+---
+
 ## Foundry Executor Preparation (DSL-driven)
 
 Foundry’s executor no longer hardcodes model-specific intermediates. Instead, the model’s DSL (plus source metadata extracted via `ModelLoader`) declares what the executor must prepare before inference.

@@ -10,7 +10,7 @@ use crate::types::TensorArg;
 /// Intended for Single-Token Decode (Seq=1).
 #[derive(KernelArgs, Clone, Debug, Stage)]
 #[stage(
-    includes("flashattention/flash_decode.metal"),
+    includes("flashattention/decode_common.metal", "flashattention/decode_layout.metal"),
     emit = r#"
     auto layout = run_flash_head_layout_stage<half, half, half, half>(
         (const device half*)q,
@@ -95,7 +95,7 @@ impl HeadLayoutStage {
 /// - D=128 uses the half4 kernel + float4 accumulator (needed for D=128)
 #[derive(KernelArgs, Clone, Debug, Stage)]
 #[stage(
-    includes("simd.metal", "flashattention/flash_decode.metal", "softmax/streaming.metal"),
+    includes("simd.metal", "flashattention/decode_common.metal", "flashattention/decode_kernels.metal", "softmax/streaming.metal"),
     struct_defs = "SdpaParams",
     template_bindings(emit_call = "self.fused_emit_call()"),
     emit = r#"
@@ -164,7 +164,7 @@ impl<const HEAD_DIM: usize> FlashDecodeFusedStage<HEAD_DIM> {
 /// Standalone FlashDecode Stage - loads Q directly from buffer (no RoPE fusion).
 #[derive(KernelArgs, Clone, Debug, Stage)]
 #[stage(
-    includes("simd.metal", "flashattention/flash_decode.metal", "softmax/streaming.metal"),
+    includes("simd.metal", "flashattention/decode_common.metal", "flashattention/decode_kernels.metal", "softmax/streaming.metal"),
     struct_defs = "SdpaParams",
     template_bindings(emit_call = "self.standalone_emit_call()"),
     emit = r#"
@@ -319,7 +319,12 @@ impl SdpaPrefillVariant {
 
 #[derive(KernelArgs, Clone, Debug, Stage)]
 #[stage(
-    includes("simd.metal", "flashattention/flash_prefill.metal"),
+    includes(
+        "simd.metal",
+        "flashattention/prefill_loaders.metal",
+        "flashattention/prefill_online.metal",
+        "flashattention/prefill_splitk.metal"
+    ),
     template_bindings(warps = "validated_prefill_warps(self.variant)"),
     struct_defs("SdpaPrefillParams", "SdpaPrefillSplitKParams"),
     emit = r#"
@@ -362,7 +367,12 @@ impl SdpaPrefillStage {
 
 #[derive(KernelArgs, Clone, Debug, Stage)]
 #[stage(
-    includes("simd.metal", "flashattention/flash_prefill.metal"),
+    includes(
+        "simd.metal",
+        "flashattention/prefill_loaders.metal",
+        "flashattention/prefill_online.metal",
+        "flashattention/prefill_splitk.metal"
+    ),
     template_bindings(warps = "validated_prefill_warps(self.variant)"),
     struct_defs("SdpaPrefillParams", "SdpaPrefillSplitKParams"),
     emit = r#"
@@ -413,7 +423,12 @@ impl SdpaPrefillSplitKPartStage {
 
 #[derive(KernelArgs, Clone, Debug, Stage)]
 #[stage(
-    includes("simd.metal", "flashattention/flash_prefill.metal"),
+    includes(
+        "simd.metal",
+        "flashattention/prefill_loaders.metal",
+        "flashattention/prefill_online.metal",
+        "flashattention/prefill_splitk.metal"
+    ),
     template_bindings(warps = "validated_prefill_warps(self.variant)"),
     struct_defs("SdpaPrefillParams", "SdpaPrefillSplitKParams"),
     emit = r#"

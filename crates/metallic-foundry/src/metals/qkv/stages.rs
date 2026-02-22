@@ -4,8 +4,7 @@ use std::sync::Arc;
 
 use metallic_macros::Stage as DeriveStage;
 
-use super::stages::VectorWidth;
-use crate::{fusion::MetalPolicy, types::TensorArg};
+use crate::{fusion::MetalPolicy, metals::gemv::stages::VectorWidth, types::TensorArg};
 
 /// Parallel projection stage that computes Q, K, and V projections in a single pass.
 ///
@@ -15,7 +14,13 @@ use crate::{fusion::MetalPolicy, types::TensorArg};
 /// It supports GQA by allowing different N dimensions for K and V.
 #[derive(Debug, Clone, DeriveStage)]
 #[stage(
-    includes("gemv/gemv.metal", "gemv/qkv_project.metal"),
+    includes(
+        "gemv/common.metal",
+        "gemv/dot.metal",
+        "gemv/vectorized_stage.metal",
+        "gemv/scalar_output.metal",
+        "qkv/qkv_project.metal"
+    ),
     policy_field = "policy",
     template_bindings(
         vec_width = "self.vector_width.elements()",
@@ -32,6 +37,7 @@ use crate::{fusion::MetalPolicy, types::TensorArg};
 "#,
     out_var = "qkv_partial"
 )]
+// DEBT: fields are consumed by `#[derive(Stage)]` codegen and Metal emission, not direct Rust reads.
 #[allow(dead_code)]
 pub struct ParallelProjectStage {
     #[arg(buffer = 0, metal_type = "const device uchar*")]
@@ -104,7 +110,7 @@ impl ParallelProjectStage {
 /// Reduction stage for multiple partial sums (Q, K, V).
 #[derive(Debug, Clone, Default, DeriveStage)]
 #[stage(
-    includes("gemv/qkv_project.metal"),
+    includes("qkv/qkv_project.metal"),
     emit = r#"
     float3 {out_var} = run_qkv_reduce_stage({input_var});
 "#,
@@ -115,12 +121,13 @@ pub struct MultiWarpReduceStage;
 /// Specialized write stage for QKV fused output.
 #[derive(Debug, Clone, DeriveStage)]
 #[stage(
-    includes("gemv/qkv_project.metal"),
+    includes("qkv/qkv_project.metal"),
     emit = r#"
     run_qkv_write_stage({input_var}, out_q, out_k, out_v, b_q, b_k, b_v, has_b, n_dim, n_kv, lane_id, row_idx, batch_idx);
 "#,
     out_var = "void"
 )]
+// DEBT: fields are consumed by `#[derive(Stage)]` codegen and Metal emission, not direct Rust reads.
 #[allow(dead_code)]
 pub struct MultiWriteOutputStage {
     #[arg(buffer = 11, output)]
