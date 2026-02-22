@@ -22,6 +22,8 @@ use crate::{compound::BufferArg, fusion::MetalPolicy, policy::f16::PolicyF16};
         batch_idx,
         lane_id,
         warp_id,
+        lid.x,
+        tptg.x,
         epsilon
     );
 "#,

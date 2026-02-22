@@ -8,7 +8,6 @@ use metallic_foundry::{
         }, rmsnorm::stages::RmsNormComputeStage
     }, policy::q8::PolicyQ8, storage::Pooled, tensor::{F16, Q8_0, Tensor, TensorInit}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
-use objc2_metal::MTLCommandBuffer as _;
 use rand::Rng;
 use serial_test::serial;
 
@@ -107,7 +106,7 @@ fn quantize_q8_0(k: usize, n: usize, weights: &[f16]) -> (Vec<u8>, Vec<u8>) {
             let d_bits = f16::from_f32(d).to_bits().to_le_bytes();
             let _sb = (bk * n + col) * scale_bytes_per_block; // Note: layout should match WEIGHT_INDEX
             // Actually WEIGHT_INDEX is (row * k_dim + k)
-            // So for Q8 it is (row * blocks_per_k + bk)
+            // So for a Q8 it is (row * blocks_per_k + bk)
             let sb_actual = (col * blocks_per_k + bk) * scale_bytes_per_block;
             scales[sb_actual..sb_actual + 2].copy_from_slice(&d_bits);
 
@@ -131,60 +130,6 @@ fn assert_close(a: &[f16], b: &[f16], name: &str) {
         assert!(diff < 0.01, "{} disparity at index {}: CPU={} GPU={} diff={}", name, i, x, y, diff);
     }
     println!("{} max diff: {}", name, max_diff);
-}
-
-fn assert_close_relaxed(a: &[f16], b: &[f16], name: &str) {
-    assert_eq!(a.len(), b.len());
-    let mut max_diff = 0.0f32;
-    for (i, (&x, &y)) in a.iter().zip(b.iter()).enumerate() {
-        let diff = (x.to_f32() - y.to_f32()).abs();
-        max_diff = max_diff.max(diff);
-        if diff > 1.0 {
-            println!("WARNING: {} high disparity at index {}: CPU={} GPU={} diff={}", name, i, x, y, diff);
-        }
-    }
-    println!("{} max diff (relaxed): {}", name, max_diff);
-}
-
-fn quantize_q8_legacy(k: usize, n: usize, weights: &[f16]) -> (Vec<u8>, Vec<u8>) {
-    let weights_per_block = 32;
-    let scale_bytes_per_block = 2;
-    let blocks_per_k = k.div_ceil(weights_per_block);
-    let total_blocks = blocks_per_k * n;
-    let mut data = vec![0u8; total_blocks * weights_per_block];
-    let mut scales = vec![0u8; total_blocks * scale_bytes_per_block];
-
-    // Legacy kernel expects: [N, K_blocks, 32]
-    // ptr_q = base + logical_col * 32u + (block_in_group * stride_q)
-    for col in 0..n {
-        for bk in 0..blocks_per_k {
-            let base_k = bk * weights_per_block;
-            let blk_len = weights_per_block.min(k - base_k);
-            let mut max_abs = 0f32;
-            for i in 0..blk_len {
-                max_abs = max_abs.max(weights[col * k + base_k + i].to_f32().abs());
-            }
-            let d = if max_abs > 0.0 { max_abs / 127.0 } else { 0.0 };
-            let d_bits = f16::from_f32(d).to_bits().to_le_bytes();
-
-            // Legacy scale layout: [N, K_blocks, 2]
-            let sb = (col * blocks_per_k + bk) * scale_bytes_per_block;
-            scales[sb..sb + 2].copy_from_slice(&d_bits);
-
-            // Legacy data layout: [blocks_per_k, N, 32] based on ptr_q calculation?
-            // Actually let's look at ptr_q: p.data[h] + q_offset + logical_col * 32u + (block_in_group * stride_q)
-            // stride_q = N * 32u
-            // So for a fixed block_in_group (bk), it iterates over contiguous columns (N).
-            // Layout is [K_blocks, N, 32]
-            let base = (bk * n + col) * weights_per_block;
-            for i in 0..weights_per_block {
-                let val = if i < blk_len { weights[col * k + base_k + i].to_f32() } else { 0.0 };
-                let q = if d > 0.0 { (val / d).round().clamp(-127.0, 127.0) as i8 } else { 0 };
-                data[base + i] = q as u8;
-            }
-        }
-    }
-    (data, scales)
 }
 
 fn swizzle_q8_weights_nk(rows_n: usize, cols_k: usize, raw_weights: &[u8]) -> Vec<u8> {
@@ -372,88 +317,7 @@ fn test_qkv_parity() {
         foundry.run(&kernel.clone().bind_arc(args.clone(), dispatch)).unwrap();
     }
     let buf = foundry.end_capture().unwrap();
-    buf.waitUntilCompleted();
+    buf.wait_until_completed();
     let elapsed = t0.elapsed();
     println!("QKV Fused (new) 1000 iterations: {:?} (avg {:?})", elapsed, elapsed / iters);
-
-    // Bench Legacy
-    let mut ctx = metallic_context::Context::<metallic_context::F16Element>::new().unwrap();
-    let lx = metallic_context::tensor::Tensor::<metallic_context::tensor::F16>::new(
-        vec![1, k_dim],
-        metallic_context::tensor::TensorStorage::Pooled(&mut ctx),
-        metallic_context::tensor::TensorInit::CopyFrom(&x_data),
-    )
-    .unwrap();
-    let lgamma = metallic_context::tensor::Tensor::<metallic_context::tensor::F16>::new(
-        vec![k_dim],
-        metallic_context::tensor::TensorStorage::Pooled(&mut ctx),
-        metallic_context::tensor::TensorInit::CopyFrom(&gamma_data),
-    )
-    .unwrap();
-
-    let (lwq_data, lwq_scales) = quantize_q8_legacy(k_dim, n_dim, &w_q_data);
-    let (lwk_data, lwk_scales) = quantize_q8_legacy(k_dim, n_kv, &w_k_data);
-    let (lwv_data, lwv_scales) = quantize_q8_legacy(k_dim, n_kv, &w_v_data);
-
-    let lwq_q =
-        metallic_context::tensor::QuantizedQ8_0Tensor::from_split_bytes_in_context(vec![k_dim, n_dim], &lwq_data, &lwq_scales, &ctx)
-            .unwrap();
-    let lwk_q = metallic_context::tensor::QuantizedQ8_0Tensor::from_split_bytes_in_context(vec![k_dim, n_kv], &lwk_data, &lwk_scales, &ctx)
-        .unwrap();
-    let lwv_q = metallic_context::tensor::QuantizedQ8_0Tensor::from_split_bytes_in_context(vec![k_dim, n_kv], &lwv_data, &lwv_scales, &ctx)
-        .unwrap();
-
-    let lb_q = metallic_context::tensor::Tensor::<metallic_context::tensor::F16>::new(
-        vec![n_dim],
-        metallic_context::tensor::TensorStorage::Pooled(&mut ctx),
-        metallic_context::tensor::TensorInit::CopyFrom(&b_q_data),
-    )
-    .unwrap();
-    let lb_k = metallic_context::tensor::Tensor::<metallic_context::tensor::F16>::new(
-        vec![n_kv],
-        metallic_context::tensor::TensorStorage::Pooled(&mut ctx),
-        metallic_context::tensor::TensorInit::CopyFrom(&b_k_data),
-    )
-    .unwrap();
-    let lb_v = metallic_context::tensor::Tensor::<metallic_context::tensor::F16>::new(
-        vec![n_kv],
-        metallic_context::tensor::TensorStorage::Pooled(&mut ctx),
-        metallic_context::tensor::TensorInit::CopyFrom(&b_v_data),
-    )
-    .unwrap();
-
-    let t1 = Instant::now();
-    for _ in 0..iters {
-        let _ = ctx
-            .call::<metallic_context::kernels::matmul_gemv_qkv_fused::MatmulGemvQkvFusedRmsnormOp>(
-                (
-                    &lx,
-                    &lgamma,
-                    (
-                        &metallic_context::tensor::QuantizedTensor::Q8_0(&lwq_q),
-                        &metallic_context::tensor::QuantizedTensor::Q8_0(&lwk_q),
-                        &metallic_context::tensor::QuantizedTensor::Q8_0(&lwv_q),
-                    ),
-                    (Some(&lb_q), Some(&lb_k), Some(&lb_v)),
-                ),
-                None,
-            )
-            .unwrap();
-    }
-    ctx.synchronize();
-    let elapsed_legacy = t1.elapsed();
-    println!(
-        "QKV Fused (legacy) 1000 iterations: {:?} (avg {:?})",
-        elapsed_legacy,
-        elapsed_legacy / iters
-    );
-
-    let gpu_q_legacy = lb_q.to_vec();
-    let gpu_k_legacy = lb_k.to_vec();
-    let gpu_v_legacy = lb_v.to_vec();
-
-    println!("--- Legacy Kernel Parity ---");
-    assert_close_relaxed(&ref_q, &gpu_q_legacy, "Legacy Q Output");
-    assert_close_relaxed(&ref_k, &gpu_k_legacy, "Legacy K Output");
-    assert_close_relaxed(&ref_v, &gpu_v_legacy, "Legacy V Output");
 }

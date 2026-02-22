@@ -30,6 +30,7 @@ pub enum Dtype {
 }
 
 impl Dtype {
+    #[must_use] 
     pub fn size_bytes(&self) -> usize {
         match self {
             Dtype::F32 => 4,
@@ -46,6 +47,7 @@ impl Dtype {
         }
     }
 
+    #[must_use] 
     pub fn is_quantized(&self) -> bool {
         matches!(
             self,
@@ -68,13 +70,14 @@ impl Dtype {
     ///
     /// This is intentionally table-driven so loaders don't duplicate fragile
     /// `contains("Q4_0")` chains for every new quant.
+    #[must_use] 
     pub fn parse_fuzzy(input: &str) -> Option<Self> {
         if let Ok(dtype) = Self::from_str(input) {
             return Some(dtype);
         }
 
         let upper = input.to_ascii_uppercase();
-        let compact: String = upper.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        let compact: String = upper.chars().filter(char::is_ascii_alphanumeric).collect();
 
         const ALIASES: &[(&str, Dtype)] = &[
             ("F32", Dtype::F32),
@@ -104,7 +107,7 @@ impl Dtype {
                 return Some(dtype);
             }
 
-            let compact_needle: String = needle.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+            let compact_needle: String = needle.chars().filter(char::is_ascii_alphanumeric).collect();
             if compact.contains(&compact_needle) {
                 return Some(dtype);
             }
@@ -140,7 +143,7 @@ impl Display for Dtype {
             Dtype::U32 => "U32",
             Dtype::F64 => "F64",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -171,7 +174,7 @@ impl FromStr for Dtype {
             "U16" => Ok(Dtype::U16),
             "U32" => Ok(Dtype::U32),
             "F64" => Ok(Dtype::F64),
-            _ => Err(format!("Unknown Dtype: {}", s)),
+            _ => Err(format!("Unknown Dtype: {s}")),
         }
     }
 }

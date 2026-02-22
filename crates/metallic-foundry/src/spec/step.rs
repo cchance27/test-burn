@@ -204,7 +204,7 @@ impl TensorBindings {
 /// # Auto-Generation
 ///
 /// For a kernel like:
-/// ```rust,ignore
+/// ```text
 /// #[derive(Kernel, KernelArgs)]
 /// #[kernel(step = true, ...)]
 /// pub struct RmsNorm {
@@ -215,7 +215,7 @@ impl TensorBindings {
 /// ```
 ///
 /// The macro generates:
-/// ```rust,ignore
+/// ```text
 /// #[derive(Serialize, Deserialize)]
 /// pub struct RmsNormStep {
 ///     pub input: Ref,

@@ -78,13 +78,13 @@ fn test_sdpa_head_stride_misaligned_m() -> Result<(), MetalError> {
             let q_vec = &q_f32[q_off..q_off + head_dim];
 
             let mut scores = vec![0.0f32; seq_k];
-            for s in 0..seq_k {
+            for (s, score) in scores.iter_mut().enumerate().take(seq_k) {
                 let k_off = (h * seq_k * head_dim) + (s * head_dim);
                 let mut dot = 0.0f32;
                 for d in 0..head_dim {
                     dot += q_vec[d] * k_f32[k_off + d];
                 }
-                scores[s] = dot * scale;
+                *score = dot * scale;
             }
 
             let max = scores.iter().copied().fold(f32::NEG_INFINITY, |a, b| if a > b { a } else { b });
@@ -94,8 +94,8 @@ fn test_sdpa_head_stride_misaligned_m() -> Result<(), MetalError> {
                 sum += *s;
             }
 
-            for s in 0..seq_k {
-                let p = scores[s] / sum;
+            for (s, score) in scores.iter().enumerate().take(seq_k) {
+                let p = *score / sum;
                 let v_off = (h * seq_k * head_dim) + (s * head_dim);
                 for d in 0..head_dim {
                     let out_idx = (t * n_heads * head_dim) + (h * head_dim) + d;

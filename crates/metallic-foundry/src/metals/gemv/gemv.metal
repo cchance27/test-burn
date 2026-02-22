@@ -17,6 +17,18 @@ using namespace metal;
 #define ELEMS_PER_THREAD 8
 #endif
 
+#ifndef SIMD_WIDTH
+#define SIMD_WIDTH 32
+#endif
+
+#ifndef K_CHUNK_SIZE
+#define K_CHUNK_SIZE (SIMD_WIDTH * ELEMS_PER_THREAD)
+#endif
+
+#ifndef WARPS_PER_TG
+#define WARPS_PER_TG 8
+#endif
+
 #if defined(METALLIC_POLICY_HAS_AFFINE) && METALLIC_POLICY_HAS_AFFINE
 #define METALLIC_AFFINE_LOAD(scale_bytes, idx) ((float)Policy::load_affine((scale_bytes), (idx)))
 #define METALLIC_AFFINE_XSUM(xv_lo, xv_hi) (dot((xv_lo), float4(1.0f)) + dot((xv_hi), float4(1.0f)))

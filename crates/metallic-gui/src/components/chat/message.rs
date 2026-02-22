@@ -7,6 +7,8 @@ use gpui_component::{WindowExt, notification::Notification, tooltip::Tooltip};
 
 use crate::theme::{colors, radius, spacing, typography};
 
+type ToggleCallback = Rc<dyn Fn(&mut App)>;
+
 /// Message visual style variants.
 #[derive(Clone, Copy, PartialEq)]
 pub enum MessageStyle {
@@ -37,7 +39,7 @@ pub struct MessageBubble {
     label: Option<SharedString>,
     metadata: Option<crate::types::MessageMetadata>,
     expanded: bool,
-    on_toggle: Option<Rc<dyn Fn(&mut App)>>,
+    on_toggle: Option<ToggleCallback>,
 }
 
 impl MessageBubble {

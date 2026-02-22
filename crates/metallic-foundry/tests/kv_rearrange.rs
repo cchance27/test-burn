@@ -1,11 +1,8 @@
 //! Comprehensive KV Rearrange Test Suite for Foundry.
 //!
-//! Tests the KV Rearrange kernel against legacy implementation and CPU reference.
+//! Tests the KV Rearrange kernel against CPU reference.
 
 use half::f16;
-use metallic_context::{
-    Context, F16Element as LegacyF16Element, kernels::kv_rearrange::KvRearrangeOp, tensor::{Tensor as LegacyTensor, TensorInit as LegacyTensorInit, TensorStorage as LegacyStorage}
-};
 use metallic_foundry::{
     Foundry, metals::kv_rearrange::{KvRearrange, KvRearrangeParamsResolved}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
@@ -75,7 +72,6 @@ fn cpu_kv_rearrange(
 // ============================================================================
 
 fn run_parity_test(cfg: TestConfig) {
-    let mut ctx = Context::<LegacyF16Element>::new().unwrap();
     let mut foundry = Foundry::new().unwrap();
     let mut rng = rng();
 
@@ -86,32 +82,6 @@ fn run_parity_test(cfg: TestConfig) {
 
     // Generate random input
     let input_data: Vec<f16> = (0..input_elements).map(|_| f16::from_f32(rng.random_range(-1.0..1.0))).collect();
-
-    // =========================================================================
-    // Legacy Kernel
-    // =========================================================================
-    let input_legacy = LegacyTensor::<LegacyF16Element>::new(
-        vec![input_rows, row_stride],
-        LegacyStorage::Pooled(&mut ctx),
-        LegacyTensorInit::CopyFrom(&input_data),
-    )
-    .unwrap();
-
-    let out_legacy = ctx
-        .call::<KvRearrangeOp>(
-            (
-                input_legacy,
-                cfg.kv_dim as u32,
-                cfg.kv_head_dim as u32,
-                cfg.n_heads as u32,
-                cfg.n_kv_heads as u32,
-                cfg.head_dim as u32,
-                cfg.seq as u32,
-            ),
-            None,
-        )
-        .unwrap();
-    let legacy_result = out_legacy.to_vec();
 
     // =========================================================================
     // Foundry Kernel
@@ -160,11 +130,9 @@ fn run_parity_test(cfg: TestConfig) {
     // =========================================================================
     // Comparison
     // =========================================================================
-    let mut legacy_vs_foundry: f32 = 0.0;
     let mut cpu_vs_foundry: f32 = 0.0;
 
     for i in 0..output_elements {
-        legacy_vs_foundry = legacy_vs_foundry.max((legacy_result[i].to_f32() - foundry_result[i].to_f32()).abs());
         cpu_vs_foundry = cpu_vs_foundry.max((cpu_result[i].to_f32() - foundry_result[i].to_f32()).abs());
     }
 
@@ -172,10 +140,8 @@ fn run_parity_test(cfg: TestConfig) {
         "\n[KvRearrange batch={} seq={} heads={}/{} dim={}]",
         cfg.batch, cfg.seq, cfg.n_heads, cfg.n_kv_heads, cfg.head_dim
     );
-    println!("  Legacy vs Foundry max diff: {:.6}", legacy_vs_foundry);
     println!("  CPU vs Foundry max diff:    {:.6}", cpu_vs_foundry);
 
-    assert!(legacy_vs_foundry <= TOLERANCE, "Legacy vs Foundry mismatch: {}", legacy_vs_foundry);
     assert!(cpu_vs_foundry <= TOLERANCE, "CPU vs Foundry mismatch: {}", cpu_vs_foundry);
 }
 

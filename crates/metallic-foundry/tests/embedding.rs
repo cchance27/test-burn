@@ -1,13 +1,10 @@
 //! Comprehensive Embedding Lookup Test Suite for Foundry.
 //!
-//! Tests the embedding lookup kernel against legacy implementation and CPU reference.
+//! Tests the embedding lookup kernel against CPU reference.
 
 use std::sync::Arc;
 
 use half::f16;
-use metallic_context::{
-    Context, F16Element, TensorElement as _, kernels::embedding_lookup::EmbeddingLookupOp, tensor::{Tensor as LegacyTensor, TensorInit as LegacyTensorInit, TensorStorage as LegacyStorage, U32 as LegacyU32}
-};
 use metallic_foundry::{
     Foundry, metals::embedding::{
         EmbeddingParamsResolved, step::{EmbeddingGenericArgs, get_embedding_kernel}
@@ -15,7 +12,6 @@ use metallic_foundry::{
         TensorArg, dispatch::{DispatchConfig, GridSize, ThreadgroupSize}
     }
 };
-use objc2_metal::MTLDevice as _;
 use rand::{Rng, rng};
 use serial_test::serial;
 
@@ -58,7 +54,6 @@ fn cpu_embedding_lookup(table: &[f16], indices: &[u32], vocab_size: usize, d_mod
 // ============================================================================
 
 fn run_parity_test(cfg: TestConfig) {
-    let mut ctx = Context::<F16Element>::new().unwrap();
     let mut foundry = Foundry::new().unwrap();
     let mut rng = rng();
 
@@ -72,39 +67,6 @@ fn run_parity_test(cfg: TestConfig) {
 
     // Generate random token indices (valid tokens only for parity)
     let indices_data: Vec<u32> = (0..total_tokens).map(|_| rng.random_range(0..cfg.vocab_size as u32)).collect();
-
-    // =========================================================================
-    // Legacy Kernel
-    // =========================================================================
-    let table_legacy = LegacyTensor::<F16Element>::new(
-        vec![cfg.vocab_size, cfg.d_model],
-        LegacyStorage::Pooled(&mut ctx),
-        LegacyTensorInit::CopyFrom(&table_data),
-    )
-    .unwrap();
-
-    // U32 indices: use from_existing_buffer with StorageModeShared (pattern from qwen25/mod.rs)
-    let byte_len = std::mem::size_of::<u32>() * total_tokens;
-    let buf = ctx
-        .device
-        .newBufferWithLength_options(byte_len, objc2_metal::MTLResourceOptions::StorageModeShared)
-        .expect("Failed to create U32 indices buffer");
-    let mut indices_legacy = LegacyTensor::<LegacyU32>::from_existing_buffer(
-        buf,
-        vec![total_tokens],
-        LegacyU32::DTYPE,
-        &ctx.device,
-        &ctx.command_queue,
-        0,
-        true,
-    )
-    .unwrap();
-    for (i, &tok) in indices_data.iter().enumerate() {
-        indices_legacy.as_mut_slice()[i] = tok;
-    }
-
-    let out_legacy = ctx.call::<EmbeddingLookupOp>((&table_legacy, &indices_legacy), None).unwrap();
-    let legacy_result = out_legacy.to_vec();
 
     // =========================================================================
     // Foundry Kernel
@@ -138,7 +100,7 @@ fn run_parity_test(cfg: TestConfig) {
     let policy = Arc::new(PolicyF16);
     let kernel = get_embedding_kernel(policy);
     let dispatch = DispatchConfig {
-        grid: GridSize::d1(total_elements as usize),
+        grid: GridSize::d1(total_elements),
         group: ThreadgroupSize::d1(256),
     };
 
@@ -154,11 +116,9 @@ fn run_parity_test(cfg: TestConfig) {
     // =========================================================================
     // Comparison
     // =========================================================================
-    let mut legacy_vs_foundry: f32 = 0.0;
     let mut cpu_vs_foundry: f32 = 0.0;
 
     for i in 0..total_elements {
-        legacy_vs_foundry = legacy_vs_foundry.max((legacy_result[i].to_f32() - foundry_result[i].to_f32()).abs());
         cpu_vs_foundry = cpu_vs_foundry.max((cpu_result[i].to_f32() - foundry_result[i].to_f32()).abs());
     }
 
@@ -166,10 +126,8 @@ fn run_parity_test(cfg: TestConfig) {
         "\n[Embedding {}x{} batch={}x{}]",
         cfg.vocab_size, cfg.d_model, cfg.batch_size, cfg.seq_len
     );
-    println!("  Legacy vs Foundry max diff: {:.6}", legacy_vs_foundry);
     println!("  CPU vs Foundry max diff:    {:.6}", cpu_vs_foundry);
 
-    assert!(legacy_vs_foundry <= TOLERANCE, "Legacy vs Foundry mismatch: {}", legacy_vs_foundry);
     assert!(cpu_vs_foundry <= TOLERANCE, "CPU vs Foundry mismatch: {}", cpu_vs_foundry);
 }
 

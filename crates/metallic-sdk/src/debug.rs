@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 pub const OP_METRICS_ENV_KEY: &str = "METALLIC_DEBUG_OP_METRICS";
 
 /// Shared boolean env parser for debug feature toggles across crates.
+#[must_use] 
 pub fn parse_env_bool(value: &str) -> bool {
     let trimmed = value.trim();
     if trimmed.is_empty() {

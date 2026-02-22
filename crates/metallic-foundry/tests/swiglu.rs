@@ -1,11 +1,8 @@
 //! Comprehensive SwiGLU Fused Activation Test Suite for Foundry.
 //!
-//! Tests the SwiGLU fused activation kernel against legacy and CPU reference.
+//! Tests the SwiGLU fused activation kernel against CPU reference.
 
 use half::f16;
-use metallic_context::{
-    Context, kernels::swiglu::SwiGLUFusedActivationOp, tensor::{F16 as LegacyF16, Tensor as LegacyTensor, TensorInit as LegacyInit, TensorStorage as LegacyStorage}
-};
 use metallic_foundry::{
     Foundry, metals::swiglu::{Swiglu, SwigluParamsResolved}, storage::Pooled, tensor::{F16 as FoundryF16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
@@ -54,7 +51,6 @@ fn cpu_swiglu_fused(gate: &[f16], up: &[f16], gate_bias: &[f16], up_bias: &[f16]
 // ============================================================================
 
 fn run_parity_test(cfg: TestConfig) {
-    let mut ctx = Context::<LegacyF16>::new().unwrap();
     let mut foundry = Foundry::new().unwrap();
     let mut rng = rng();
 
@@ -65,49 +61,6 @@ fn run_parity_test(cfg: TestConfig) {
     let up_data: Vec<f16> = (0..total_elements).map(|_| f16::from_f32(rng.random_range(-2.0..2.0))).collect();
     let gate_bias_data: Vec<f16> = (0..cfg.hidden_dim).map(|_| f16::from_f32(rng.random_range(-0.5..0.5))).collect();
     let up_bias_data: Vec<f16> = (0..cfg.hidden_dim).map(|_| f16::from_f32(rng.random_range(-0.5..0.5))).collect();
-
-    // =========================================================================
-    // Legacy Kernel
-    // =========================================================================
-    let gate_legacy = LegacyTensor::<LegacyF16>::new(
-        vec![cfg.batch, cfg.hidden_dim],
-        LegacyStorage::Pooled(&mut ctx),
-        LegacyInit::CopyFrom(&gate_data),
-    )
-    .unwrap();
-    let up_legacy = LegacyTensor::<LegacyF16>::new(
-        vec![cfg.batch, cfg.hidden_dim],
-        LegacyStorage::Pooled(&mut ctx),
-        LegacyInit::CopyFrom(&up_data),
-    )
-    .unwrap();
-    let gate_bias_legacy = LegacyTensor::<LegacyF16>::new(
-        vec![cfg.hidden_dim],
-        LegacyStorage::Pooled(&mut ctx),
-        LegacyInit::CopyFrom(&gate_bias_data),
-    )
-    .unwrap();
-    let up_bias_legacy = LegacyTensor::<LegacyF16>::new(
-        vec![cfg.hidden_dim],
-        LegacyStorage::Pooled(&mut ctx),
-        LegacyInit::CopyFrom(&up_bias_data),
-    )
-    .unwrap();
-
-    let out_legacy = ctx
-        .call::<SwiGLUFusedActivationOp>(
-            (
-                gate_legacy,
-                gate_bias_legacy,
-                up_legacy,
-                up_bias_legacy,
-                cfg.hidden_dim as u32, // gate_leading_stride
-                cfg.hidden_dim as u32, // up_leading_stride
-            ),
-            None,
-        )
-        .unwrap();
-    let legacy_result = out_legacy.to_vec();
 
     // =========================================================================
     // Foundry Kernel
@@ -147,19 +100,15 @@ fn run_parity_test(cfg: TestConfig) {
     // =========================================================================
     // Comparison
     // =========================================================================
-    let mut legacy_vs_foundry: f32 = 0.0;
     let mut cpu_vs_foundry: f32 = 0.0;
 
     for i in 0..total_elements {
-        legacy_vs_foundry = legacy_vs_foundry.max((legacy_result[i].to_f32() - foundry_result[i].to_f32()).abs());
         cpu_vs_foundry = cpu_vs_foundry.max((cpu_result[i].to_f32() - foundry_result[i].to_f32()).abs());
     }
 
     println!("\n[SwiGLU batch={} hidden={}]", cfg.batch, cfg.hidden_dim);
-    println!("  Legacy vs Foundry max diff: {:.6}", legacy_vs_foundry);
     println!("  CPU vs Foundry max diff:    {:.6}", cpu_vs_foundry);
 
-    assert!(legacy_vs_foundry <= TOLERANCE, "Legacy vs Foundry mismatch: {}", legacy_vs_foundry);
     assert!(cpu_vs_foundry <= TOLERANCE, "CPU vs Foundry mismatch: {}", cpu_vs_foundry);
 }
 

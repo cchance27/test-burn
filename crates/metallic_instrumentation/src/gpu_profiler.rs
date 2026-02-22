@@ -123,7 +123,7 @@ pub fn command_buffer_best_duration_us(command_buffer: &ProtocolObject<dyn MTLCo
     })
 }
 
-/// Best-effort (gpu_us, kernel_us) timing tuple for a completed command buffer (microseconds).
+/// Best-effort (`gpu_us`, `kernel_us`) timing tuple for a completed command buffer (microseconds).
 ///
 /// This is mainly intended for diagnostics and should be treated as optional telemetry.
 #[inline]
@@ -233,7 +233,7 @@ impl GpuProfilerState {
                 let cpu_total: Duration = cpu_durations
                     .iter()
                     .copied()
-                    .fold(Duration::from_micros(0), |acc, d| acc.saturating_add(d));
+                    .fold(Duration::from_micros(0), std::time::Duration::saturating_add);
                 if cpu_total > max_cpu {
                     max_cpu = cpu_total;
                     idx = i;
@@ -249,7 +249,7 @@ impl GpuProfilerState {
             let cpu_total: Duration = cpu_durations
                 .iter()
                 .copied()
-                .fold(Duration::from_micros(0), |acc, d| acc.saturating_add(d));
+                .fold(Duration::from_micros(0), std::time::Duration::saturating_add);
 
             // Decide timing source:
             // - If this CB/op was marked as MPS-based, prefer CPU scope elapsed; else
@@ -392,7 +392,7 @@ impl GpuProfiler {
 
     pub fn attach<C: ProfiledCommandBuffer + ?Sized>(command_buffer: &C, record_command_buffer_timing: bool) -> Option<Self> {
         let key = buffer_key(command_buffer);
-        let dispatch = dispatcher::get_default(|dispatch| dispatch.clone());
+        let dispatch = dispatcher::get_default(std::clone::Clone::clone);
         let state = Arc::new(GpuProfilerState::new(key, dispatch, record_command_buffer_timing));
 
         registry()
@@ -440,9 +440,10 @@ impl GpuProfiler {
             .lock()
             .expect("registry mutex poisoned")
             .get(&key)
-            .and_then(|weak| weak.upgrade())
+            .and_then(std::sync::Weak::upgrade)
     }
 
+    #[must_use] 
     pub fn profile_compute(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
@@ -454,6 +455,7 @@ impl GpuProfiler {
         Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend, None)
     }
 
+    #[must_use] 
     pub fn profile_compute_with_data(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
@@ -466,6 +468,7 @@ impl GpuProfiler {
         Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend, Some(data))
     }
 
+    #[must_use] 
     pub fn profile_blit(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _encoder: &Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>,
@@ -477,6 +480,7 @@ impl GpuProfiler {
         Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend, None)
     }
 
+    #[must_use] 
     pub fn profile_command_buffer(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         op_name: String,
@@ -487,6 +491,7 @@ impl GpuProfiler {
         Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend, None)
     }
 
+    #[must_use] 
     pub fn profile_command_buffer_with_data(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         op_name: String,

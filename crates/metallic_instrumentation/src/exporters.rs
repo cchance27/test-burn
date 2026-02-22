@@ -29,7 +29,7 @@ impl MetricExporter for JsonlExporter {
     fn export(&self, event: &EnrichedMetricEvent) {
         if let Ok(serialised) = to_string(event)
             && let Ok(mut writer) = self.writer.lock()
-            && let Err(error) = writeln!(writer, "{}", serialised)
+            && let Err(error) = writeln!(writer, "{serialised}")
         {
             tracing::error!(target: "instrument", ?error, "failed to write metric to jsonl");
         }
@@ -47,6 +47,7 @@ impl Default for ConsoleExporter {
 
 impl ConsoleExporter {
     /// Construct a new console exporter.
+    #[must_use] 
     pub fn new() -> Self {
         Self
     }
@@ -55,7 +56,7 @@ impl ConsoleExporter {
 impl MetricExporter for ConsoleExporter {
     fn export(&self, event: &EnrichedMetricEvent) {
         if let Ok(serialised) = to_string(event) {
-            println!("METRIC: {}", serialised);
+            println!("METRIC: {serialised}");
         }
     }
 }
@@ -67,6 +68,7 @@ pub struct ChannelExporter {
 
 impl ChannelExporter {
     /// Create a new exporter using the provided channel sender.
+    #[must_use] 
     pub fn new(sender: Sender<EnrichedMetricEvent>) -> Self {
         Self { sender }
     }

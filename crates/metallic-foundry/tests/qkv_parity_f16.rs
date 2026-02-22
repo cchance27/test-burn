@@ -213,7 +213,6 @@ fn test_qkv_parity_f16() {
 /// If this test hangs, it confirms the deadlock is in batched execution.
 #[test]
 fn test_qkv_parity_f16_batched() {
-    use objc2_metal::MTLCommandBuffer as _;
 
     eprintln!("=== Testing FusedQkv in BATCHED mode ===");
 
@@ -326,7 +325,7 @@ fn test_qkv_parity_f16_batched() {
 
     eprintln!("Ending capture and waiting for completion...");
     let buffer = foundry.end_capture().unwrap();
-    buffer.waitUntilCompleted();
+    buffer.wait_until_completed();
     eprintln!("Batched execution completed successfully!");
 
     let gpu_q = out_q_tensor.to_vec(&foundry);

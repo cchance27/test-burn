@@ -31,7 +31,7 @@ impl ModelLoader {
                     Err(LoaderError::FeatureNotEnabled("GGUF support is not enabled".to_string()))
                 }
             }
-            _ => Err(LoaderError::InvalidData(format!("Unsupported model extension: {}", extension))),
+            _ => Err(LoaderError::InvalidData(format!("Unsupported model extension: {extension}"))),
         }
     }
 }

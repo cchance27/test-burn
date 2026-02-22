@@ -383,7 +383,7 @@ impl GGUFFile {
         Ok(&self.mmap[start..end])
     }
 
-    /// Calculate where the tensor_data section starts in the file
+    /// Calculate where the `tensor_data` section starts in the file
     fn calculate_tensor_data_start(&self) -> usize {
         // Get the alignment value (default to 32 if not specified)
         let alignment = if let Some(GGUFValue::U32(val)) = self.metadata.entries.get("general.alignment") {

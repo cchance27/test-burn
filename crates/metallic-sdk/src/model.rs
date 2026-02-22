@@ -32,7 +32,7 @@ pub enum TensorData<'a> {
     Owned(Vec<u8>),
 }
 
-impl<'a> AsRef<[u8]> for TensorData<'a> {
+impl AsRef<[u8]> for TensorData<'_> {
     fn as_ref(&self) -> &[u8] {
         match self {
             TensorData::Slice(s) => s,
@@ -41,7 +41,8 @@ impl<'a> AsRef<[u8]> for TensorData<'a> {
     }
 }
 
-impl<'a> TensorData<'a> {
+impl TensorData<'_> {
+    #[must_use] 
     pub fn as_slice(&self) -> &[u8] {
         self.as_ref()
     }
@@ -57,7 +58,8 @@ pub enum MetadataValue<'a> {
     Array(Vec<MetadataValue<'a>>),
 }
 
-impl<'a> MetadataValue<'a> {
+impl MetadataValue<'_> {
+    #[must_use] 
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::String(s) => Some(s.as_ref()),
@@ -65,6 +67,7 @@ impl<'a> MetadataValue<'a> {
         }
     }
 
+    #[must_use] 
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             Self::Int(i) => Some(*i),
@@ -72,6 +75,7 @@ impl<'a> MetadataValue<'a> {
         }
     }
 
+    #[must_use] 
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Self::Float(f) => Some(*f),
@@ -166,7 +170,7 @@ pub trait LoadedModel: Send + Sync {
     fn load_tensor(&self, name: &str) -> Result<(), LoaderError>;
 
     // --- Fallback & Defaults (Legacy/Compatibility) ---
-    /// Returns a list of supported fallback keys (e.g. "rope_cos", "final_norm") that the model can provide
+    /// Returns a list of supported fallback keys (e.g. "`rope_cos`", "`final_norm`") that the model can provide
     /// default tensors for if missing in the source file.
     fn available_fallbacks(&self) -> &[String];
 
@@ -174,7 +178,7 @@ pub trait LoadedModel: Send + Sync {
     /// IMPLEMENTORS: This should return warnings if used, as models should prefer explicit metadata.
     fn get_fallback(&self, key: &str) -> Result<Option<TensorData<'_>>, LoaderError>;
 
-    /// Returns a list of inferred architecture parameters (e.g. "d_model", "n_heads")
+    /// Returns a list of inferred architecture parameters (e.g. "`d_model`", "`n_heads`")
     /// that the loader can derive from its internal metadata or knowledge of the architecture.
     fn inferred_architecture_params(&self) -> Vec<(String, MetadataValue<'_>)>;
 }

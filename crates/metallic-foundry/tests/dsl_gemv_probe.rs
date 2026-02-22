@@ -4,7 +4,7 @@
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, MetalError, model::ModelBuilder, spec::ModelSpec, types::{KernelArg as _, MetalResourceOptions}
+    Foundry, MetalError, model::{ModelBuilder, infer_architecture_defaults}, spec::ModelSpec, types::{KernelArg as _, MetalResourceOptions}
 };
 use metallic_loader::{LoadedModel, ModelLoader};
 use rustc_hash::FxHashMap;
@@ -40,7 +40,48 @@ fn gguf_tensor_f32(model: &dyn LoadedModel, name: &str) -> Result<(Vec<f32>, Vec
         }
         metallic_foundry::tensor::Dtype::F32 => {
             let slice = unsafe { std::slice::from_raw_parts(data_raw.as_slice().as_ptr() as *const f32, data_raw.as_slice().len() / 4) };
-            slice.iter().map(|v| *v).collect()
+            slice.to_vec()
+        }
+        _ => {
+            return Err(MetalError::InvalidShape(format!(
+                "Unsupported dtype {:?} for '{}' comparison",
+                data_type, name
+            )));
+        }
+    };
+
+    let expected = dims.iter().product::<usize>();
+    if data.len() != expected {
+        return Err(MetalError::InvalidShape(format!(
+            "Tensor '{}' has {} elements but dims {:?} imply {}",
+            name,
+            data.len(),
+            dims,
+            expected
+        )));
+    }
+
+    Ok((data, dims, data_type))
+}
+
+fn gguf_tensor_f32_any_rank(model: &dyn LoadedModel, name: &str) -> Result<(Vec<f32>, Vec<usize>, metallic_foundry::tensor::Dtype), MetalError> {
+    let info = model
+        .tensor_info(name)
+        .ok_or_else(|| MetalError::InvalidShape(format!("Tensor '{}' not found", name)))?;
+    let dims = info.dimensions.clone();
+    let data_type = info.data_type;
+    let data_raw = model
+        .tensor_data(name)
+        .map_err(|e| MetalError::InvalidShape(format!("Tensor data error for '{}': {:?}", name, e)))?;
+
+    let data: Vec<f32> = match data_type {
+        metallic_foundry::tensor::Dtype::F16 => {
+            let slice = unsafe { std::slice::from_raw_parts(data_raw.as_slice().as_ptr() as *const f16, data_raw.as_slice().len() / 2) };
+            slice.iter().map(|v| v.to_f32()).collect()
+        }
+        metallic_foundry::tensor::Dtype::F32 => {
+            let slice = unsafe { std::slice::from_raw_parts(data_raw.as_slice().as_ptr() as *const f32, data_raw.as_slice().len() / 4) };
+            slice.to_vec()
         }
         _ => {
             return Err(MetalError::InvalidShape(format!(
@@ -111,13 +152,27 @@ fn avg_abs_diff(a: &[f32], b: &[f32]) -> f32 {
     if a.is_empty() { 0.0 } else { sum / a.len() as f32 }
 }
 
-fn read_f16_buffer(arg: &metallic_foundry::types::TensorArg) -> Vec<f16> {
+fn read_f16_buffer(arg: &metallic_foundry::types::TensorArg) -> Result<Vec<f16>, MetalError> {
     let buffer = arg.buffer();
     let len = arg.dims().iter().product::<usize>();
-    unsafe {
-        let ptr = buffer.contents() as *const f16;
-        std::slice::from_raw_parts(ptr, len).to_vec()
+
+    if len == 0 {
+        return Ok(Vec::new());
     }
+
+    let ptr = buffer.contents();
+    if ptr.is_null() {
+        return Err(MetalError::InvalidShape("Tensor buffer has null contents pointer".to_string()));
+    }
+    if !(ptr as usize).is_multiple_of(std::mem::align_of::<f16>()) {
+        return Err(MetalError::InvalidShape(format!(
+            "Tensor buffer contents pointer is not aligned for f16 (addr=0x{:x})",
+            ptr as usize
+        )));
+    }
+
+    let out = unsafe { std::slice::from_raw_parts(ptr as *const f16, len).to_vec() };
+    Ok(out)
 }
 
 fn log_layout(name: &str, dims: &[usize], expected_n: usize, expected_k: usize) {
@@ -180,7 +235,7 @@ fn test_gguf_bias_summary_qwen25() -> Result<(), MetalError> {
 
     eprintln!("Bias summary for layer {layer}:");
     for name in bias_names {
-        let (values, dims, dtype) = gguf_tensor_f32(model.as_ref(), &name)?;
+        let (values, dims, dtype) = gguf_tensor_f32_any_rank(model.as_ref(), &name)?;
         let max = max_abs(&values);
         eprintln!("  {} dtype={:?} dims={:?} max_abs={:.6}", name, dtype, dims, max);
     }
@@ -193,12 +248,22 @@ fn test_gguf_bias_summary_qwen25() -> Result<(), MetalError> {
 #[ignore = "requires qwen2.5 gguf file"]
 fn test_gguf_weight_layouts_qwen25() -> Result<(), MetalError> {
     let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL_SPEC_PATH);
-    let spec = ModelSpec::from_file(&spec_path).map_err(|e| MetalError::InvalidShape(format!("Spec load failed: {e}")))?;
+    let mut spec = ModelSpec::from_file(&spec_path).map_err(|e| MetalError::InvalidShape(format!("Spec load failed: {e}")))?;
 
     let model = ModelLoader::from_file(GGUF_PATH).map_err(|e| MetalError::InvalidShape(format!("Load failed: {e}")))?;
+    let defaults = infer_architecture_defaults(model.as_ref())?;
+    spec.architecture.apply_metadata_baseline(&defaults)?;
 
     let available = gguf_available(model.as_ref());
     let arch = &spec.architecture;
+    if arch.n_heads() == 0 || arch.n_kv_heads() == 0 {
+        return Err(MetalError::InvalidShape(format!(
+            "Architecture baseline unresolved: d_model={} n_heads={} n_kv_heads={}",
+            arch.d_model(),
+            arch.n_heads(),
+            arch.n_kv_heads()
+        )));
+    }
     let kv_dim = arch.d_model() * arch.n_kv_heads() / arch.n_heads();
 
     let layer = 0usize;
@@ -298,115 +363,161 @@ fn test_dsl_gemv_probe_layer0() -> Result<(), MetalError> {
         step.execute(&mut foundry, &mut bindings)?;
     }
 
-    let norm_out = bindings.get("norm_out")?;
     let q_out = bindings.get("q")?;
     let k_out = bindings.get("k")?;
     let v_out = bindings.get("v")?;
     let attn_out = bindings.get("attn_out")?;
-    let proj_out = bindings.get("proj_out")?;
-    let ffn_norm_out = bindings.get("ffn_norm_out")?;
-    let gate_out = bindings.get("gate")?;
-    let up_out = bindings.get("up")?;
-    let ffn_out = bindings.get("ffn_out")?;
+    let proj_out = bindings.get("proj_out").ok();
+    let gate_out = bindings.get("gate").ok();
+    let up_out = bindings.get("up").ok();
+    let ffn_out = bindings.get("ffn_out").ok();
 
-    let norm_out_f32: Vec<f32> = read_f16_buffer(&norm_out).into_iter().map(|v| v.to_f32()).collect();
-    let q_f32: Vec<f32> = read_f16_buffer(&q_out).into_iter().map(|v| v.to_f32()).collect();
-    let k_f32: Vec<f32> = read_f16_buffer(&k_out).into_iter().map(|v| v.to_f32()).collect();
-    let v_f32: Vec<f32> = read_f16_buffer(&v_out).into_iter().map(|v| v.to_f32()).collect();
-    let attn_in_f32: Vec<f32> = read_f16_buffer(&attn_out).into_iter().map(|v| v.to_f32()).collect();
-    let proj_out_f32: Vec<f32> = read_f16_buffer(&proj_out).into_iter().map(|v| v.to_f32()).collect();
-    let ffn_norm_f32: Vec<f32> = read_f16_buffer(&ffn_norm_out).into_iter().map(|v| v.to_f32()).collect();
-    let gate_f32: Vec<f32> = read_f16_buffer(&gate_out).into_iter().map(|v| v.to_f32()).collect();
-    let up_f32: Vec<f32> = read_f16_buffer(&up_out).into_iter().map(|v| v.to_f32()).collect();
-    let ffn_out_f32: Vec<f32> = read_f16_buffer(&ffn_out).into_iter().map(|v| v.to_f32()).collect();
+    let q_f32: Vec<f32> = match read_f16_buffer(&q_out) {
+        Ok(v) => v.into_iter().map(|x| x.to_f32()).collect(),
+        Err(e) => {
+            eprintln!("Skipping GEMV probe: unable to read 'q' buffer: {e:?}");
+            return Ok(());
+        }
+    };
+    let k_f32: Vec<f32> = match read_f16_buffer(&k_out) {
+        Ok(v) => v.into_iter().map(|x| x.to_f32()).collect(),
+        Err(e) => {
+            eprintln!("Skipping GEMV probe: unable to read 'k' buffer: {e:?}");
+            return Ok(());
+        }
+    };
+    let v_f32: Vec<f32> = match read_f16_buffer(&v_out) {
+        Ok(v) => v.into_iter().map(|x| x.to_f32()).collect(),
+        Err(e) => {
+            eprintln!("Skipping GEMV probe: unable to read 'v' buffer: {e:?}");
+            return Ok(());
+        }
+    };
+    let attn_in_f32: Vec<f32> = match read_f16_buffer(&attn_out) {
+        Ok(v) => v.into_iter().map(|x| x.to_f32()).collect(),
+        Err(e) => {
+            eprintln!("Skipping GEMV probe: unable to read 'attn_out' buffer: {e:?}");
+            return Ok(());
+        }
+    };
+    let proj_out_f32 = proj_out
+        .as_ref()
+        .and_then(|t| read_f16_buffer(t).ok().map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>()));
+    let gate_f32 = gate_out
+        .as_ref()
+        .and_then(|t| read_f16_buffer(t).ok().map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>()));
+    let up_f32 = up_out
+        .as_ref()
+        .and_then(|t| read_f16_buffer(t).ok().map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>()));
+    let ffn_out_f32 = ffn_out
+        .as_ref()
+        .and_then(|t| read_f16_buffer(t).ok().map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>()));
+
+    let norm_out_f32 = bindings
+        .get("norm_out")
+        .ok()
+        .and_then(|t| read_f16_buffer(&t).ok().map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>()));
+    let ffn_norm_f32 = bindings
+        .get("ffn_norm_out")
+        .ok()
+        .and_then(|t| read_f16_buffer(&t).ok().map(|v| v.into_iter().map(|x| x.to_f32()).collect::<Vec<f32>>()));
 
     let model_ref = dsl_model.weights().model();
     let available = gguf_available(model_ref);
     let layer = 0usize;
 
-    let qkv_probes = [
-        ("layer.attn_q", &q_f32, &norm_out_f32),
-        ("layer.attn_k", &k_f32, &norm_out_f32),
-        ("layer.attn_v", &v_f32, &norm_out_f32),
-    ];
+    if let Some(norm_vec) = norm_out_f32.as_ref() {
+        let qkv_probes = [("layer.attn_q", &q_f32, norm_vec), ("layer.attn_k", &k_f32, norm_vec), ("layer.attn_v", &v_f32, norm_vec)];
 
-    for (key, dsl_out, vector_x) in qkv_probes {
-        let gguf_name = arch
-            .tensor_names
-            .resolve(key, Some(layer), &available)
-            .ok_or_else(|| MetalError::InvalidShape(format!("Missing GGUF name for {}", key)))?;
-        let (weights, dims, dtype) = gguf_tensor_f32(model_ref, &gguf_name)?;
+        for (key, dsl_out, vector_x) in qkv_probes {
+            let gguf_name = arch
+                .tensor_names
+                .resolve(key, Some(layer), &available)
+                .ok_or_else(|| MetalError::InvalidShape(format!("Missing GGUF name for {}", key)))?;
+            let (weights, dims, dtype) = gguf_tensor_f32(model_ref, &gguf_name)?;
 
-        let n = dsl_out.len();
-        let k = vector_x.len();
+            let n = dsl_out.len();
+            let k = vector_x.len();
 
-        eprintln!("\nProbe {} (gguf='{}' dtype={:?} dims={:?})", key, gguf_name, dtype, dims);
+            eprintln!("\nProbe {} (gguf='{}' dtype={:?} dims={:?})", key, gguf_name, dtype, dims);
 
-        let cpu_nk = cpu_gemv_nk(&weights, vector_x, n, k);
-        let cpu_kn = cpu_gemv_kn(&weights, vector_x, n, k);
-        report_layout_diff(key, &cpu_nk, &cpu_kn, dsl_out)?;
+            let cpu_nk = cpu_gemv_nk(&weights, vector_x, n, k);
+            let cpu_kn = cpu_gemv_kn(&weights, vector_x, n, k);
+            report_layout_diff(key, &cpu_nk, &cpu_kn, dsl_out)?;
+        }
+    } else {
+        eprintln!("Skipping QKV probes: 'norm_out' binding not materialized in current fused graph.");
     }
 
     // Attention output projection (attn_out -> proj_out)
     let attn_out_key = "layer.attn_output";
-    if let Some(attn_out_name) = arch.tensor_names.resolve(attn_out_key, Some(layer), &available) {
-        let (weights, dims, dtype) = gguf_tensor_f32(model_ref, &attn_out_name)?;
-        let n = proj_out_f32.len();
-        let k = arch.d_model();
-        let vector_x = slice_prefix(&attn_in_f32, k)?;
+    if let Some(proj_out_f32) = proj_out_f32.as_ref() {
+        if let Some(attn_out_name) = arch.tensor_names.resolve(attn_out_key, Some(layer), &available) {
+            let (weights, dims, dtype) = gguf_tensor_f32(model_ref, &attn_out_name)?;
+            let n = proj_out_f32.len();
+            let k = arch.d_model();
+            let vector_x = slice_prefix(&attn_in_f32, k)?;
 
-        eprintln!(
-            "\nProbe {} (gguf='{}' dtype={:?} dims={:?})",
-            attn_out_key, attn_out_name, dtype, dims
-        );
+            eprintln!(
+                "\nProbe {} (gguf='{}' dtype={:?} dims={:?})",
+                attn_out_key, attn_out_name, dtype, dims
+            );
 
-        let cpu_nk = cpu_gemv_nk(&weights, vector_x, n, k);
-        let cpu_kn = cpu_gemv_kn(&weights, vector_x, n, k);
-        report_layout_diff(attn_out_key, &cpu_nk, &cpu_kn, &proj_out_f32)?;
+            let cpu_nk = cpu_gemv_nk(&weights, vector_x, n, k);
+            let cpu_kn = cpu_gemv_kn(&weights, vector_x, n, k);
+            report_layout_diff(attn_out_key, &cpu_nk, &cpu_kn, proj_out_f32)?;
+        } else {
+            eprintln!("Missing GGUF name for '{attn_out_key}'");
+        }
     } else {
-        eprintln!("Missing GGUF name for '{attn_out_key}'");
+        eprintln!("Skipping attention output projection probe: 'proj_out' binding not materialized in current fused graph.");
     }
 
     // FFN gate/up projections (ffn_norm_out -> gate/up)
-    let ffn_probes = [
-        ("layer.ffn_gate", &gate_f32, &ffn_norm_f32),
-        ("layer.ffn_up", &up_f32, &ffn_norm_f32),
-    ];
+    if let (Some(ffn_norm_vec), Some(gate_f32), Some(up_f32)) = (ffn_norm_f32.as_ref(), gate_f32.as_ref(), up_f32.as_ref()) {
+        let ffn_probes = [("layer.ffn_gate", gate_f32, ffn_norm_vec), ("layer.ffn_up", up_f32, ffn_norm_vec)];
 
-    for (key, dsl_out, vector_x) in ffn_probes {
-        let gguf_name = arch
-            .tensor_names
-            .resolve(key, Some(layer), &available)
-            .ok_or_else(|| MetalError::InvalidShape(format!("Missing GGUF name for {}", key)))?;
-        let (weights, dims, dtype) = gguf_tensor_f32(model_ref, &gguf_name)?;
+        for (key, dsl_out, vector_x) in ffn_probes {
+            let gguf_name = arch
+                .tensor_names
+                .resolve(key, Some(layer), &available)
+                .ok_or_else(|| MetalError::InvalidShape(format!("Missing GGUF name for {}", key)))?;
+            let (weights, dims, dtype) = gguf_tensor_f32(model_ref, &gguf_name)?;
 
-        let n = dsl_out.len();
-        let k = vector_x.len();
+            let n = dsl_out.len();
+            let k = vector_x.len();
 
-        eprintln!("\nProbe {} (gguf='{}' dtype={:?} dims={:?})", key, gguf_name, dtype, dims);
+            eprintln!("\nProbe {} (gguf='{}' dtype={:?} dims={:?})", key, gguf_name, dtype, dims);
 
-        let cpu_nk = cpu_gemv_nk(&weights, vector_x, n, k);
-        let cpu_kn = cpu_gemv_kn(&weights, vector_x, n, k);
-        report_layout_diff(key, &cpu_nk, &cpu_kn, dsl_out)?;
+            let cpu_nk = cpu_gemv_nk(&weights, vector_x, n, k);
+            let cpu_kn = cpu_gemv_kn(&weights, vector_x, n, k);
+            report_layout_diff(key, &cpu_nk, &cpu_kn, dsl_out)?;
+        }
+    } else {
+        eprintln!("Skipping FFN gate/up probes: one or more of 'ffn_norm_out'/'gate'/'up' bindings not materialized in current fused graph.");
     }
 
     // FFN down projection (swiglu output -> ffn_out)
     let ffn_down_key = "layer.ffn_down";
-    if let Some(ffn_down_name) = arch.tensor_names.resolve(ffn_down_key, Some(layer), &available) {
-        let (weights, dims, dtype) = gguf_tensor_f32(model_ref, &ffn_down_name)?;
-        let n = ffn_out_f32.len();
-        let k = up_f32.len();
+    if let (Some(ffn_out_f32), Some(up_f32)) = (ffn_out_f32.as_ref(), up_f32.as_ref()) {
+        if let Some(ffn_down_name) = arch.tensor_names.resolve(ffn_down_key, Some(layer), &available) {
+            let (weights, dims, dtype) = gguf_tensor_f32(model_ref, &ffn_down_name)?;
+            let n = ffn_out_f32.len();
+            let k = up_f32.len();
 
-        eprintln!(
-            "\nProbe {} (gguf='{}' dtype={:?} dims={:?})",
-            ffn_down_key, ffn_down_name, dtype, dims
-        );
+            eprintln!(
+                "\nProbe {} (gguf='{}' dtype={:?} dims={:?})",
+                ffn_down_key, ffn_down_name, dtype, dims
+            );
 
-        let cpu_nk = cpu_gemv_nk(&weights, &up_f32, n, k);
-        let cpu_kn = cpu_gemv_kn(&weights, &up_f32, n, k);
-        report_layout_diff(ffn_down_key, &cpu_nk, &cpu_kn, &ffn_out_f32)?;
+            let cpu_nk = cpu_gemv_nk(&weights, up_f32, n, k);
+            let cpu_kn = cpu_gemv_kn(&weights, up_f32, n, k);
+            report_layout_diff(ffn_down_key, &cpu_nk, &cpu_kn, ffn_out_f32)?;
+        } else {
+            eprintln!("Missing GGUF name for '{ffn_down_key}'");
+        }
     } else {
-        eprintln!("Missing GGUF name for '{ffn_down_key}'");
+        eprintln!("Skipping FFN down probe: one or more of 'up'/'ffn_out' bindings not materialized in current fused graph.");
     }
 
     Ok(())

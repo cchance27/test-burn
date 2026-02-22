@@ -68,7 +68,7 @@ impl WeightBundle {
 /// Builder that enforces model loading order at compile time via typestate.
 ///
 /// # Example
-/// ```rust,ignore
+/// ```text
 /// let model = ModelBuilder::new()
 ///     .with_spec_file("models/qwen25.json")?
 ///     .with_gguf("models/qwen25-q8.gguf")?

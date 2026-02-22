@@ -56,7 +56,8 @@ pub struct SwigluParams {
 #[kernel(
     source = "swiglu/swiglu.metal",
     function = "swiglu_fused_activation_f16",
-    args = "SwigluParamsResolved",
+    args = "SwigluParams",
+    include = ["policies/activations.metal"],
     dispatch = per_element_vec,
     step = true,
     execute = false

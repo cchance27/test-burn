@@ -72,7 +72,7 @@ impl Condition {
         }
     }
 
-    /// Generate the condition check as a TokenStream
+    /// Generate the condition check as a `TokenStream`
     pub fn to_condition_tokens(&self) -> TokenStream {
         let var = syn::Ident::new(self.var_name(), proc_macro2::Span::call_site());
         match self {
@@ -177,7 +177,7 @@ fn parse_method_call_condition(call: &syn::ExprMethodCall) -> Result<Condition, 
     // Check method name - we use `in_` because `in` is a keyword
     let method = call.method.to_string();
     if method != "in_" {
-        return Err(format!("Unsupported method: {}. Use x.in_(range) for range conditions.", method));
+        return Err(format!("Unsupported method: {method}. Use x.in_(range) for range conditions."));
     }
 
     // Get the range argument
@@ -237,7 +237,7 @@ fn extract_literal(expr: &Expr) -> Result<i128, String> {
         Expr::Lit(lit) => match &lit.lit {
             Lit::Int(int_lit) => int_lit
                 .base10_parse::<i128>()
-                .map_err(|e| format!("Failed to parse integer: {}", e)),
+                .map_err(|e| format!("Failed to parse integer: {e}")),
             _ => Err("Expected integer literal".to_string()),
         },
         _ => Err(format!("Expected literal, got: {}", expr.to_token_stream())),
@@ -329,13 +329,13 @@ pub fn analyze_coverage(variants: &[VariantInfo], selector_type: &str) -> (Vec<S
     let (type_min, type_max): (i128, i128) = match selector_type {
         "u8" => (0, 255),
         "u16" => (0, 65535),
-        "u32" => (0, u32::MAX as i128),
-        "u64" | "usize" => (0, i64::MAX as i128), // Approximate
+        "u32" => (0, i128::from(u32::MAX)),
+        "u64" | "usize" => (0, i128::from(i64::MAX)), // Approximate
         "i8" => (-128, 127),
         "i16" => (-32768, 32767),
-        "i32" => (i32::MIN as i128, i32::MAX as i128),
-        "i64" | "isize" => (i64::MIN as i128, i64::MAX as i128),
-        _ => (0, i64::MAX as i128), // Default to unsigned-like
+        "i32" => (i128::from(i32::MIN), i128::from(i32::MAX)),
+        "i64" | "isize" => (i128::from(i64::MIN), i128::from(i64::MAX)),
+        _ => (0, i128::from(i64::MAX)), // Default to unsigned-like
     };
 
     // Find gaps between merged intervals within the type range
@@ -447,7 +447,7 @@ pub fn derive_conditional_kernel_impl(input: DeriveInput) -> TokenStream {
                     match parse_condition(&expr) {
                         Ok(c) => condition = Some(c),
                         Err(e) => {
-                            let msg = format!("Failed to parse condition: {}", e);
+                            let msg = format!("Failed to parse condition: {e}");
                             return quote! { compile_error!(#msg); };
                         }
                     }
@@ -455,12 +455,9 @@ pub fn derive_conditional_kernel_impl(input: DeriveInput) -> TokenStream {
             }
         }
 
-        let condition = match condition {
-            Some(c) => c,
-            None => {
-                let msg = format!("Variant {} missing #[when(...)] condition", variant_name);
-                return quote! { compile_error!(#msg); };
-            }
+        let condition = if let Some(c) = condition { c } else {
+            let msg = format!("Variant {variant_name} missing #[when(...)] condition");
+            return quote! { compile_error!(#msg); };
         };
 
         variants.push(VariantInfo {
@@ -496,7 +493,7 @@ pub fn derive_conditional_kernel_impl(input: DeriveInput) -> TokenStream {
         .collect();
 
     // Generate a Variant enum for dispatch without requiring Default
-    let variant_enum_name = syn::Ident::new(&format!("{}Variant", name), name.span());
+    let variant_enum_name = syn::Ident::new(&format!("{name}Variant"), name.span());
     let variant_enum_variants: Vec<_> = variants
         .iter()
         .map(|v| {

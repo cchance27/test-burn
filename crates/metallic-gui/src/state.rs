@@ -3,7 +3,7 @@
 //! This module contains the core state management separated from UI rendering.
 
 use std::{
-    collections::HashMap, sync::{
+    collections::HashMap, rc::Rc, sync::{
         Arc, atomic::{AtomicBool, Ordering}
     }
 };
@@ -35,7 +35,7 @@ pub struct AppState {
     /// Cancellation flag for the active generation task, when present.
     generation_cancel: Option<Arc<AtomicBool>>,
     /// SQLite database for persistence.
-    db: Arc<Database>,
+    db: Rc<Database>,
     /// Global app settings.
     settings: HashMap<String, String>,
     /// Approximate active-session context usage (prompt + generated) for the selected conversation.
@@ -52,7 +52,7 @@ impl AppState {
     pub fn new(cx: &mut Context<Self>) -> Self {
         // Initialize database in application data directory or current dir for now
         let db_path = "metallic.db";
-        let db = Arc::new(Database::new(db_path).expect("Failed to initialize database"));
+        let db = Rc::new(Database::new(db_path).expect("Failed to initialize database"));
 
         // Scan for models at startup
         let models = scan_models_directory();
@@ -761,14 +761,14 @@ impl AppState {
                 let inference_result = loop {
                     enum StreamEvent {
                         Token(Result<u32, smol::channel::RecvError>),
-                        Done(Result<Result<crate::types::InferencePerf, String>, smol::channel::RecvError>),
+                        Done(Box<Result<Result<crate::types::InferencePerf, String>, smol::channel::RecvError>>),
                     }
 
                     let event = if token_stream_closed {
-                        StreamEvent::Done(done_rx.recv().await)
+                        StreamEvent::Done(Box::new(done_rx.recv().await))
                     } else {
                         smol::future::or(async { StreamEvent::Token(rx.recv().await) }, async {
-                            StreamEvent::Done(done_rx.recv().await)
+                            StreamEvent::Done(Box::new(done_rx.recv().await))
                         })
                         .await
                     };
@@ -793,39 +793,41 @@ impl AppState {
                         StreamEvent::Token(Err(_)) => {
                             token_stream_closed = true;
                         }
-                        StreamEvent::Done(Ok(result)) => {
-                            if result.is_ok() {
-                                while let Ok(token_id) = rx.try_recv() {
-                                    full_tokens.push(token_id);
-                                    pending_tokens += 1;
+                        StreamEvent::Done(done_result) => {
+                            let done_result = *done_result;
+                            if let Ok(result) = done_result {
+                                if result.is_ok() {
+                                    while let Ok(token_id) = rx.try_recv() {
+                                        full_tokens.push(token_id);
+                                        pending_tokens += 1;
+                                    }
                                 }
+                                break result;
+                            } else {
+                                if full_tokens.is_empty() {
+                                    break Err("Inference task ended without reporting completion".to_string());
+                                }
+                                tracing::warn!(
+                                    "Inference channels closed after {} tokens without explicit completion status",
+                                    full_tokens.len()
+                                );
+                                // Synthesize a minimal/empty perf if we don't have one but have tokens
+                                break Ok(crate::types::InferencePerf {
+                                    tokens: full_tokens.len(),
+                                    wall_ms: generation_started_at.elapsed().as_millis(),
+                                    wall_tok_per_sec: 0.0,
+                                    decode_tok_per_sec: 0.0,
+                                    first_token_ms: 0,
+                                    prefill_ms: 0,
+                                    setup_ms: None,
+                                    prompt_prep_ms: None,
+                                    first_decode_ms: None,
+                                    decode_wait_ms: None,
+                                    prefill_tokens: 0,
+                                    prefill_tok_per_sec: 0.0,
+                                    context_tokens: None,
+                                });
                             }
-                            break result;
-                        }
-                        StreamEvent::Done(Err(_)) => {
-                            if full_tokens.is_empty() {
-                                break Err("Inference task ended without reporting completion".to_string());
-                            }
-                            tracing::warn!(
-                                "Inference channels closed after {} tokens without explicit completion status",
-                                full_tokens.len()
-                            );
-                            // Synthesize a minimal/empty perf if we don't have one but have tokens
-                            break Ok(crate::types::InferencePerf {
-                                tokens: full_tokens.len(),
-                                wall_ms: generation_started_at.elapsed().as_millis(),
-                                wall_tok_per_sec: 0.0,
-                                decode_tok_per_sec: 0.0,
-                                first_token_ms: 0,
-                                prefill_ms: 0,
-                                setup_ms: None,
-                                prompt_prep_ms: None,
-                                first_decode_ms: None,
-                                decode_wait_ms: None,
-                                prefill_tokens: 0,
-                                prefill_tok_per_sec: 0.0,
-                                context_tokens: None,
-                            });
                         }
                     }
                 };

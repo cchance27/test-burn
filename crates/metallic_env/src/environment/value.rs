@@ -142,11 +142,13 @@ impl<T> TypedEnvVar<T> {
     }
 
     /// Retrieve the canonical environment variable key.
+    #[must_use] 
     pub const fn key(&self) -> &'static str {
         self.var.key()
     }
 
     /// Retrieve the underlying [`EnvVar`] identifier.
+    #[must_use] 
     pub const fn var(&self) -> EnvVar {
         self.var
     }
@@ -189,6 +191,7 @@ impl<T> TypedEnvVar<T> {
     }
 
     /// Unset the environment variable for the lifetime of the guard.
+    #[must_use] 
     pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         EnvVarGuard::unset(self.var)
     }
@@ -207,14 +210,14 @@ pub struct TypedEnvVarGuard<'a, T> {
     _marker: PhantomData<&'a ()>,
 }
 
-impl<'a, T> TypedEnvVarGuard<'a, T> {
+impl<T> TypedEnvVarGuard<'_, T> {
     /// Consume the guard, returning the typed value that was set.
     pub fn into_inner(mut self) -> T {
         self.value.take().expect("typed environment guard should always contain a value")
     }
 }
 
-impl<'a, T> Deref for TypedEnvVarGuard<'a, T> {
+impl<T> Deref for TypedEnvVarGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -222,7 +225,7 @@ impl<'a, T> Deref for TypedEnvVarGuard<'a, T> {
     }
 }
 
-impl<'a, T> Drop for TypedEnvVarGuard<'a, T> {
+impl<T> Drop for TypedEnvVarGuard<'_, T> {
     fn drop(&mut self) {
         if let Some(previous) = &self.previous {
             Environment::set(self.descriptor.var, previous);

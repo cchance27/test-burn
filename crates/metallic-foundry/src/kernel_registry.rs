@@ -9,7 +9,7 @@
 //! - **Multi-GPU safe**: Pipeline keys include device ID
 //!
 //! # Usage
-//! ```rust,ignore
+//! ```text
 //! use metallic_foundry::kernel_registry::{kernel_registry, KernelCacheKey};
 //!
 //! let key = KernelCacheKey::new("gemm", "f16_f16_nn_default_false_false_none");

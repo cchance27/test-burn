@@ -691,7 +691,7 @@ mod tests {
     fn direct_ggml_row_dot(raw: &[u8], source_k: usize, source_n: usize, x: &[f32]) -> Vec<f32> {
         let src_blocks_per_k = source_k.div_ceil(Q5_K_SOURCE_WPB);
         let mut y = vec![0.0f32; source_n];
-        for row in 0..source_n {
+        for (row, y_row) in y.iter_mut().enumerate().take(source_n) {
             let mut acc = 0.0f32;
             for src_block in 0..src_blocks_per_k {
                 let src_off = (row * src_blocks_per_k + src_block) * Q5_K_SOURCE_BLOCK_BYTES;
@@ -704,7 +704,7 @@ mod tests {
                     acc += deq[i] * x[k0 + i];
                 }
             }
-            y[row] = acc;
+            *y_row = acc;
         }
         y
     }
@@ -718,7 +718,7 @@ mod tests {
         x: &[f32],
     ) -> Vec<f32> {
         let mut y = vec![0.0f32; source_n];
-        for row in 0..source_n {
+        for (row, y_row) in y.iter_mut().enumerate().take(source_n) {
             let mut acc = 0.0f32;
             for (kk, xv) in x.iter().enumerate().take(source_k) {
                 let block = kk / Q5_K_DECODED_WPB;
@@ -741,7 +741,7 @@ mod tests {
                 ]);
                 acc += (s * q + a) * *xv;
             }
-            y[row] = acc;
+            *y_row = acc;
         }
         y
     }
@@ -1182,7 +1182,7 @@ mod tests {
         let src_blocks_per_k = source_k.div_ceil(Q5_K_SOURCE_WPB);
         let compare_rows = 256usize.min(n_dim);
         let mut y_ref = vec![0.0f32; compare_rows];
-        for row in 0..compare_rows {
+        for (row, y_row) in y_ref.iter_mut().enumerate().take(compare_rows) {
             let mut acc = 0.0f32;
             for src_block in 0..src_blocks_per_k {
                 let src_off = (row * src_blocks_per_k + src_block) * Q5_K_SOURCE_BLOCK_BYTES;
@@ -1195,7 +1195,7 @@ mod tests {
                     acc += deq[i] * x_f32[k0 + i];
                 }
             }
-            y_ref[row] = acc;
+            *y_row = acc;
         }
 
         for i in 0..compare_rows {
@@ -1239,8 +1239,8 @@ mod tests {
             .load_weights(
                 &mut foundry,
                 model.as_ref(),
-                &tensor_name,
-                &tensor_name,
+                tensor_name,
+                tensor_name,
                 Layout::Canonical {
                     expected_k: k_dim,
                     expected_n: n_dim,

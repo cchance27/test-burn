@@ -4,9 +4,6 @@ use std::{
 
 use anyhow::Result;
 use metallic_cli_helpers::prelude::*;
-use metallic_context::{
-    Context, F16Element, TensorElement, Tokenizer, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{KernelBackendKind, KernelBackendOverride, KernelBackendOverrides}, profiling_state
-};
 use metallic_foundry::{
     model::{CompiledModel, ModelBuilder}, workflow::{Value as WorkflowValue, WorkflowRunner}
 };
@@ -45,11 +42,6 @@ impl std::io::Write for AppLogWriter {
 }
 
 fn main() -> AppResult<()> {
-    // Ensure profiling state is initialized from the environment before anything else.
-    // This avoids a race condition where the TUI might read the state before the
-    // generation thread initializes it.
-    profiling_state::initialize_profiling_state_from_env();
-
     // Parse command line arguments using CLAP
     let cli_config = cli::CliConfig::parse();
 
@@ -95,9 +87,6 @@ fn main() -> AppResult<()> {
     let tui_start_processing =
         matches!(cli_config.output_format, cli::config::OutputFormat::Tui) && prompts.first().is_some_and(|p| !p.trim().is_empty());
     let worker_generation = cli_config.generation;
-    let worker_backend = cli_config.backend;
-    let worker_sdpa_backend = cli_config.sdpa_backend;
-    let worker_engine = cli_config.engine;
     let worker_output_format = cli_config.output_format.clone();
     let workflow_path = cli_config.workflow.clone();
     let worker_workflow_kwargs = cli_config
@@ -312,7 +301,6 @@ fn main() -> AppResult<()> {
 
                 worker_tx.send(AppEvent::StatusUpdate("Loading GGUF Metadata...".to_string()))?;
                 let load_start = Instant::now();
-                let gguf = GGUFFile::load_mmap_and_get_metadata(&gguf_path)?;
 
                 // Report GGUF file MMAP usage
                 let gguf_file_size = std::fs::metadata(&gguf_path)?.len();
@@ -322,437 +310,564 @@ fn main() -> AppResult<()> {
 
                 emit_startup_memory_update(&worker_tx)?;
 
-                worker_tx.send(AppEvent::StatusUpdate("Initializing context...".to_string()))?;
-                let mut ctx = Context::<F16Element>::new()?;
+                // Foundry engine (the only engine now)
+                let workflow_override: Option<metallic_foundry::workflow::WorkflowSpec> = if let Some(path) = &workflow_path {
+                    let f = std::fs::File::open(path)?;
+                    Some(serde_json::from_reader(f)?)
+                } else {
+                    None
+                };
 
-                // Apply global backend override first (affects all kernels that consult the registry)
-                if let Some(choice) = worker_backend {
-                    let override_policy = match choice {
-                        cli::config::GlobalBackendChoice::Auto => KernelBackendOverride::Auto,
-                        cli::config::GlobalBackendChoice::Legacy => KernelBackendOverride::Force(KernelBackendKind::Legacy),
-                        cli::config::GlobalBackendChoice::Graph => KernelBackendOverride::Force(KernelBackendKind::Graph),
-                    };
-                    ctx.set_global_backend_override(override_policy);
+                let has_workflow_model_resources = workflow_override
+                    .as_ref()
+                    .and_then(|w| w.resources.as_ref())
+                    .is_some_and(|r| !r.models.is_empty());
+
+                let mut single_model_loaded: Option<Box<dyn metallic_loader::LoadedModel>> = None;
+                let routed_spec_path: Option<PathBuf> = if has_workflow_model_resources {
+                    None
+                } else {
+                    worker_tx.send(AppEvent::StatusUpdate("Detecting architecture...".to_string()))?;
+                    let model_loaded = ModelLoader::from_file(&gguf_path)?;
+                    let routing = metallic_foundry::model_routing::resolve_model_routing_from_loaded_model(model_loaded.as_ref())
+                        .map_err(anyhow::Error::msg)?;
+                    worker_tx.send(AppEvent::StatusUpdate(format!(
+                        "Detected architecture: {} (rule: {})",
+                        routing.architecture, routing.matched_rule
+                    )))?;
+                    single_model_loaded = Some(model_loaded);
+                    Some(routing.spec_path)
+                };
+
+                worker_tx.send(AppEvent::StatusUpdate("Initializing Foundry...".to_string()))?;
+                let mut foundry = metallic_foundry::Foundry::new()?;
+
+                worker_tx.send(AppEvent::StatusUpdate("Building compiled model(s)...".to_string()))?;
+
+                let mut models_owned: FxHashMap<String, Arc<CompiledModel>> = FxHashMap::default();
+
+                if has_workflow_model_resources {
+                    let resources = workflow_override
+                        .as_ref()
+                        .and_then(|w| w.resources.as_ref())
+                        .expect("has_workflow_model_resources implies resources");
+                    for m in &resources.models {
+                        let model_loaded = ModelLoader::from_file(&m.gguf_path)?;
+                        let model = ModelBuilder::new()
+                            .with_spec_file(PathBuf::from(&m.spec_path))?
+                            .with_model(model_loaded)
+                            .build(&mut foundry)?;
+                        models_owned.insert(m.id.clone(), Arc::new(model));
+                    }
+                } else {
+                    let spec_path = routed_spec_path.expect("routed_spec_path required for single-model Foundry");
+                    let model_loaded = single_model_loaded
+                        .take()
+                        .ok_or_else(|| anyhow::anyhow!("single-model Foundry expected a preloaded model"))?;
+                    let model = ModelBuilder::new()
+                        .with_spec_file(spec_path)?
+                        .with_model(model_loaded)
+                        .build(&mut foundry)?;
+                    let model_id = workflow_override
+                        .as_ref()
+                        .and_then(|w| w.default_model.clone())
+                        .unwrap_or_else(|| "llm".to_string());
+                    models_owned.insert(model_id, Arc::new(model));
                 }
 
-                // Then apply per-op SDPA override if provided (takes precedence for sdpa)
-                if let Some(choice) = worker_sdpa_backend {
-                    let override_policy = match choice {
-                        cli::config::SdpaBackendChoice::Auto => KernelBackendOverride::Auto,
-                        cli::config::SdpaBackendChoice::Legacy => KernelBackendOverride::Force(KernelBackendKind::Legacy),
-                        cli::config::SdpaBackendChoice::Graph => KernelBackendOverride::Force(KernelBackendKind::Graph),
-                    };
-                    ctx.apply_backend_overrides(KernelBackendOverrides {
-                        sdpa: Some(override_policy),
-                    });
+                // Report memory metrics for Foundry model
+                for model in models_owned.values() {
+                    model.report_memory_metrics();
                 }
                 emit_startup_memory_update(&worker_tx)?;
 
-                worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
+                let load_duration = load_start.elapsed();
+                worker_tx.send(AppEvent::ModelLoadComplete(load_duration))?;
 
-                match worker_engine {
-                    cli::config::Engine::Context => {
-                        if !workflow_cli_inputs.is_empty() {
-                            tracing::debug!("Ignoring --kwarg/--thinking overrides for Context engine");
-                        }
-                        worker_tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
-                        let loader = GGUFModelLoader::new(gguf);
-                        emit_startup_memory_update(&worker_tx)?;
-                        let gguf_model = loader.load_model()?;
-                        emit_startup_memory_update(&worker_tx)?;
+                worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
+                let tokenization_start = Instant::now();
+                let tokenizer_model_id = workflow_override
+                    .as_ref()
+                    .and_then(|w| w.default_model.as_deref())
+                    .or_else(|| models_owned.keys().next().map(|s| s.as_str()))
+                    .unwrap_or("llm");
+                let tokenizer_model = models_owned
+                    .get(tokenizer_model_id)
+                    .ok_or_else(|| anyhow::anyhow!("Workflow default_model '{tokenizer_model_id}' not found"))?;
+                let tokenizer = tokenizer_model.tokenizer()?;
 
-                        worker_tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
-                        let mut qwen: metallic_context::models::qwen25::Qwen25<F16Element> = gguf_model.instantiate(&mut ctx)?;
+                let interactive = matches!(worker_output_format, cli::config::OutputFormat::Tui);
 
-                        // Report model weights breakdown
-                        report_model_weight_breakdown(&qwen);
-                        emit_startup_memory_update(&worker_tx)?;
+                let workflow_wants_messages = workflow_override
+                    .as_ref()
+                    .is_some_and(|wf| wf.inputs.iter().any(|i| i.name == "messages"));
 
-                        let load_duration = load_start.elapsed();
-                        worker_tx.send(AppEvent::ModelLoadComplete(load_duration))?;
+                // Prompt-driven workflows (e.g. `inputs: ["messages", ...]`) are supported in TUI mode.
+                // For multi-turn, we maintain message history in the TUI loop and rely on Foundry's KV cache
+                // reuse + prefill incremental suffix handling to avoid replaying the full prompt every turn.
 
-                        worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
-                        let tokenization_start = Instant::now();
-                        let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
-                        emit_startup_memory_update(&worker_tx)?;
+                let debug_tokenize = env_is_set("METALLIC_DEBUG_TOKENIZE");
+                let disable_chat_template = env_is_set("METALLIC_DISABLE_CHAT_TEMPLATE");
+                let first_prompt = prompts.first().map(|s| s.trim()).unwrap_or("");
 
-                        let cfg = metallic_context::generation::GenerationConfig {
-                            max_tokens: worker_generation.max_tokens,
-                            temperature: worker_generation.temperature as f32,
-                            top_p: worker_generation.top_p as f32,
-                            top_k: worker_generation.top_k,
-                            kv_initial_headroom_tokens: (worker_generation.max_tokens / 4).max(32),
-                            seed: worker_generation.seed,
-                        };
+                let cfg = metallic_foundry::generation::GenerationConfig {
+                    max_tokens: worker_generation.max_tokens,
+                    temperature: worker_generation.temperature as f32,
+                    top_p: worker_generation.top_p as f32,
+                    min_p: worker_generation.min_p as f32,
+                    top_k: worker_generation.top_k,
+                    repeat_penalty: worker_generation.repeat_penalty as f32,
+                    repeat_last_n: worker_generation.repeat_last_n,
+                    presence_penalty: worker_generation.presence_penalty as f32,
+                    frequency_penalty: worker_generation.frequency_penalty as f32,
+                    kv_initial_headroom_tokens: 0,
+                    seed: worker_generation.seed,
+                };
 
-                        // In TUI mode, an omitted prompt means "start empty and wait for user input".
-                        let prompts_for_run: Vec<String> = if prompts.is_empty() {
-                            worker_tx.send(AppEvent::StatusUpdate("Waiting for input...".to_string()))?;
-                            loop {
-                                match cmd_rx.recv() {
-                                    Ok(AppEvent::Input(input)) => break vec![input],
-                                    Ok(_) => continue,
-                                    Err(_) => return Ok(()),
-                                }
-                            }
+                // Penalties are applied on-GPU in the workflow sampler and are compatible with batching.
+
+                // `models_owned` is already FxHashMap<String, Arc<CompiledModel>>.
+                // We used to create a map of references, but now `generate_streaming_from_tokens_with_workflow`
+                // takes `&FxHashMap<String, Arc<CompiledModel>>`.
+                let models = models_owned; // Ownership transfer / move for clarity, though we could just use models_owned.
+
+                if !interactive {
+                    worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
+                    if debug_tokenize {
+                        let formatted = if disable_chat_template {
+                            prompts[0].clone()
                         } else {
-                            prompts.clone()
+                            tokenizer.format_single_turn_chat_prompt_with_kwargs(&prompts[0], tokenizer_template_kwargs.as_ref())?
                         };
-
-                        worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
-                        let mut conversation_tokens = tokenizer.encode_single_turn_chat_prompt(&prompts_for_run[0])?;
-
-                        let tokenization_duration = tokenization_start.elapsed();
-                        worker_tx.send(AppEvent::TokenizationComplete(tokenization_duration))?;
-
-                        emit_startup_memory_update(&worker_tx)?;
-
-                        worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-
-                        if prompts_for_run.len() == 1 {
-                            worker_tx.send(AppEvent::TokenCount(conversation_tokens.len()))?;
-                            metallic_context::generation::generate_streaming_from_tokens(
-                                &mut qwen,
-                                &tokenizer,
-                                &mut ctx,
-                                &conversation_tokens,
-                                &cfg,
-                                &worker_tx,
-                            )?;
+                        let toks = tokenizer.encode(&formatted)?;
+                        let head_n = 64usize.min(toks.len());
+                        let decoded_head = tokenizer
+                            .decode_lossless(&toks[..head_n])
+                            .unwrap_or_else(|_| "<decode_error>".to_string());
+                        let max_chars = 800usize;
+                        let shown = formatted.chars().take(max_chars).collect::<String>();
+                        let suffix = if formatted.chars().count() > max_chars {
+                            "…(truncated)"
                         } else {
-                            for (turn_idx, turn_prompt) in prompts_for_run.iter().enumerate() {
-                                if turn_idx > 0 {
-                                    let mut next_tokens = tokenizer.encode_chat_continuation_prompt(turn_prompt)?;
-                                    if let Some(bos) = tokenizer.special_tokens().bos_token_id
-                                        && !next_tokens.is_empty()
-                                        && next_tokens[0] == bos
-                                    {
-                                        next_tokens.remove(0);
-                                    }
-                                    conversation_tokens.extend(next_tokens);
-                                }
-
-                                worker_tx.send(AppEvent::TokenCount(conversation_tokens.len()))?;
-                                let generated_ids = metallic_context::generation::generate_streaming_from_tokens_collect(
-                                    &mut qwen,
-                                    &tokenizer,
-                                    &mut ctx,
-                                    &conversation_tokens,
-                                    &cfg,
-                                    &worker_tx,
-                                )?;
-                                conversation_tokens.extend(generated_ids);
-                            }
+                            ""
+                        };
+                        eprintln!(
+                            "[metallic][debug] main: disable_chat_template={} chars={} tokens={} head_ids={:?}\n[metallic][debug] decoded_head:\n{}\n[metallic][debug] formatted_prompt_head:\n{}{}",
+                            disable_chat_template,
+                            formatted.chars().count(),
+                            toks.len(),
+                            &toks[..head_n],
+                            decoded_head,
+                            shown,
+                            suffix
+                        );
+                        if env_is_set("METALLIC_DEBUG_TOKENIZE_FULL") {
+                            eprintln!("[metallic][debug] token_ids_full={:?}", toks);
                         }
                     }
 
-                    cli::config::Engine::Foundry => {
-                        let workflow_override: Option<metallic_foundry::workflow::WorkflowSpec> = if let Some(path) = &workflow_path {
-                            let f = std::fs::File::open(path)?;
-                            Some(serde_json::from_reader(f)?)
-                        } else {
-                            None
-                        };
+                    let tokens0 = if disable_chat_template {
+                        tokenizer.encode(&prompts[0])?
+                    } else {
+                        tokenizer.encode_single_turn_chat_prompt_with_kwargs(&prompts[0], tokenizer_template_kwargs.as_ref())?
+                    };
 
-                        let has_workflow_model_resources = workflow_override
-                            .as_ref()
-                            .and_then(|w| w.resources.as_ref())
-                            .is_some_and(|r| !r.models.is_empty());
+                    let tokenization_duration = tokenization_start.elapsed();
+                    worker_tx.send(AppEvent::TokenizationComplete(tokenization_duration))?;
 
-                        let mut single_model_loaded: Option<Box<dyn metallic_loader::LoadedModel>> = None;
-                        let routed_spec_path: Option<PathBuf> = if has_workflow_model_resources {
-                            None
-                        } else {
-                            worker_tx.send(AppEvent::StatusUpdate("Detecting architecture...".to_string()))?;
-                            let model_loaded = ModelLoader::from_file(&gguf_path)?;
-                            let routing = metallic_foundry::model_routing::resolve_model_routing_from_loaded_model(model_loaded.as_ref())
-                                .map_err(anyhow::Error::msg)?;
-                            worker_tx.send(AppEvent::StatusUpdate(format!(
-                                "Detected architecture: {} (rule: {})",
-                                routing.architecture, routing.matched_rule
-                            )))?;
-                            single_model_loaded = Some(model_loaded);
-                            Some(routing.spec_path)
-                        };
+                    worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
 
-                        worker_tx.send(AppEvent::StatusUpdate("Initializing Foundry...".to_string()))?;
-                        let mut foundry = metallic_foundry::Foundry::new()?;
+                    if workflow_wants_messages {
+                        if prompts.first().map(|s| s.trim()).unwrap_or("").is_empty() {
+                            return Err(anyhow::anyhow!(
+                                "Workflow declares 'messages' input (prompt-driven workflow) but no prompt was provided. Pass a prompt argument, or use `--output-format tui` for interactive chat."
+                            ));
+                        }
 
-                        worker_tx.send(AppEvent::StatusUpdate("Building compiled model(s)...".to_string()))?;
+                        use metallic_foundry::workflow::Value as WfValue;
 
-                        let mut models_owned: FxHashMap<String, Arc<CompiledModel>> = FxHashMap::default();
+                        fn sys_prompt() -> Option<String> {
+                            std::env::var("METALLIC_SYSTEM_PROMPT")
+                                .ok()
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                        }
 
-                        if has_workflow_model_resources {
-                            let resources = workflow_override
-                                .as_ref()
-                                .and_then(|w| w.resources.as_ref())
-                                .expect("has_workflow_model_resources implies resources");
-                            for m in &resources.models {
-                                let model_loaded = ModelLoader::from_file(&m.gguf_path)?;
-                                let model = ModelBuilder::new()
-                                    .with_spec_file(PathBuf::from(&m.spec_path))?
-                                    .with_model(model_loaded)
-                                    .build(&mut foundry)?;
-                                models_owned.insert(m.id.clone(), Arc::new(model));
+                        fn msg(role: &str, content: &str) -> WfValue {
+                            let mut map = FxHashMap::default();
+                            map.insert("role".to_string(), WfValue::Text(role.into()));
+                            map.insert("content".to_string(), WfValue::Text(content.to_string().into()));
+                            WfValue::Map(map)
+                        }
+
+                        let workflow = workflow_override.as_ref().expect("workflow_override present");
+                        let mut runner = WorkflowRunner::new(models);
+                        let system = sys_prompt();
+
+                        for (turn_idx, turn_prompt) in prompts.iter().enumerate() {
+                            if turn_idx > 0 {
+                                worker_tx.send(AppEvent::UserPrompt(turn_prompt.to_string()))?;
                             }
-                        } else {
-                            let spec_path = routed_spec_path.expect("routed_spec_path required for single-model Foundry");
-                            let model_loaded = single_model_loaded
-                                .take()
-                                .ok_or_else(|| anyhow::anyhow!("single-model Foundry expected a preloaded model"))?;
-                            let model = ModelBuilder::new()
-                                .with_spec_file(spec_path)?
-                                .with_model(model_loaded)
-                                .build(&mut foundry)?;
-                            let model_id = workflow_override
-                                .as_ref()
-                                .and_then(|w| w.default_model.clone())
-                                .unwrap_or_else(|| "llm".to_string());
-                            models_owned.insert(model_id, Arc::new(model));
-                        }
 
-                        // Report memory metrics for Foundry model
-                        for model in models_owned.values() {
-                            model.report_memory_metrics();
-                        }
-                        emit_startup_memory_update(&worker_tx)?;
-
-                        let load_duration = load_start.elapsed();
-                        worker_tx.send(AppEvent::ModelLoadComplete(load_duration))?;
-
-                        worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
-                        let tokenization_start = Instant::now();
-                        let tokenizer_model_id = workflow_override
-                            .as_ref()
-                            .and_then(|w| w.default_model.as_deref())
-                            .or_else(|| models_owned.keys().next().map(|s| s.as_str()))
-                            .unwrap_or("llm");
-                        let tokenizer_model = models_owned
-                            .get(tokenizer_model_id)
-                            .ok_or_else(|| anyhow::anyhow!("Workflow default_model '{tokenizer_model_id}' not found"))?;
-                        let tokenizer = tokenizer_model.tokenizer()?;
-
-                        let interactive = matches!(worker_output_format, cli::config::OutputFormat::Tui);
-
-                        let workflow_wants_messages = workflow_override
-                            .as_ref()
-                            .is_some_and(|wf| wf.inputs.iter().any(|i| i.name == "messages"));
-
-                        // Prompt-driven workflows (e.g. `inputs: ["messages", ...]`) are supported in TUI mode.
-                        // For multi-turn, we maintain message history in the TUI loop and rely on Foundry's KV cache
-                        // reuse + prefill incremental suffix handling to avoid replaying the full prompt every turn.
-
-                        let debug_tokenize = env_is_set("METALLIC_DEBUG_TOKENIZE");
-                        let disable_chat_template = env_is_set("METALLIC_DISABLE_CHAT_TEMPLATE");
-                        let first_prompt = prompts.first().map(|s| s.trim()).unwrap_or("");
-
-                        let cfg = metallic_foundry::generation::GenerationConfig {
-                            max_tokens: worker_generation.max_tokens,
-                            temperature: worker_generation.temperature as f32,
-                            top_p: worker_generation.top_p as f32,
-                            min_p: worker_generation.min_p as f32,
-                            top_k: worker_generation.top_k,
-                            repeat_penalty: worker_generation.repeat_penalty as f32,
-                            repeat_last_n: worker_generation.repeat_last_n,
-                            presence_penalty: worker_generation.presence_penalty as f32,
-                            frequency_penalty: worker_generation.frequency_penalty as f32,
-                            kv_initial_headroom_tokens: 0,
-                            seed: worker_generation.seed,
-                        };
-
-                        // Penalties are applied on-GPU in the workflow sampler and are compatible with batching.
-
-                        // `models_owned` is already FxHashMap<String, Arc<CompiledModel>>.
-                        // We used to create a map of references, but now `generate_streaming_from_tokens_with_workflow`
-                        // takes `&FxHashMap<String, Arc<CompiledModel>>`.
-                        let models = models_owned; // Ownership transfer / move for clarity, though we could just use models_owned.
-
-                        if !interactive {
-                            worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
-                            if debug_tokenize {
-                                let formatted = if disable_chat_template {
-                                    prompts[0].clone()
+                            let messages_input: Vec<WfValue> = if turn_idx == 0 {
+                                if let Some(system) = system.as_deref() {
+                                    vec![msg("system", system), msg("user", turn_prompt)]
                                 } else {
-                                    tokenizer.format_single_turn_chat_prompt_with_kwargs(&prompts[0], tokenizer_template_kwargs.as_ref())?
-                                };
-                                let toks = tokenizer.encode(&formatted)?;
-                                let head_n = 64usize.min(toks.len());
-                                let decoded_head = tokenizer
-                                    .decode_lossless(&toks[..head_n])
-                                    .unwrap_or_else(|_| "<decode_error>".to_string());
-                                let max_chars = 800usize;
-                                let shown = formatted.chars().take(max_chars).collect::<String>();
-                                let suffix = if formatted.chars().count() > max_chars {
-                                    "…(truncated)"
-                                } else {
-                                    ""
-                                };
-                                eprintln!(
-                                    "[metallic][debug] main: disable_chat_template={} chars={} tokens={} head_ids={:?}\n[metallic][debug] decoded_head:\n{}\n[metallic][debug] formatted_prompt_head:\n{}{}",
-                                    disable_chat_template,
-                                    formatted.chars().count(),
-                                    toks.len(),
-                                    &toks[..head_n],
-                                    decoded_head,
-                                    shown,
-                                    suffix
-                                );
-                                if env_is_set("METALLIC_DEBUG_TOKENIZE_FULL") {
-                                    eprintln!("[metallic][debug] token_ids_full={:?}", toks);
+                                    vec![msg("user", turn_prompt)]
                                 }
-                            }
-
-                            let tokens0 = if disable_chat_template {
-                                tokenizer.encode(&prompts[0])?
                             } else {
-                                tokenizer.encode_single_turn_chat_prompt_with_kwargs(&prompts[0], tokenizer_template_kwargs.as_ref())?
+                                vec![msg("user", turn_prompt)]
                             };
 
-                            let tokenization_duration = tokenization_start.elapsed();
-                            worker_tx.send(AppEvent::TokenizationComplete(tokenization_duration))?;
+                            // Best-effort token metrics for throughput/UI (actual tokenization is done inside the workflow).
+                            let mut metrics_tokens: Vec<u32> = if turn_idx == 0 {
+                                tokens0.clone()
+                            } else if disable_chat_template {
+                                tokenizer.encode(turn_prompt)?
+                            } else {
+                                tokenizer
+                                    .encode_chat_continuation_prompt_with_kwargs(turn_prompt, tokenizer_template_kwargs.as_ref())?
+                            };
 
-                            worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-
-                            if workflow_wants_messages {
-                                if prompts.first().map(|s| s.trim()).unwrap_or("").is_empty() {
-                                    return Err(anyhow::anyhow!(
-                                        "Workflow declares 'messages' input (prompt-driven workflow) but no prompt was provided. Pass a prompt argument, or use `--output-format tui` for interactive chat."
-                                    ));
-                                }
-
-                                use metallic_foundry::workflow::Value as WfValue;
-
-                                fn sys_prompt() -> Option<String> {
-                                    std::env::var("METALLIC_SYSTEM_PROMPT")
-                                        .ok()
-                                        .map(|s| s.trim().to_string())
-                                        .filter(|s| !s.is_empty())
-                                }
-
-                                fn msg(role: &str, content: &str) -> WfValue {
-                                    let mut map = FxHashMap::default();
-                                    map.insert("role".to_string(), WfValue::Text(role.into()));
-                                    map.insert("content".to_string(), WfValue::Text(content.to_string().into()));
-                                    WfValue::Map(map)
-                                }
-
-                                let workflow = workflow_override.as_ref().expect("workflow_override present");
-                                let mut runner = WorkflowRunner::new(models);
-                                let system = sys_prompt();
-
-                                for (turn_idx, turn_prompt) in prompts.iter().enumerate() {
-                                    if turn_idx > 0 {
-                                        worker_tx.send(AppEvent::UserPrompt(turn_prompt.to_string()))?;
-                                    }
-
-                                    let messages_input: Vec<WfValue> = if turn_idx == 0 {
-                                        if let Some(system) = system.as_deref() {
-                                            vec![msg("system", system), msg("user", turn_prompt)]
-                                        } else {
-                                            vec![msg("user", turn_prompt)]
-                                        }
-                                    } else {
-                                        vec![msg("user", turn_prompt)]
-                                    };
-
-                                    // Best-effort token metrics for throughput/UI (actual tokenization is done inside the workflow).
-                                    let mut metrics_tokens: Vec<u32> = if turn_idx == 0 {
-                                        tokens0.clone()
-                                    } else if disable_chat_template {
-                                        tokenizer.encode(turn_prompt)?
-                                    } else {
-                                        tokenizer
-                                            .encode_chat_continuation_prompt_with_kwargs(turn_prompt, tokenizer_template_kwargs.as_ref())?
-                                    };
-
-                                    // Remove BOS if present to avoid polluting the context in the middle of a chat.
-                                    if turn_idx > 0
-                                        && let Some(bos) = tokenizer.special_tokens().bos_token_id
-                                        && !metrics_tokens.is_empty()
-                                        && metrics_tokens[0] == bos
-                                    {
-                                        metrics_tokens.remove(0);
-                                    }
-
-                                    worker_tx.send(AppEvent::TokenCount(metrics_tokens.len()))?;
-                                    worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-
-                                    let mut inputs: FxHashMap<String, WfValue> = FxHashMap::default();
-                                    inputs.insert("messages".to_string(), WfValue::Array(messages_input));
-                                    inputs.insert("max_tokens".to_string(), WfValue::U32(cfg.max_tokens as u32));
-                                    inputs.insert("temperature".to_string(), WfValue::F32(cfg.temperature));
-                                    inputs.insert("top_k".to_string(), WfValue::U32(cfg.top_k as u32));
-                                    inputs.insert("top_p".to_string(), WfValue::F32(cfg.top_p));
-                                    inputs.insert("min_p".to_string(), WfValue::F32(cfg.min_p));
-                                    inputs.insert("repeat_penalty".to_string(), WfValue::F32(cfg.repeat_penalty));
-                                    inputs.insert("repeat_last_n".to_string(), WfValue::Usize(cfg.repeat_last_n));
-                                    inputs.insert("presence_penalty".to_string(), WfValue::F32(cfg.presence_penalty));
-                                    inputs.insert("frequency_penalty".to_string(), WfValue::F32(cfg.frequency_penalty));
-                                    inputs.insert("seed".to_string(), WfValue::U32(cfg.seed.unwrap_or(42)));
-                                    // Prefer runner auto-injection of `eos_token` when the workflow declares it.
-                                    if !workflow.inputs.iter().any(|i| i.name == "eos_token") {
-                                        let eos = tokenizer.special_tokens().eos_token_id.ok_or_else(|| {
-                                            metallic_foundry::MetalError::InvalidOperation(
-                                                "Tokenizer metadata missing required 'eos_token_id'".to_string(),
-                                            )
-                                        })?;
-                                        inputs.insert("eos_token".to_string(), WfValue::U32(eos));
-                                    }
-                                    apply_workflow_cli_inputs(&mut inputs, &workflow_cli_inputs);
-
-                                    let mut decode_scratch = Vec::new();
-                                    let mut decoded_chunk = String::new();
-                                    let mut on_token = |token_id: u32,
-                                                        prefill: Duration,
-                                                        setup: Duration,
-                                                        iter: Option<Duration>|
-                                     -> Result<bool, metallic_foundry::MetalError> {
-                                        if let Some(text) = tokenizer.decode_token_arc(token_id, &mut decoded_chunk, &mut decode_scratch)?
-                                            && worker_tx
-                                                .send(AppEvent::Token {
-                                                    text,
-                                                    setup_duration: Some(setup),
-                                                    prompt_processing: prefill,
-                                                    iteration: iter,
-                                                })
-                                                .is_err()
-                                        {
-                                            return Ok(false);
-                                        }
-                                        Ok(true)
-                                    };
-
-                                    let gen_start = Instant::now();
-                                    match runner.run_streaming(&mut foundry, workflow, inputs, &mut on_token) {
-                                        Ok(_outputs) => {
-                                            let _ = worker_tx.send(AppEvent::GenerationComplete {
-                                                total_generation_time: gen_start.elapsed(),
-                                            });
-                                        }
-                                        Err(err) => {
-                                            alert::emit_error(&worker_tx, format!("Generation failed: {err:#}"));
-                                            let _ = worker_tx.send(AppEvent::GenerationComplete {
-                                                total_generation_time: gen_start.elapsed(),
-                                            });
-                                            worker_tx.send(AppEvent::StatusUpdate("Waiting for input...".to_string()))?;
-                                        }
-                                    }
-                                }
-                                return Ok(());
+                            // Remove BOS if present to avoid polluting the context in the middle of a chat.
+                            if turn_idx > 0
+                                && let Some(bos) = tokenizer.special_tokens().bos_token_id
+                                && !metrics_tokens.is_empty()
+                                && metrics_tokens[0] == bos
+                            {
+                                metrics_tokens.remove(0);
                             }
 
-                            for (turn_idx, turn_prompt) in prompts.iter().enumerate() {
-                                let mut current_tokens = if turn_idx == 0 {
-                                    tokens0.clone()
-                                } else if disable_chat_template {
-                                    tokenizer.encode(turn_prompt)?
+                            worker_tx.send(AppEvent::TokenCount(metrics_tokens.len()))?;
+                            worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
+
+                            let mut inputs: FxHashMap<String, WfValue> = FxHashMap::default();
+                            inputs.insert("messages".to_string(), WfValue::Array(messages_input));
+                            inputs.insert("max_tokens".to_string(), WfValue::U32(cfg.max_tokens as u32));
+                            inputs.insert("temperature".to_string(), WfValue::F32(cfg.temperature));
+                            inputs.insert("top_k".to_string(), WfValue::U32(cfg.top_k as u32));
+                            inputs.insert("top_p".to_string(), WfValue::F32(cfg.top_p));
+                            inputs.insert("min_p".to_string(), WfValue::F32(cfg.min_p));
+                            inputs.insert("repeat_penalty".to_string(), WfValue::F32(cfg.repeat_penalty));
+                            inputs.insert("repeat_last_n".to_string(), WfValue::Usize(cfg.repeat_last_n));
+                            inputs.insert("presence_penalty".to_string(), WfValue::F32(cfg.presence_penalty));
+                            inputs.insert("frequency_penalty".to_string(), WfValue::F32(cfg.frequency_penalty));
+                            inputs.insert("seed".to_string(), WfValue::U32(cfg.seed.unwrap_or(42)));
+                            // Prefer runner auto-injection of `eos_token` when the workflow declares it.
+                            if !workflow.inputs.iter().any(|i| i.name == "eos_token") {
+                                let eos = tokenizer.special_tokens().eos_token_id.ok_or_else(|| {
+                                    metallic_foundry::MetalError::InvalidOperation(
+                                        "Tokenizer metadata missing required 'eos_token_id'".to_string(),
+                                    )
+                                })?;
+                                inputs.insert("eos_token".to_string(), WfValue::U32(eos));
+                            }
+                            apply_workflow_cli_inputs(&mut inputs, &workflow_cli_inputs);
+
+                            let mut decode_scratch = Vec::new();
+                            let mut decoded_chunk = String::new();
+                            let mut on_token = |token_id: u32,
+                                                prefill: Duration,
+                                                setup: Duration,
+                                                iter: Option<Duration>|
+                             -> Result<bool, metallic_foundry::MetalError> {
+                                if let Some(text) = tokenizer.decode_token_arc(token_id, &mut decoded_chunk, &mut decode_scratch)?
+                                    && worker_tx
+                                        .send(AppEvent::Token {
+                                            text,
+                                            setup_duration: Some(setup),
+                                            prompt_processing: prefill,
+                                            iteration: iter,
+                                        })
+                                        .is_err()
+                                {
+                                    return Ok(false);
+                                }
+                                Ok(true)
+                            };
+
+                            let gen_start = Instant::now();
+                            match runner.run_streaming(&mut foundry, workflow, inputs, &mut on_token) {
+                                Ok(_outputs) => {
+                                    let _ = worker_tx.send(AppEvent::GenerationComplete {
+                                        total_generation_time: gen_start.elapsed(),
+                                    });
+                                }
+                                Err(err) => {
+                                    alert::emit_error(&worker_tx, format!("Generation failed: {err:#}"));
+                                    let _ = worker_tx.send(AppEvent::GenerationComplete {
+                                        total_generation_time: gen_start.elapsed(),
+                                    });
+                                    worker_tx.send(AppEvent::StatusUpdate("Waiting for input...".to_string()))?;
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    for (turn_idx, turn_prompt) in prompts.iter().enumerate() {
+                        let mut current_tokens = if turn_idx == 0 {
+                            tokens0.clone()
+                        } else if disable_chat_template {
+                            tokenizer.encode(turn_prompt)?
+                        } else {
+                            tokenizer
+                                .encode_chat_continuation_prompt_with_kwargs(turn_prompt, tokenizer_template_kwargs.as_ref())?
+                        };
+
+                        // Remove BOS if present to avoid polluting the context in the middle of a chat.
+                        if turn_idx > 0
+                            && let Some(bos) = tokenizer.special_tokens().bos_token_id
+                            && !current_tokens.is_empty()
+                            && current_tokens[0] == bos
+                        {
+                            current_tokens.remove(0);
+                        }
+
+                        worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
+                        if let Some(workflow) = &workflow_override {
+                            metallic_foundry::generation::generate_streaming_from_tokens_with_workflow(
+                                &mut foundry,
+                                &models,
+                                &tokenizer,
+                                &current_tokens,
+                                &cfg,
+                                &worker_tx,
+                                workflow.clone(),
+                                Some(&workflow_cli_inputs),
+                            )?;
+                        } else {
+                            // Single-model default workflow path.
+                            let model_id = "llm";
+                            let model = models
+                                .get(model_id)
+                                .cloned()
+                                .or_else(|| models.values().next().cloned())
+                                .expect("at least one model");
+                            metallic_foundry::generation::generate_streaming_from_tokens(
+                                &mut foundry,
+                                model,
+                                &tokenizer,
+                                &current_tokens,
+                                &cfg,
+                                &worker_tx,
+                            )?;
+                        }
+                    }
+                } else if workflow_wants_messages {
+                    // TUI multi-turn for message-driven workflows:
+                    // - Feed only user-turn deltas into the workflow to avoid re-prefilling assistant text.
+                    // - Preserve KV cache in Foundry sessions; prefill consumes only the delta tokens.
+                    use metallic_foundry::workflow::Value as WfValue;
+
+                    fn sys_prompt() -> Option<String> {
+                        std::env::var("METALLIC_SYSTEM_PROMPT")
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                    }
+
+                    fn msg(role: &str, content: &str) -> WfValue {
+                        let mut map = FxHashMap::default();
+                        map.insert("role".to_string(), WfValue::Text(role.into()));
+                        map.insert("content".to_string(), WfValue::Text(content.to_string().into()));
+                        WfValue::Map(map)
+                    }
+
+                    let workflow = workflow_override.as_ref().expect("workflow_override present");
+                    let mut runner = WorkflowRunner::new(models);
+
+                    let system = sys_prompt();
+                    let mut is_first_turn = true;
+
+                    // If the user provided multiple prompts on the CLI for a TUI session, treat them
+                    // as queued turns.
+                    let mut queued_cli_turns = prompts.iter().skip(1);
+
+                    if debug_tokenize && !first_prompt.is_empty() {
+                        let formatted = if disable_chat_template {
+                            prompts[0].clone()
+                        } else {
+                            tokenizer.format_single_turn_chat_prompt_with_kwargs(&prompts[0], tokenizer_template_kwargs.as_ref())?
+                        };
+                        let toks = tokenizer.encode(&formatted)?;
+                        let head_n = 64usize.min(toks.len());
+                        let decoded_head = tokenizer
+                            .decode_lossless(&toks[..head_n])
+                            .unwrap_or_else(|_| "<decode_error>".to_string());
+                        let max_chars = 800usize;
+                        let shown = formatted.chars().take(max_chars).collect::<String>();
+                        let suffix = if formatted.chars().count() > max_chars {
+                            "…(truncated)"
+                        } else {
+                            ""
+                        };
+                        eprintln!(
+                            "[metallic][debug] main: disable_chat_template={} chars={} tokens={} head_ids={:?}\n[metallic][debug] decoded_head:\n{}\n[metallic][debug] formatted_prompt_head:\n{}{}",
+                            disable_chat_template,
+                            formatted.chars().count(),
+                            toks.len(),
+                            &toks[..head_n],
+                            decoded_head,
+                            shown,
+                            suffix
+                        );
+                        if env_is_set("METALLIC_DEBUG_TOKENIZE_FULL") {
+                            eprintln!("[metallic][debug] token_ids_full={:?}", toks);
+                        }
+                    }
+
+                    loop {
+                        let user_prompt: String = if is_first_turn {
+                            // If the TUI is launched without an initial prompt, wait for user input.
+                            if first_prompt.is_empty() {
+                                worker_tx.send(AppEvent::StatusUpdate("Waiting for input...".to_string()))?;
+                                match cmd_rx.recv() {
+                                    Ok(AppEvent::Input(input)) => {
+                                        worker_tx.send(AppEvent::StatusUpdate("Processing input...".to_string()))?;
+                                        input
+                                    }
+                                    Ok(_) => continue,
+                                    Err(_) => break,
+                                }
+                            } else {
+                                prompts[0].clone()
+                            }
+                        } else if let Some(turn_prompt) = queued_cli_turns.next() {
+                            worker_tx.send(AppEvent::UserPrompt(turn_prompt.to_string()))?;
+                            worker_tx.send(AppEvent::StatusUpdate("Processing queued prompt...".to_string()))?;
+                            turn_prompt.to_string()
+                        } else {
+                            match cmd_rx.recv() {
+                                Ok(AppEvent::Input(input)) => {
+                                    worker_tx.send(AppEvent::StatusUpdate("Processing input...".to_string()))?;
+                                    input
+                                }
+                                Ok(_) => continue,
+                                Err(_) => break,
+                            }
+                        };
+
+                        let messages_input: Vec<WfValue> = if is_first_turn {
+                            if let Some(system) = system.as_deref() {
+                                vec![msg("system", system), msg("user", &user_prompt)]
+                            } else {
+                                vec![msg("user", &user_prompt)]
+                            }
+                        } else {
+                            vec![msg("user", &user_prompt)]
+                        };
+                        is_first_turn = false;
+
+                        worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
+
+                        let mut inputs: FxHashMap<String, WfValue> = FxHashMap::default();
+                        inputs.insert("messages".to_string(), WfValue::Array(messages_input));
+                        inputs.insert("max_tokens".to_string(), WfValue::U32(cfg.max_tokens as u32));
+                        inputs.insert("temperature".to_string(), WfValue::F32(cfg.temperature));
+                        inputs.insert("top_k".to_string(), WfValue::U32(cfg.top_k as u32));
+                        inputs.insert("top_p".to_string(), WfValue::F32(cfg.top_p));
+                        inputs.insert("min_p".to_string(), WfValue::F32(cfg.min_p));
+                        inputs.insert("repeat_penalty".to_string(), WfValue::F32(cfg.repeat_penalty));
+                        inputs.insert("repeat_last_n".to_string(), WfValue::Usize(cfg.repeat_last_n));
+                        inputs.insert("presence_penalty".to_string(), WfValue::F32(cfg.presence_penalty));
+                        inputs.insert("frequency_penalty".to_string(), WfValue::F32(cfg.frequency_penalty));
+                        inputs.insert("seed".to_string(), WfValue::U32(cfg.seed.unwrap_or(42)));
+                        // Prefer runner auto-injection of `eos_token` when the workflow declares it.
+                        if !workflow.inputs.iter().any(|i| i.name == "eos_token") {
+                            let eos = tokenizer.special_tokens().eos_token_id.ok_or_else(|| {
+                                metallic_foundry::MetalError::InvalidOperation(
+                                    "Tokenizer metadata missing required 'eos_token_id'".to_string(),
+                                )
+                            })?;
+                            inputs.insert("eos_token".to_string(), WfValue::U32(eos));
+                        }
+                        apply_workflow_cli_inputs(&mut inputs, &workflow_cli_inputs);
+
+                        let mut decode_scratch = Vec::new();
+                        let mut decoded_chunk = String::new();
+                        let mut on_token = |token_id: u32,
+                                            prefill: Duration,
+                                            setup: Duration,
+                                            iter: Option<Duration>|
+                         -> Result<bool, metallic_foundry::MetalError> {
+                            if let Some(text) = tokenizer.decode_token_arc(token_id, &mut decoded_chunk, &mut decode_scratch)?
+                                && worker_tx
+                                    .send(AppEvent::Token {
+                                        text,
+                                        setup_duration: Some(setup),
+                                        prompt_processing: prefill,
+                                        iteration: iter,
+                                    })
+                                    .is_err()
+                            {
+                                return Ok(false);
+                            }
+                            Ok(true)
+                        };
+
+                        let gen_start = Instant::now();
+                        match runner.run_streaming(&mut foundry, workflow, inputs, &mut on_token) {
+                            Ok(_outputs) => {
+                                let _ = worker_tx.send(AppEvent::GenerationComplete {
+                                    total_generation_time: gen_start.elapsed(),
+                                });
+                            }
+                            Err(err) => {
+                                alert::emit_error(&worker_tx, format!("Generation failed: {err:#}"));
+                                let _ = worker_tx.send(AppEvent::GenerationComplete {
+                                    total_generation_time: gen_start.elapsed(),
+                                });
+                                worker_tx.send(AppEvent::StatusUpdate("Waiting for input...".to_string()))?;
+                            }
+                        }
+                    }
+                } else {
+                    let mut is_first_turn = true;
+                    let mut current_tokens: Vec<u32> = if !first_prompt.is_empty() {
+                        is_first_turn = false;
+                        let toks = if disable_chat_template {
+                            tokenizer.encode(&prompts[0])?
+                        } else {
+                            tokenizer.encode_single_turn_chat_prompt_with_kwargs(&prompts[0], tokenizer_template_kwargs.as_ref())?
+                        };
+                        let tokenization_duration = tokenization_start.elapsed();
+                        worker_tx.send(AppEvent::TokenizationComplete(tokenization_duration))?;
+                        worker_tx.send(AppEvent::TokenCount(toks.len()))?;
+                        toks
+                    } else {
+                        worker_tx.send(AppEvent::StatusUpdate("Waiting for input...".to_string()))?;
+                        Vec::new()
+                    };
+
+                    let mut queued_cli_turns = prompts.iter().skip(1);
+                    loop {
+                        if current_tokens.is_empty() {
+                            // Consume queued CLI prompts first, otherwise wait for user input.
+                            if let Some(turn_prompt) = queued_cli_turns.next() {
+                                worker_tx.send(AppEvent::UserPrompt(turn_prompt.to_string()))?;
+                                worker_tx.send(AppEvent::StatusUpdate("Processing queued prompt...".to_string()))?;
+                                let mut remove_bos = false;
+                                current_tokens = if is_first_turn {
+                                    is_first_turn = false;
+                                    if disable_chat_template {
+                                        tokenizer.encode(turn_prompt)?
+                                    } else {
+                                        tokenizer.encode_single_turn_chat_prompt_with_kwargs(
+                                            turn_prompt,
+                                            tokenizer_template_kwargs.as_ref(),
+                                        )?
+                                    }
                                 } else {
-                                    tokenizer
-                                        .encode_chat_continuation_prompt_with_kwargs(turn_prompt, tokenizer_template_kwargs.as_ref())?
+                                    remove_bos = true;
+                                    tokenizer.encode_chat_continuation_prompt_with_kwargs(
+                                        turn_prompt,
+                                        tokenizer_template_kwargs.as_ref(),
+                                    )?
                                 };
 
-                                // Remove BOS if present to avoid polluting the context in the middle of a chat.
-                                if turn_idx > 0
+                                // Remove BOS if present to avoid polluting the context in middle of generation
+                                if remove_bos
                                     && let Some(bos) = tokenizer.special_tokens().bos_token_id
                                     && !current_tokens.is_empty()
                                     && current_tokens[0] == bos
@@ -761,339 +876,34 @@ fn main() -> AppResult<()> {
                                 }
 
                                 worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
-                                if let Some(workflow) = &workflow_override {
-                                    metallic_foundry::generation::generate_streaming_from_tokens_with_workflow(
-                                        &mut foundry,
-                                        &models,
-                                        &tokenizer,
-                                        &current_tokens,
-                                        &cfg,
-                                        &worker_tx,
-                                        workflow.clone(),
-                                        Some(&workflow_cli_inputs),
-                                    )?;
-                                } else {
-                                    // Single-model default workflow path.
-                                    let model_id = "llm";
-                                    let model = models
-                                        .get(model_id)
-                                        .cloned()
-                                        .or_else(|| models.values().next().cloned())
-                                        .expect("at least one model");
-                                    metallic_foundry::generation::generate_streaming_from_tokens(
-                                        &mut foundry,
-                                        model,
-                                        &tokenizer,
-                                        &current_tokens,
-                                        &cfg,
-                                        &worker_tx,
-                                    )?;
-                                }
-                            }
-                        } else if workflow_wants_messages {
-                            // TUI multi-turn for message-driven workflows:
-                            // - Feed only user-turn deltas into the workflow to avoid re-prefilling assistant text.
-                            // - Preserve KV cache in Foundry sessions; prefill consumes only the delta tokens.
-                            use metallic_foundry::workflow::Value as WfValue;
-
-                            fn sys_prompt() -> Option<String> {
-                                std::env::var("METALLIC_SYSTEM_PROMPT")
-                                    .ok()
-                                    .map(|s| s.trim().to_string())
-                                    .filter(|s| !s.is_empty())
+                                continue;
                             }
 
-                            fn msg(role: &str, content: &str) -> WfValue {
-                                let mut map = FxHashMap::default();
-                                map.insert("role".to_string(), WfValue::Text(role.into()));
-                                map.insert("content".to_string(), WfValue::Text(content.to_string().into()));
-                                WfValue::Map(map)
-                            }
-
-                            let workflow = workflow_override.as_ref().expect("workflow_override present");
-                            let mut runner = WorkflowRunner::new(models);
-
-                            let system = sys_prompt();
-                            let mut is_first_turn = true;
-
-                            // If the user provided multiple prompts on the CLI for a TUI session, treat them
-                            // as queued turns.
-                            let mut queued_cli_turns = prompts.iter().skip(1);
-
-                            if debug_tokenize && !first_prompt.is_empty() {
-                                let formatted = if disable_chat_template {
-                                    prompts[0].clone()
-                                } else {
-                                    tokenizer.format_single_turn_chat_prompt_with_kwargs(&prompts[0], tokenizer_template_kwargs.as_ref())?
-                                };
-                                let toks = tokenizer.encode(&formatted)?;
-                                let head_n = 64usize.min(toks.len());
-                                let decoded_head = tokenizer
-                                    .decode_lossless(&toks[..head_n])
-                                    .unwrap_or_else(|_| "<decode_error>".to_string());
-                                let max_chars = 800usize;
-                                let shown = formatted.chars().take(max_chars).collect::<String>();
-                                let suffix = if formatted.chars().count() > max_chars {
-                                    "…(truncated)"
-                                } else {
-                                    ""
-                                };
-                                eprintln!(
-                                    "[metallic][debug] main: disable_chat_template={} chars={} tokens={} head_ids={:?}\n[metallic][debug] decoded_head:\n{}\n[metallic][debug] formatted_prompt_head:\n{}{}",
-                                    disable_chat_template,
-                                    formatted.chars().count(),
-                                    toks.len(),
-                                    &toks[..head_n],
-                                    decoded_head,
-                                    shown,
-                                    suffix
-                                );
-                                if env_is_set("METALLIC_DEBUG_TOKENIZE_FULL") {
-                                    eprintln!("[metallic][debug] token_ids_full={:?}", toks);
-                                }
-                            }
-
-                            loop {
-                                let user_prompt: String = if is_first_turn {
-                                    // If the TUI is launched without an initial prompt, wait for user input.
-                                    if first_prompt.is_empty() {
-                                        worker_tx.send(AppEvent::StatusUpdate("Waiting for input...".to_string()))?;
-                                        match cmd_rx.recv() {
-                                            Ok(AppEvent::Input(input)) => {
-                                                worker_tx.send(AppEvent::StatusUpdate("Processing input...".to_string()))?;
-                                                input
-                                            }
-                                            Ok(_) => continue,
-                                            Err(_) => break,
-                                        }
-                                    } else {
-                                        prompts[0].clone()
-                                    }
-                                } else if let Some(turn_prompt) = queued_cli_turns.next() {
-                                    worker_tx.send(AppEvent::UserPrompt(turn_prompt.to_string()))?;
-                                    worker_tx.send(AppEvent::StatusUpdate("Processing queued prompt...".to_string()))?;
-                                    turn_prompt.to_string()
-                                } else {
-                                    match cmd_rx.recv() {
-                                        Ok(AppEvent::Input(input)) => {
-                                            worker_tx.send(AppEvent::StatusUpdate("Processing input...".to_string()))?;
-                                            input
-                                        }
-                                        Ok(_) => continue,
-                                        Err(_) => break,
-                                    }
-                                };
-
-                                let messages_input: Vec<WfValue> = if is_first_turn {
-                                    if let Some(system) = system.as_deref() {
-                                        vec![msg("system", system), msg("user", &user_prompt)]
-                                    } else {
-                                        vec![msg("user", &user_prompt)]
-                                    }
-                                } else {
-                                    vec![msg("user", &user_prompt)]
-                                };
-                                is_first_turn = false;
-
-                                worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-
-                                let mut inputs: FxHashMap<String, WfValue> = FxHashMap::default();
-                                inputs.insert("messages".to_string(), WfValue::Array(messages_input));
-                                inputs.insert("max_tokens".to_string(), WfValue::U32(cfg.max_tokens as u32));
-                                inputs.insert("temperature".to_string(), WfValue::F32(cfg.temperature));
-                                inputs.insert("top_k".to_string(), WfValue::U32(cfg.top_k as u32));
-                                inputs.insert("top_p".to_string(), WfValue::F32(cfg.top_p));
-                                inputs.insert("min_p".to_string(), WfValue::F32(cfg.min_p));
-                                inputs.insert("repeat_penalty".to_string(), WfValue::F32(cfg.repeat_penalty));
-                                inputs.insert("repeat_last_n".to_string(), WfValue::Usize(cfg.repeat_last_n));
-                                inputs.insert("presence_penalty".to_string(), WfValue::F32(cfg.presence_penalty));
-                                inputs.insert("frequency_penalty".to_string(), WfValue::F32(cfg.frequency_penalty));
-                                inputs.insert("seed".to_string(), WfValue::U32(cfg.seed.unwrap_or(42)));
-                                // Prefer runner auto-injection of `eos_token` when the workflow declares it.
-                                if !workflow.inputs.iter().any(|i| i.name == "eos_token") {
-                                    let eos = tokenizer.special_tokens().eos_token_id.ok_or_else(|| {
-                                        metallic_foundry::MetalError::InvalidOperation(
-                                            "Tokenizer metadata missing required 'eos_token_id'".to_string(),
-                                        )
-                                    })?;
-                                    inputs.insert("eos_token".to_string(), WfValue::U32(eos));
-                                }
-                                apply_workflow_cli_inputs(&mut inputs, &workflow_cli_inputs);
-
-                                let mut decode_scratch = Vec::new();
-                                let mut decoded_chunk = String::new();
-                                let mut on_token = |token_id: u32,
-                                                    prefill: Duration,
-                                                    setup: Duration,
-                                                    iter: Option<Duration>|
-                                 -> Result<bool, metallic_foundry::MetalError> {
-                                    if let Some(text) = tokenizer.decode_token_arc(token_id, &mut decoded_chunk, &mut decode_scratch)?
-                                        && worker_tx
-                                            .send(AppEvent::Token {
-                                                text,
-                                                setup_duration: Some(setup),
-                                                prompt_processing: prefill,
-                                                iteration: iter,
-                                            })
-                                            .is_err()
-                                    {
-                                        return Ok(false);
-                                    }
-                                    Ok(true)
-                                };
-
-                                let gen_start = Instant::now();
-                                match runner.run_streaming(&mut foundry, workflow, inputs, &mut on_token) {
-                                    Ok(_outputs) => {
-                                        let _ = worker_tx.send(AppEvent::GenerationComplete {
-                                            total_generation_time: gen_start.elapsed(),
-                                        });
-                                    }
-                                    Err(err) => {
-                                        alert::emit_error(&worker_tx, format!("Generation failed: {err:#}"));
-                                        let _ = worker_tx.send(AppEvent::GenerationComplete {
-                                            total_generation_time: gen_start.elapsed(),
-                                        });
-                                        worker_tx.send(AppEvent::StatusUpdate("Waiting for input...".to_string()))?;
-                                    }
-                                }
-                            }
-                        } else {
-                            let mut is_first_turn = true;
-                            let mut current_tokens: Vec<u32> = if !first_prompt.is_empty() {
-                                is_first_turn = false;
-                                let toks = if disable_chat_template {
-                                    tokenizer.encode(&prompts[0])?
-                                } else {
-                                    tokenizer.encode_single_turn_chat_prompt_with_kwargs(&prompts[0], tokenizer_template_kwargs.as_ref())?
-                                };
-                                let tokenization_duration = tokenization_start.elapsed();
-                                worker_tx.send(AppEvent::TokenizationComplete(tokenization_duration))?;
-                                worker_tx.send(AppEvent::TokenCount(toks.len()))?;
-                                toks
-                            } else {
-                                worker_tx.send(AppEvent::StatusUpdate("Waiting for input...".to_string()))?;
-                                Vec::new()
-                            };
-
-                            let mut queued_cli_turns = prompts.iter().skip(1);
-                            loop {
-                                if current_tokens.is_empty() {
-                                    // Consume queued CLI prompts first, otherwise wait for user input.
-                                    if let Some(turn_prompt) = queued_cli_turns.next() {
-                                        worker_tx.send(AppEvent::UserPrompt(turn_prompt.to_string()))?;
-                                        worker_tx.send(AppEvent::StatusUpdate("Processing queued prompt...".to_string()))?;
-                                        let mut remove_bos = false;
-                                        current_tokens = if is_first_turn {
-                                            is_first_turn = false;
-                                            if disable_chat_template {
-                                                tokenizer.encode(turn_prompt)?
-                                            } else {
-                                                tokenizer.encode_single_turn_chat_prompt_with_kwargs(
-                                                    turn_prompt,
-                                                    tokenizer_template_kwargs.as_ref(),
-                                                )?
-                                            }
+                            match cmd_rx.recv() {
+                                Ok(AppEvent::Input(input)) => {
+                                    worker_tx.send(AppEvent::StatusUpdate("Processing input...".to_string()))?;
+                                    let mut remove_bos = false;
+                                    current_tokens = if is_first_turn {
+                                        is_first_turn = false;
+                                        if disable_chat_template {
+                                            tokenizer.encode(&input)?
                                         } else {
-                                            remove_bos = true;
-                                            tokenizer.encode_chat_continuation_prompt_with_kwargs(
-                                                turn_prompt,
+                                            tokenizer.encode_single_turn_chat_prompt_with_kwargs(
+                                                &input,
                                                 tokenizer_template_kwargs.as_ref(),
                                             )?
-                                        };
-
-                                        // Remove BOS if present to avoid polluting the context in middle of generation
-                                        if remove_bos
-                                            && let Some(bos) = tokenizer.special_tokens().bos_token_id
-                                            && !current_tokens.is_empty()
-                                            && current_tokens[0] == bos
-                                        {
-                                            current_tokens.remove(0);
                                         }
-
-                                        worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
-                                        continue;
-                                    }
-
-                                    match cmd_rx.recv() {
-                                        Ok(AppEvent::Input(input)) => {
-                                            worker_tx.send(AppEvent::StatusUpdate("Processing input...".to_string()))?;
-                                            let mut remove_bos = false;
-                                            current_tokens = if is_first_turn {
-                                                is_first_turn = false;
-                                                if disable_chat_template {
-                                                    tokenizer.encode(&input)?
-                                                } else {
-                                                    tokenizer.encode_single_turn_chat_prompt_with_kwargs(
-                                                        &input,
-                                                        tokenizer_template_kwargs.as_ref(),
-                                                    )?
-                                                }
-                                            } else {
-                                                remove_bos = true;
-                                                tokenizer.encode_chat_continuation_prompt_with_kwargs(
-                                                    &input,
-                                                    tokenizer_template_kwargs.as_ref(),
-                                                )?
-                                            };
-
-                                            // Remove BOS if present to avoid polluting the context in middle of generation
-                                            if remove_bos
-                                                && let Some(bos) = tokenizer.special_tokens().bos_token_id
-                                                && !current_tokens.is_empty()
-                                                && current_tokens[0] == bos
-                                            {
-                                                current_tokens.remove(0);
-                                            }
-
-                                            worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
-                                            continue;
-                                        }
-                                        Ok(_) => continue,
-                                        Err(_) => break,
-                                    }
-                                }
-
-                                if let Some(workflow) = &workflow_override {
-                                    metallic_foundry::generation::generate_streaming_from_tokens_with_workflow(
-                                        &mut foundry,
-                                        &models,
-                                        &tokenizer,
-                                        &current_tokens,
-                                        &cfg,
-                                        &worker_tx,
-                                        workflow.clone(),
-                                        Some(&workflow_cli_inputs),
-                                    )?;
-                                } else {
-                                    let model_id = "llm";
-                                    let model = models
-                                        .get(model_id)
-                                        .cloned()
-                                        .or_else(|| models.values().next().cloned())
-                                        .expect("at least one model");
-                                    metallic_foundry::generation::generate_streaming_from_tokens(
-                                        &mut foundry,
-                                        model,
-                                        &tokenizer,
-                                        &current_tokens,
-                                        &cfg,
-                                        &worker_tx,
-                                    )?;
-                                }
-
-                                // If the user provided multiple prompts on the CLI for a TUI session, consume them
-                                // as queued user turns before switching to interactive input.
-                                if let Some(turn_prompt) = queued_cli_turns.next() {
-                                    // Echo queued CLI prompts into the transcript so interactive users don't see the chat "lag"
-                                    // behind (the model will answer this queued prompt next).
-                                    worker_tx.send(AppEvent::UserPrompt(turn_prompt.to_string()))?;
-                                    worker_tx.send(AppEvent::StatusUpdate("Processing queued prompt...".to_string()))?;
-                                    current_tokens = tokenizer
-                                        .encode_chat_continuation_prompt_with_kwargs(turn_prompt, tokenizer_template_kwargs.as_ref())?;
+                                    } else {
+                                        remove_bos = true;
+                                        tokenizer.encode_chat_continuation_prompt_with_kwargs(
+                                            &input,
+                                            tokenizer_template_kwargs.as_ref(),
+                                        )?
+                                    };
 
                                     // Remove BOS if present to avoid polluting the context in middle of generation
-                                    if let Some(bos) = tokenizer.special_tokens().bos_token_id
+                                    if remove_bos
+                                        && let Some(bos) = tokenizer.special_tokens().bos_token_id
                                         && !current_tokens.is_empty()
                                         && current_tokens[0] == bos
                                     {
@@ -1103,28 +913,80 @@ fn main() -> AppResult<()> {
                                     worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
                                     continue;
                                 }
-
-                                // Wait for user input for continuous chat
-                                match cmd_rx.recv() {
-                                    Ok(AppEvent::Input(input)) => {
-                                        worker_tx.send(AppEvent::StatusUpdate("Processing input...".to_string()))?;
-                                        current_tokens = tokenizer
-                                            .encode_chat_continuation_prompt_with_kwargs(&input, tokenizer_template_kwargs.as_ref())?;
-
-                                        // Remove BOS if present to avoid polluting the context in middle of generation
-                                        if let Some(bos) = tokenizer.special_tokens().bos_token_id
-                                            && !current_tokens.is_empty()
-                                            && current_tokens[0] == bos
-                                        {
-                                            current_tokens.remove(0);
-                                        }
-
-                                        worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
-                                    }
-                                    Ok(_) => {}      // Ignore other events
-                                    Err(_) => break, // Channel closed (app exit)
-                                }
+                                Ok(_) => continue,
+                                Err(_) => break,
                             }
+                        }
+
+                        if let Some(workflow) = &workflow_override {
+                            metallic_foundry::generation::generate_streaming_from_tokens_with_workflow(
+                                &mut foundry,
+                                &models,
+                                &tokenizer,
+                                &current_tokens,
+                                &cfg,
+                                &worker_tx,
+                                workflow.clone(),
+                                Some(&workflow_cli_inputs),
+                            )?;
+                        } else {
+                            let model_id = "llm";
+                            let model = models
+                                .get(model_id)
+                                .cloned()
+                                .or_else(|| models.values().next().cloned())
+                                .expect("at least one model");
+                            metallic_foundry::generation::generate_streaming_from_tokens(
+                                &mut foundry,
+                                model,
+                                &tokenizer,
+                                &current_tokens,
+                                &cfg,
+                                &worker_tx,
+                            )?;
+                        }
+
+                        // If the user provided multiple prompts on the CLI for a TUI session, consume them
+                        // as queued user turns before switching to interactive input.
+                        if let Some(turn_prompt) = queued_cli_turns.next() {
+                            // Echo queued CLI prompts into the transcript so interactive users don't see the chat "lag"
+                            // behind (the model will answer this queued prompt next).
+                            worker_tx.send(AppEvent::UserPrompt(turn_prompt.to_string()))?;
+                            worker_tx.send(AppEvent::StatusUpdate("Processing queued prompt...".to_string()))?;
+                            current_tokens = tokenizer
+                                .encode_chat_continuation_prompt_with_kwargs(turn_prompt, tokenizer_template_kwargs.as_ref())?;
+
+                            // Remove BOS if present to avoid polluting the context in middle of generation
+                            if let Some(bos) = tokenizer.special_tokens().bos_token_id
+                                && !current_tokens.is_empty()
+                                && current_tokens[0] == bos
+                            {
+                                current_tokens.remove(0);
+                            }
+
+                            worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
+                            continue;
+                        }
+
+                        // Wait for user input for continuous chat
+                        match cmd_rx.recv() {
+                            Ok(AppEvent::Input(input)) => {
+                                worker_tx.send(AppEvent::StatusUpdate("Processing input...".to_string()))?;
+                                current_tokens = tokenizer
+                                    .encode_chat_continuation_prompt_with_kwargs(&input, tokenizer_template_kwargs.as_ref())?;
+
+                                // Remove BOS if present to avoid polluting the context in middle of generation
+                                if let Some(bos) = tokenizer.special_tokens().bos_token_id
+                                    && !current_tokens.is_empty()
+                                    && current_tokens[0] == bos
+                                {
+                                    current_tokens.remove(0);
+                                }
+
+                                worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
+                            }
+                            Ok(_) => {}      // Ignore other events
+                            Err(_) => break, // Channel closed (app exit)
                         }
                     }
                 }
@@ -1162,111 +1024,6 @@ fn main() -> AppResult<()> {
     Ok(())
 }
 
-fn report_model_weight_breakdown(qwen: &metallic_context::models::Qwen25<F16Element>) {
-    // Report model weights breakdown
-    let mut breakdown = FxHashMap::default();
-    let mut total_weights_size = 0u64;
-    let bytes_per_element = F16Element::DTYPE.size_bytes();
-
-    // Token Embeddings
-    let embed_size = (qwen.embed_weight.len() * bytes_per_element) as u64;
-    breakdown.insert("Token Embeddings".to_string(), embed_size);
-    total_weights_size += embed_size;
-
-    // Output Projection
-    let output_size = (qwen.output_weight.as_ref().map(|w| w.len()).unwrap_or(0) * bytes_per_element
-        + qwen.output_weight_canon.as_ref().map(|w| w.len()).unwrap_or(0) * bytes_per_element) as u64;
-    breakdown.insert("Output Projection".to_string(), output_size);
-    total_weights_size += output_size;
-
-    // Final Layer Norm
-    let norm_size = (qwen.final_norm_gamma.len() * bytes_per_element) as u64;
-    breakdown.insert("Final Layer Norm".to_string(), norm_size);
-    total_weights_size += norm_size;
-
-    // RoPE Cache
-    let rope_cache_size = (qwen.rope_cos_cache.len() * bytes_per_element + qwen.rope_sin_cache.len() * bytes_per_element) as u64;
-    breakdown.insert("RoPE Cache".to_string(), rope_cache_size);
-    total_weights_size += rope_cache_size;
-
-    // Transformer Blocks
-    let mut total_transformer_blocks_size = 0u64;
-    for (i, block) in qwen.blocks.iter().enumerate() {
-        let block_base_key = format!("Transformer Blocks.Weight Block {}", i + 1);
-
-        // Attention Projections
-        let legacy_qkv_size = block.attn_qkv_weight.as_ref().map(|w| w.len()).unwrap_or(0);
-        let canon_q_size = block.attn_q_weight_canon.as_ref().map(|w| w.len()).unwrap_or(0);
-        let canon_k_size = block.attn_k_weight_canon.as_ref().map(|w| w.len()).unwrap_or(0);
-        let canon_v_size = block.attn_v_weight_canon.as_ref().map(|w| w.len()).unwrap_or(0);
-        let fused_qkv_weight_size = ((legacy_qkv_size + canon_q_size + canon_k_size + canon_v_size) * bytes_per_element) as u64;
-        breakdown.insert(
-            format!("{}.Attention Projections.Fused QKV weight", block_base_key),
-            fused_qkv_weight_size,
-        );
-        let output_weight_size = ((block.attn_out_weight.as_ref().map(|w| w.len()).unwrap_or(0)
-            + block.attn_out_weight_canon.as_ref().map(|w| w.len()).unwrap_or(0))
-            * bytes_per_element) as u64;
-        breakdown.insert(
-            format!("{}.Attention Projections.Output weight", block_base_key),
-            output_weight_size,
-        );
-        let total_attn_proj_size = fused_qkv_weight_size + output_weight_size;
-        breakdown.insert(format!("{}.Attention Projections", block_base_key), total_attn_proj_size);
-
-        // Attention Biases
-        let fused_qkv_bias_size = (block.attn_qkv_bias.len() * bytes_per_element) as u64;
-        breakdown.insert(format!("{}.Attention Biases.Fused QKV bias", block_base_key), fused_qkv_bias_size);
-        breakdown.insert(format!("{}.Attention Biases", block_base_key), fused_qkv_bias_size);
-
-        // Feedforward Projections
-        let gate_weight_size = ((block.ffn_gate.as_ref().map(|w| w.len()).unwrap_or(0)
-            + block.ffn_gate_canon.as_ref().map(|w| w.len()).unwrap_or(0))
-            * bytes_per_element) as u64;
-        breakdown.insert(format!("{}.Feedforward Projections.Gate weight", block_base_key), gate_weight_size);
-        let up_weight_size = ((block.ffn_up.as_ref().map(|w| w.len()).unwrap_or(0)
-            + block.ffn_up_canon.as_ref().map(|w| w.len()).unwrap_or(0))
-            * bytes_per_element) as u64;
-        breakdown.insert(format!("{}.Feedforward Projections.Up weight", block_base_key), up_weight_size);
-        let down_weight_size = ((block.ffn_down.as_ref().map(|w| w.len()).unwrap_or(0)
-            + block.ffn_down_canon.as_ref().map(|w| w.len()).unwrap_or(0))
-            * bytes_per_element) as u64;
-        breakdown.insert(format!("{}.Feedforward Projections.Down weight", block_base_key), down_weight_size);
-        let total_ffn_proj_size = gate_weight_size + up_weight_size + down_weight_size;
-        breakdown.insert(format!("{}.Feedforward Projections", block_base_key), total_ffn_proj_size);
-
-        // Feedforward Biases
-        let gate_bias_size = (block.ffn_gate_bias.len() * bytes_per_element) as u64;
-        breakdown.insert(format!("{}.Feedforward Biases.Gate bias", block_base_key), gate_bias_size);
-        let up_bias_size = (block.ffn_up_bias.len() * bytes_per_element) as u64;
-        breakdown.insert(format!("{}.Feedforward Biases.Up bias", block_base_key), up_bias_size);
-        let down_bias_size = (block.ffn_down_bias.len() * bytes_per_element) as u64;
-        breakdown.insert(format!("{}.Feedforward Biases.Down bias", block_base_key), down_bias_size);
-        let total_ffn_bias_size = gate_bias_size + up_bias_size + down_bias_size;
-        breakdown.insert(format!("{}.Feedforward Biases", block_base_key), total_ffn_bias_size);
-
-        // Norm Parameters
-        let attn_norm_size = (block.attn_norm_gamma.len() * bytes_per_element) as u64;
-        breakdown.insert(format!("{}.Norm Parameters.Attention norm", block_base_key), attn_norm_size);
-        let ffn_norm_size = (block.ffn_norm_gamma.len() * bytes_per_element) as u64;
-        breakdown.insert(format!("{}.Norm Parameters.FFN norm", block_base_key), ffn_norm_size);
-        let total_norm_param_size = attn_norm_size + ffn_norm_size;
-        breakdown.insert(format!("{}.Norm Parameters", block_base_key), total_norm_param_size);
-
-        let total_block_size =
-            total_attn_proj_size + fused_qkv_bias_size + total_ffn_proj_size + total_ffn_bias_size + total_norm_param_size;
-        breakdown.insert(block_base_key, total_block_size);
-        total_transformer_blocks_size += total_block_size;
-    }
-    breakdown.insert("Transformer Blocks".to_string(), total_transformer_blocks_size);
-    total_weights_size += total_transformer_blocks_size;
-
-    record_metric_async!(MetricEvent::ModelWeights {
-        total_bytes: total_weights_size,
-        breakdown,
-    });
-}
-
 fn run_tui_mode(
     receiver: &std::sync::mpsc::Receiver<EnrichedMetricEvent>,
     rx: &std::sync::mpsc::Receiver<AppEvent>,
@@ -1279,7 +1036,7 @@ fn run_tui_mode(
     app.is_processing = start_processing;
 
     // Get the initial profiling state and set it in the app
-    let initial_profiling_state = profiling_state::get_profiling_state();
+    let initial_profiling_state = metallic_foundry::instrument::get_profiling_state();
     app.set_profiling_active(initial_profiling_state);
 
     while !app.should_quit {
@@ -1289,9 +1046,8 @@ fn run_tui_mode(
                 CrosstermEvent::Key(key) => {
                     if key.code == crossterm::event::KeyCode::Char('p') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
                         // Toggle profiling state
-                        profiling_state::toggle_profiling_state();
                         metallic_foundry::instrument::toggle_profiling_state();
-                        let new_state = profiling_state::get_profiling_state();
+                        let new_state = metallic_foundry::instrument::get_profiling_state();
                         app.set_profiling_active(new_state);
                     } else {
                         // Handle Input Mode

@@ -3941,57 +3941,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "metallic-context"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "approx",
- "block2",
- "bytemuck",
- "byteorder",
- "chrono",
- "crossterm 0.29.0",
- "dispatch2",
- "fancy-regex",
- "half",
- "libc",
- "mach2",
- "memmap2",
- "metallic-foundry",
- "metallic-macros",
- "metallic_cli_helpers",
- "metallic_env",
- "metallic_instrumentation",
- "ndarray",
- "ndarray-npy",
- "num-traits",
- "objc2",
- "objc2-foundation",
- "objc2-metal",
- "objc2-metal-performance-shaders",
- "objc2-metal-performance-shaders-graph",
- "proc-macro2",
- "quote",
- "rand 0.9.2",
- "ratatui",
- "rayon",
- "regex",
- "rustc-hash 2.1.1",
- "serde",
- "serde_json",
- "serial_test",
- "smallvec",
- "syn 2.0.106",
- "sysinfo 0.37.2",
- "thiserror 2.0.17",
- "tracing",
- "tracing-subscriber",
- "typetag",
- "unicode-normalization",
- "walkdir",
-]
-
-[[package]]
 name = "metallic-foundry"
 version = "0.1.0"
 dependencies = [
@@ -4008,7 +3957,6 @@ dependencies = [
  "libc",
  "mach2",
  "memmap2",
- "metallic-context",
  "metallic-loader",
  "metallic-macros",
  "metallic-sdk",
@@ -4130,7 +4078,6 @@ dependencies = [
  "libc",
  "mach2",
  "memmap2",
- "metallic-context",
  "metallic-foundry",
  "metallic-loader",
  "metallic_cli_helpers",

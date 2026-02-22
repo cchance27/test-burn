@@ -83,13 +83,13 @@ fn test_sdpa_oob_repro() -> Result<(), MetalError> {
         let q_vec = &q_f32[q_off..q_off + head_dim];
 
         let mut scores = vec![0.0f32; seq_k];
-        for t in 0..seq_k {
+        for (t, score) in scores.iter_mut().enumerate().take(seq_k) {
             let k_off = (h * seq_k * head_dim) + (t * head_dim);
             let mut dot = 0.0f32;
             for d in 0..head_dim {
                 dot += q_vec[d] * k_f32[k_off + d];
             }
-            scores[t] = dot * scale;
+            *score = dot * scale;
         }
 
         let max = scores.iter().copied().fold(f32::NEG_INFINITY, |a, b| if a > b { a } else { b });
@@ -99,8 +99,8 @@ fn test_sdpa_oob_repro() -> Result<(), MetalError> {
             sum += *s;
         }
 
-        for t in 0..seq_k {
-            let p = scores[t] / sum;
+        for (t, score) in scores.iter().enumerate().take(seq_k) {
+            let p = *score / sum;
             let v_off = (h * seq_k * head_dim) + (t * head_dim);
             for d in 0..head_dim {
                 expected[q_off + d] += p * v_f32[v_off + d];

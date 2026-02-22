@@ -9,7 +9,7 @@ pub struct LatencyRow {
     pub last_ms: f64,
     pub average_ms: f64,
     pub level: u8,
-    /// Optional metadata for display (e.g., batch_size)
+    /// Optional metadata for display (e.g., `batch_size`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<std::collections::HashMap<String, String>>,
 }
@@ -48,6 +48,7 @@ pub enum AlertLevel {
 }
 
 impl AlertLevel {
+    #[must_use] 
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Info => "INFO",

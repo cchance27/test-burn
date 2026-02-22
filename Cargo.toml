@@ -8,16 +8,11 @@ members = [
     "crates/metallic_env",
     "crates/metallic_instrumentation",
     "crates/metallic-foundry",
-    "crates/metallic-context",
     "crates/metallic_cli_helpers",
     "crates/metallic-macros",
     "crates/metallic-loader",
     "crates/metallic-gui",
 ]
-
-[features]
-src_kernels = ["metallic-context/src_kernels"]
-built_kernels = ["metallic-context/built_kernels"]
 
 [dependencies]
 objc2 = "0.6.2"
@@ -67,7 +62,6 @@ libc = { version = "0.2.177", optional = false }
 mach2 = "0.5"
 metallic_env = { path = "crates/metallic_env" }
 metallic_instrumentation = { path = "crates/metallic_instrumentation" }
-metallic-context = { path = "crates/metallic-context", default-features = false }
 metallic-foundry = { path = "crates/metallic-foundry" }
 metallic_cli_helpers = { path = "crates/metallic_cli_helpers" }
 metallic-loader = { path = "crates/metallic-loader" }

@@ -11,7 +11,7 @@ fn jsonl_exporter_writes_serialised_metrics() {
         .duration_since(UNIX_EPOCH)
         .expect("time went backwards")
         .as_nanos();
-    path.push(format!("metallic_metrics_test_{}.jsonl", unique));
+    path.push(format!("metallic_metrics_test_{unique}.jsonl"));
 
     let event = EnrichedMetricEvent {
         timestamp: Utc::now(),

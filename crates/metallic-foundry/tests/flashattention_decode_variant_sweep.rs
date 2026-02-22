@@ -3,7 +3,6 @@ use std::time::Instant;
 use metallic_foundry::{
     Foundry, MetalError, metals::flashattention::{FlashDecodeScalar, FlashDecodeTgOut, FlashDecodeVariant, step::run_flash_decode_with_variant}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
-use objc2_metal::MTLCommandBuffer as _;
 
 fn parse_env_usize(key: &'static str) -> Option<usize> {
     std::env::var(key).ok().and_then(|s| s.trim().parse::<usize>().ok())
@@ -58,7 +57,7 @@ fn bench(foundry: &mut Foundry, label: &str, warmup: usize, trials: usize, iters
             f(foundry);
         }
         let buf = foundry.end_capture().unwrap();
-        buf.waitUntilCompleted();
+        buf.wait_until_completed();
         let elapsed = start.elapsed();
         avgs.push(elapsed.as_micros() as f64 / iters_per_trial as f64);
     }

@@ -6,7 +6,6 @@ use half::f16;
 use metallic_foundry::{
     Foundry, MetalError, metals::flashattention::step::run_flash_decode, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
-use objc2_metal::MTLCommandBuffer as _;
 
 fn parse_env_usize(key: &'static str) -> Option<usize> {
     std::env::var(key).ok().and_then(|s| s.trim().parse::<usize>().ok())
@@ -47,21 +46,28 @@ fn stddev_us(samples: &[f64], mean: f64) -> f64 {
     var.sqrt()
 }
 
-fn bench(foundry: &mut Foundry, label: &str, warmup: usize, trials: usize, iters_per_trial: usize, f: impl Fn(&mut Foundry)) {
+fn bench(
+    foundry: &mut Foundry,
+    label: &str,
+    warmup: usize,
+    trials: usize,
+    iters_per_trial: usize,
+    f: impl Fn(&mut Foundry) -> Result<(), MetalError>,
+) -> Result<(), MetalError> {
     for _ in 0..warmup {
-        f(foundry);
+        f(foundry)?;
     }
-    foundry.synchronize().unwrap();
+    foundry.synchronize()?;
 
     let mut avgs = Vec::with_capacity(trials);
     for _ in 0..trials {
         let start = Instant::now();
-        foundry.start_capture().unwrap();
+        foundry.start_capture()?;
         for _ in 0..iters_per_trial {
-            f(foundry);
+            f(foundry)?;
         }
-        let buf = foundry.end_capture().unwrap();
-        buf.waitUntilCompleted();
+        let buf = foundry.end_capture()?;
+        buf.wait_until_completed();
         let elapsed = start.elapsed();
         avgs.push(elapsed.as_micros() as f64 / iters_per_trial as f64);
     }
@@ -71,6 +77,7 @@ fn bench(foundry: &mut Foundry, label: &str, warmup: usize, trials: usize, iters
     let mean = mean_us(&avgs);
     let sd = stddev_us(&avgs, mean);
     println!("  -> {label}: min={min:.2} us med={med:.2} us mean={mean:.2} us sd={sd:.2} us (trials={trials} iters={iters_per_trial})");
+    Ok(())
 }
 
 fn with_env_lock<R>(f: impl FnOnce() -> R) -> R {
@@ -97,7 +104,7 @@ fn with_env_var<R>(key: &str, value: &str, f: impl FnOnce() -> R) -> R {
 
 fn lcg_next_f32(state: &mut u32) -> f32 {
     *state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-    let mantissa = (*state >> 9) as u32; // 23 bits
+    let mantissa = *state >> 9; // 23 bits
     (mantissa as f32) * (1.0 / ((1u32 << 23) as f32))
 }
 
@@ -191,7 +198,7 @@ fn flashattention_prefill_variant_sweep() -> Result<(), MetalError> {
                 for w in warps {
                     let label = format!("m={m} warps={w} (query_offset={query_offset})");
                     let w_s = w.to_string();
-                    with_env_var("METALLIC_FA_PREFILL_WARPS", &w_s, || {
+                    let bench_result = with_env_var("METALLIC_FA_PREFILL_WARPS", &w_s, || {
                         bench(&mut foundry, &label, warmup, trials, iters_per_trial, |foundry| {
                             run_flash_decode(
                                 foundry,
@@ -205,9 +212,13 @@ fn flashattention_prefill_variant_sweep() -> Result<(), MetalError> {
                                 m,
                                 true,
                             )
-                            .unwrap();
-                        });
+                        })
                     });
+                    if let Err(MetalError::OutOfMemory) = bench_result {
+                        eprintln!("Skipping remaining sweep due to OutOfMemory at {label}, kv_len={kv_len}, head_dim={head_dim}");
+                        return Ok(());
+                    }
+                    bench_result?;
                 }
             }
         }

@@ -3,7 +3,6 @@ use std::time::Instant;
 use metallic_foundry::{
     Foundry, MetalError, metals::{flashattention::step::FlashDecodeKernel, sdpa::step::SdpaMaterializedStep}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
-use objc2_metal::MTLCommandBuffer as _;
 
 fn bind_all_symbols(symbols: &SymbolTable, bindings: &TensorBindings) -> FastBindings {
     let mut fast = FastBindings::new(symbols.len());
@@ -40,7 +39,7 @@ fn bench(foundry: &mut Foundry, label: &str, iterations: usize, f: impl Fn(&mut 
         f(foundry);
     }
     let buf = foundry.end_capture().unwrap();
-    buf.waitUntilCompleted();
+    buf.wait_until_completed();
     let elapsed = start.elapsed();
 
     let avg_us = elapsed.as_micros() as f64 / iterations as f64;

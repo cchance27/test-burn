@@ -1,23 +1,21 @@
-use std::sync::Arc;
 
 use metallic_foundry::{
     compound::Stage, metals::{
         attention::stages::{KvTileConfig, KvTileLayoutStage}, flashattention::{
             stages::{FlashDecodeStage, SdpaParams}, step::RopeFlashDecodeStep, variants::select_flash_decode_variant_m2m3
         }
-    }, policy::f16::PolicyF16
+    }
 };
 
 #[test]
 fn flashattention_includes_flash_decode_metal() {
     let stage = FlashDecodeStage::<64>::new(
         SdpaParams::default(),
-        select_flash_decode_variant_m2m3(64, 1024),
-        Arc::new(PolicyF16),
+        select_flash_decode_variant_m2m3(64, 1024)
     );
     let includes = stage.includes();
     assert!(
-        includes.iter().any(|p| *p == "flashattention/flash_decode.metal"),
+        includes.contains(&"flashattention/flash_decode.metal"),
         "expected flash decode include, got: {includes:?}"
     );
 }
@@ -36,8 +34,7 @@ fn flashattention_source_mentions_streaming_softmax() {
 fn sdpa_standalone_stage_uses_expected_sdpa_params_buffer_slot() {
     let stage = FlashDecodeStage::<64>::new(
         SdpaParams::default(),
-        select_flash_decode_variant_m2m3(64, 1024),
-        Arc::new(PolicyF16),
+        select_flash_decode_variant_m2m3(64, 1024)
     );
     let args = stage.buffer_args();
     assert_eq!(args.len(), 1);

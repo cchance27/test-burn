@@ -1,15 +1,9 @@
 use std::time::Instant;
 
 use half::f16;
-use metallic_context::{
-    Context, QuantizedQ8_0Tensor, kernels::matmul_mlx::MatMulMlxOp, tensor::{
-        F16 as LegacyF16, QuantizedTensor as LegacyQuantizedTensor, Tensor as LegacyTensor, TensorInit as LegacyInit, TensorStorage as LegacyStorage, TensorType
-    }
-};
 use metallic_foundry::{
     Foundry, metals::gemm::GemmV2Step, policy::activation::Activation, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F16}, types::TensorArg
 };
-use objc2_metal::MTLCommandBuffer as _;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestQuantization {
@@ -27,7 +21,7 @@ struct BenchmarkConfig {
     iterations: usize,
 }
 
-fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<LegacyF16>, cfg: BenchmarkConfig) {
+fn run_gemm_benchmark_case(foundry: &mut Foundry, cfg: BenchmarkConfig) {
     let mode_str = match cfg.quant_b {
         TestQuantization::F16 => "F16",
         TestQuantization::Q8 => "Q8",
@@ -136,7 +130,7 @@ fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<LegacyF16>, 
     }
     let cpu_time = start_v2.elapsed();
     let buf = foundry.end_capture().unwrap();
-    buf.waitUntilCompleted();
+    buf.wait_until_completed();
     let total_time = start_v2.elapsed();
 
     let v2_micros = total_time.as_micros() as f64 / cfg.iterations as f64;
@@ -147,134 +141,11 @@ fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<LegacyF16>, 
         "  -> V2:  {:>8.2} us (Overhead: {:>8.2} us) | {:>6.2} TFLOPS",
         v2_micros, cpu_micros, v2_tflops
     );
-
-    // 4. MLX Comparison
-    let mut mlx_micros = 0.0;
-
-    // LegacyTensor uses dedicated storage on F16 ctx for F16 tensors
-    let a_leg = LegacyTensor::<LegacyF16>::new(vec![a_rows, a_cols], LegacyStorage::Dedicated(ctx), LegacyInit::CopyFrom(&a_data)).unwrap();
-
-    let run_mlx_f16 = |c: &mut Context<LegacyF16>, b_leg: &LegacyTensor<LegacyF16>| -> Result<(), metallic_foundry::MetalError> {
-        c.call::<MatMulMlxOp>(
-            (
-                &a_leg,
-                TensorType::Dense(b_leg),
-                None,
-                None,
-                cfg.transpose_a,
-                cfg.transpose_b,
-                1.0,
-                0.0,
-            ),
-            None,
-        )
-        .map_err(|e| metallic_foundry::MetalError::OperationFailed(format!("Context Error: {:?}", e)))?;
-        Ok(())
-    };
-
-    let run_mlx_q8 = |c: &mut Context<LegacyF16>, b_quant: &QuantizedQ8_0Tensor| -> Result<(), metallic_foundry::MetalError> {
-        c.call::<MatMulMlxOp>(
-            (
-                &a_leg,
-                TensorType::Quant(LegacyQuantizedTensor::Q8_0(b_quant)),
-                None,
-                None,
-                cfg.transpose_a,
-                cfg.transpose_b,
-                1.0,
-                0.0,
-            ),
-            None,
-        )
-        .map_err(|e| metallic_foundry::MetalError::OperationFailed(format!("Context Error: {:?}", e)))?;
-        Ok(())
-    };
-
-    if cfg.quant_b == TestQuantization::F16 {
-        let b_leg =
-            LegacyTensor::<LegacyF16>::new(vec![b_rows, b_cols], LegacyStorage::Dedicated(ctx), LegacyInit::CopyFrom(&b_data)).unwrap();
-
-        let mut skipped = false;
-        for _ in 0..50 {
-            if run_mlx_f16(ctx, &b_leg).is_err() {
-                skipped = true;
-                break;
-            }
-        }
-
-        if skipped {
-            println!("  -> MLX: Skipped (Not Supported)");
-        } else {
-            ctx.synchronize();
-            let start_mlx = Instant::now();
-            for _ in 0..cfg.iterations {
-                let _ = run_mlx_f16(ctx, &b_leg);
-            }
-            ctx.synchronize();
-            mlx_micros = start_mlx.elapsed().as_micros() as f64 / cfg.iterations as f64;
-            let mlx_tflops = (2.0 * cfg.m as f64 * cfg.n as f64 * cfg.k as f64) / (mlx_micros * 1e6);
-            println!("  -> MLX: {:>8.2} us | {:>6.2} TFLOPS (Legacy)", mlx_micros, mlx_tflops);
-        }
-    } else {
-        // Q8 Setup for MLX
-        let ctx_u8 = metallic_context::Context::<metallic_context::tensor::U8>::new().unwrap();
-
-        let blocks_per_k = cfg.k.div_ceil(32);
-        let bw = LegacyTensor::<metallic_context::tensor::U8>::new(
-            vec![cfg.n, blocks_per_k * 32],
-            LegacyStorage::Dedicated(&ctx_u8),
-            LegacyInit::Uninitialized,
-        )
-        .unwrap();
-        let bs = LegacyTensor::<metallic_context::tensor::U8>::new(
-            vec![cfg.n, blocks_per_k * 2],
-            LegacyStorage::Dedicated(&ctx_u8),
-            LegacyInit::Uninitialized,
-        )
-        .unwrap();
-
-        // MLX usually needs logical dims to match the semantic shape of B (N, K)
-        let logical_dims = if cfg.transpose_b { vec![cfg.n, cfg.k] } else { vec![cfg.k, cfg.n] };
-
-        let q8_tensor = QuantizedQ8_0Tensor {
-            data: bw,
-            scales: bs,
-            logical_dims,
-            blocks_per_k,
-        };
-
-        let mut skipped = false;
-        // Try once to see if supported
-        if run_mlx_q8(ctx, &q8_tensor).is_err() {
-            skipped = true;
-        } else {
-            // Warmup
-            for _ in 0..50 {
-                let _ = run_mlx_q8(ctx, &q8_tensor);
-            }
-            ctx.synchronize();
-
-            let start_mlx = Instant::now();
-            for _ in 0..cfg.iterations {
-                let _ = run_mlx_q8(ctx, &q8_tensor);
-            }
-            ctx.synchronize();
-            mlx_micros = start_mlx.elapsed().as_micros() as f64 / cfg.iterations as f64;
-        }
-
-        if skipped {
-            println!("  -> MLX: Skipped (Not Supported)");
-        } else {
-            let mlx_tflops = (2.0 * cfg.m as f64 * cfg.n as f64 * cfg.k as f64) / (mlx_micros * 1e6);
-            println!("  -> MLX: {:>8.2} us | {:>6.2} TFLOPS (Legacy)", mlx_micros, mlx_tflops);
-        }
-    }
 }
 
 #[test]
 fn benchmark_qwen25_shapes() {
     let mut foundry = Foundry::new().unwrap();
-    let mut ctx = Context::<LegacyF16>::new().unwrap();
     let iterations = 1000;
     const RUN_Q8: bool = false;
 
@@ -290,7 +161,6 @@ fn benchmark_qwen25_shapes() {
         // MLP Up
         run_gemm_benchmark_case(
             &mut foundry,
-            &mut ctx,
             BenchmarkConfig {
                 m,
                 n: intermediate,
@@ -304,7 +174,6 @@ fn benchmark_qwen25_shapes() {
         if RUN_Q8 {
             run_gemm_benchmark_case(
                 &mut foundry,
-                &mut ctx,
                 BenchmarkConfig {
                     m,
                     n: intermediate,
@@ -320,7 +189,6 @@ fn benchmark_qwen25_shapes() {
         // MLP Down
         run_gemm_benchmark_case(
             &mut foundry,
-            &mut ctx,
             BenchmarkConfig {
                 m,
                 n: hidden,
@@ -334,7 +202,6 @@ fn benchmark_qwen25_shapes() {
         if RUN_Q8 {
             run_gemm_benchmark_case(
                 &mut foundry,
-                &mut ctx,
                 BenchmarkConfig {
                     m,
                     n: hidden,
@@ -350,7 +217,6 @@ fn benchmark_qwen25_shapes() {
         // LM Head
         run_gemm_benchmark_case(
             &mut foundry,
-            &mut ctx,
             BenchmarkConfig {
                 m,
                 n: vocab_subset,
@@ -364,7 +230,6 @@ fn benchmark_qwen25_shapes() {
         if RUN_Q8 {
             run_gemm_benchmark_case(
                 &mut foundry,
-                &mut ctx,
                 BenchmarkConfig {
                     m,
                     n: vocab_subset,
@@ -376,17 +241,15 @@ fn benchmark_qwen25_shapes() {
                 },
             );
 
-            // Extra Q8 benchmarks with transpose_b = false for MLX comparison
-            // (Pre-transposed weights scenario)
+            // Extra Q8 benchmarks with transpose_b = false
             run_gemm_benchmark_case(
                 &mut foundry,
-                &mut ctx,
                 BenchmarkConfig {
                     m,
                     n: vocab_subset,
                     k: hidden,
                     transpose_a: false,
-                    transpose_b: false, // Explicitly false for comparison
+                    transpose_b: false, 
                     quant_b: TestQuantization::Q8,
                     iterations,
                 },

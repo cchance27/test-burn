@@ -29,6 +29,7 @@ pub struct AsyncMetricRecorder {
 
 impl AsyncMetricRecorder {
     /// Create a new async metric recorder with the given exporters.
+    #[must_use] 
     pub fn new(exporters: Vec<Box<dyn MetricExporter>>) -> Self {
         let (sender, receiver) = mpsc::channel();
         let channel_exporter = Box::new(ChannelExporter::new(sender));

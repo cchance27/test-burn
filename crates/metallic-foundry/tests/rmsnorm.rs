@@ -1,11 +1,8 @@
 //! Comprehensive RMSNorm Test Suite
 //!
-//! Tests RMSNorm kernel against legacy Context-based implementation and CPU reference.
+//! Tests RMSNorm kernel against CPU reference.
 
 use half::f16;
-use metallic_context::{
-    Context, F16Element, kernels::rmsnorm::RMSNormOp, tensor::{F16 as LegacyF16, Tensor as LegacyTensor, TensorInit as LegacyInit, TensorStorage as LegacyStorage}
-};
 use metallic_foundry::{
     Foundry, metals::rmsnorm::{RmsNormParamsResolved, step::run_rmsnorm}, storage::Pooled, tensor::{F16 as FoundryF16, Q8_0, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
@@ -13,7 +10,6 @@ use rand::{Rng, rng};
 use serial_test::serial;
 
 const CPU_TOLERANCE: f32 = 0.02; // f16 precision loss expected
-const PARITY_TOLERANCE: f32 = 0.005; // Parallel reduction order differs from legacy serial
 const EPS: f32 = 1e-6;
 
 // ============================================================================
@@ -59,10 +55,9 @@ fn cpu_rmsnorm(input: &[f32], feature_dim: usize, gamma: &[f32]) -> Vec<f32> {
     output
 }
 
-/// Run RMSNorm test comparing new Foundry kernel to legacy Context kernel
+/// Run RMSNorm test comparing new Foundry kernel to CPU reference
 fn run_f16_parity_test(cfg: TestConfig) {
     let mut foundry = Foundry::new().unwrap();
-    let mut ctx = Context::<F16Element>::new().unwrap();
     let mut rng = rng();
 
     let total_elements = cfg.feature_dim * cfg.num_rows;
@@ -73,26 +68,6 @@ fn run_f16_parity_test(cfg: TestConfig) {
 
     let input_f16: Vec<f16> = input_data.iter().map(|&x| f16::from_f32(x)).collect();
     let gamma_f16: Vec<f16> = gamma_data.iter().map(|&x| f16::from_f32(x)).collect();
-
-    // Legacy RMSNorm
-    let input_legacy = LegacyTensor::<LegacyF16>::new(
-        vec![cfg.num_rows, cfg.feature_dim],
-        LegacyStorage::Pooled(&mut ctx),
-        LegacyInit::CopyFrom(&input_f16),
-    )
-    .unwrap();
-
-    let gamma_legacy = LegacyTensor::<LegacyF16>::new(
-        vec![cfg.feature_dim],
-        LegacyStorage::Pooled(&mut ctx),
-        LegacyInit::CopyFrom(&gamma_f16),
-    )
-    .unwrap();
-
-    let output_legacy = ctx
-        .call::<RMSNormOp>((input_legacy.clone(), gamma_legacy, cfg.feature_dim as u32), None)
-        .unwrap();
-    let legacy_result = output_legacy.to_vec();
 
     // CPU Reference
     let cpu_expected = cpu_rmsnorm(&input_data, cfg.feature_dim, &gamma_data);
@@ -121,27 +96,16 @@ fn run_f16_parity_test(cfg: TestConfig) {
     let gpu_f32: Vec<f32> = gpu_output.iter().map(|x| x.to_f32()).collect();
 
     // Compare results
-    let mut max_diff_legacy: f32 = 0.0;
     let mut max_diff_cpu: f32 = 0.0;
     for i in 0..total_elements {
-        max_diff_legacy = max_diff_legacy.max((legacy_result[i].to_f32() - gpu_f32[i]).abs());
         max_diff_cpu = max_diff_cpu.max((cpu_expected[i] - gpu_f32[i]).abs());
     }
 
     println!("\n[RMSNorm {}x{}]", cfg.num_rows, cfg.feature_dim);
     println!("  First 5 from new:    {:?}", &gpu_f32[0..5.min(total_elements)]);
-    println!(
-        "  First 5 from legacy: {:?}",
-        &legacy_result[0..5.min(total_elements)]
-            .iter()
-            .map(|x| x.to_f32())
-            .collect::<Vec<_>>()
-    );
     println!("  First 5 from CPU:    {:?}", &cpu_expected[0..5.min(total_elements)]);
-    println!("  Legacy vs New max diff: {:.6}", max_diff_legacy);
     println!("  CPU vs New max diff:    {:.6}", max_diff_cpu);
 
-    assert!(max_diff_legacy < PARITY_TOLERANCE, "Legacy vs New mismatch: {:.7}", max_diff_legacy);
     assert!(max_diff_cpu < CPU_TOLERANCE, "New vs CPU mismatch: {:.7}", max_diff_cpu);
 }
 

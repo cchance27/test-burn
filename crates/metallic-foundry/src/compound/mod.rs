@@ -2,7 +2,7 @@
 //! Enables composing Metal helper functions into fused kernels.
 //!
 //! # Example
-//! ```ignore
+//! ```text
 //! use metallic::compound::{CompoundKernel, GemvCoreStage, PolicyStage};
 //! use metallic::policies::PolicyQ8;
 //!

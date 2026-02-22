@@ -70,7 +70,7 @@ impl MetadataConstraint {
                     return false;
                 }
                 if let Some(needle) = pattern.contains.as_ref()
-                    && !values.iter().any(|v| v.contains(needle))
+                    && !values.iter().any(|v| v.to_lowercase().contains(&needle.to_lowercase()))
                 {
                     return false;
                 }

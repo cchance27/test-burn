@@ -6,6 +6,8 @@ use gpui::{App, ElementId, SharedString, Window, div, prelude::*, px};
 
 use crate::theme::{colors, radius, spacing, typography};
 
+type ClickHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+
 /// Button visual style variants.
 #[derive(Clone, Copy, Default, PartialEq)]
 pub enum ButtonVariant {
@@ -39,7 +41,7 @@ pub struct Button {
     variant: ButtonVariant,
     size: ButtonSize,
     disabled: bool,
-    on_click: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_click: Option<ClickHandler>,
 }
 
 impl Button {
@@ -159,7 +161,7 @@ pub struct IconButton {
     icon: String,
     variant: ButtonVariant,
     size: f32,
-    on_click: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_click: Option<ClickHandler>,
 }
 
 impl IconButton {

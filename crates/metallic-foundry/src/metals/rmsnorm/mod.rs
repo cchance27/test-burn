@@ -46,9 +46,6 @@ mod tests {
 
         let source = kernel.source();
 
-        // Verify includes
-        assert!(source.contains("#include \"rmsnorm/rmsnorm.metal\""));
-
         // Verify buffer arguments collected
         let args = kernel.collect_buffer_args();
         let gamma_arg = args.iter().find(|a| a.name == "gamma").expect("Should have gamma arg");

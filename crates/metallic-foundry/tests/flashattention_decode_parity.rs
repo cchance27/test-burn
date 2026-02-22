@@ -15,7 +15,7 @@ fn max_abs_diff(a: &[f16], b: &[f16]) -> f32 {
 fn lcg_next_f32(state: &mut u32) -> f32 {
     // Deterministic PRNG (LCG). Good enough for tests; avoids adding a rand dependency.
     *state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-    let mantissa = (*state >> 9) as u32; // 23 bits
+    let mantissa = *state >> 9; // 23 bits
     (mantissa as f32) * (1.0 / ((1u32 << 23) as f32))
 }
 

@@ -47,19 +47,19 @@ fn validate_metal_template(template: &str, span: Span) -> syn::Result<()> {
         if brace_balance < 0 {
             return Err(syn::Error::new(
                 span,
-                format!("Unbalanced closing brace '}}' in Metal template (char {})", i),
+                format!("Unbalanced closing brace '}}' in Metal template (char {i})"),
             ));
         }
         if paren_balance < 0 {
             return Err(syn::Error::new(
                 span,
-                format!("Unbalanced closing parenthesis ')' in Metal template (char {})", i),
+                format!("Unbalanced closing parenthesis ')' in Metal template (char {i})"),
             ));
         }
         if bracket_balance < 0 {
             return Err(syn::Error::new(
                 span,
-                format!("Unbalanced closing bracket ']' in Metal template (char {})", i),
+                format!("Unbalanced closing bracket ']' in Metal template (char {i})"),
             ));
         }
     }
@@ -102,7 +102,7 @@ fn template_placeholder_names(template: &str) -> Vec<String> {
                 let inner = &template[i + 1..j];
                 if !inner.is_empty()
                     && inner.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
-                    && inner.chars().next().map(|c| c == '_' || c.is_ascii_alphabetic()).unwrap_or(false)
+                    && inner.chars().next().is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
                 {
                     out.push(inner.to_string());
                 }
@@ -169,8 +169,7 @@ fn foundry_crate() -> proc_macro2::TokenStream {
     // Or ::metallic::foundry?
     // Let's error out to be safe, or default to crate if we think we might be in it (covered by step 1).
     let msg = format!(
-        "Failed to resolve 'metallic-foundry' crate path. CARGO_PKG_NAME={}. Please ensure metallic-foundry is a dependency.",
-        pkg
+        "Failed to resolve 'metallic-foundry' crate path. CARGO_PKG_NAME={pkg}. Please ensure metallic-foundry is a dependency."
     );
     quote::quote! { compile_error!(#msg); }
 }
@@ -217,7 +216,7 @@ fn get_path_ident(ty: &syn::Type) -> Option<Ident> {
 }
 
 fn is_type_match(ty: &syn::Type, name: &str) -> bool {
-    get_path_ident(ty).map(|ident| ident == name).unwrap_or(false)
+    get_path_ident(ty).is_some_and(|ident| ident == name)
 }
 
 fn extract_inner_generic(ty: &syn::Type) -> Option<syn::Type> {
@@ -265,8 +264,8 @@ fn extract_option_inner(ty: &syn::Type) -> Option<syn::Type> {
     None
 }
 
-/// Extract the inner type T from DynamicValue<T> pattern.
-/// Returns None if not a DynamicValue.
+/// Extract the inner type T from `DynamicValue`<T> pattern.
+/// Returns None if not a `DynamicValue`.
 fn extract_dynamic_value_inner(ty: &syn::Type) -> Option<syn::Type> {
     if is_type_match(ty, "DynamicValue") {
         return extract_inner_generic(ty);
@@ -352,7 +351,7 @@ fn infer_metal_type(ty: &syn::Type, is_buffer: bool, is_output: bool) -> String 
     // Structs with PascalCase names (likely have METAL_STRUCT_DEF) → const constant Struct*
     if !ident.is_empty() && ident.chars().next().unwrap().is_uppercase() {
         // It's a struct type - assume it has METAL_STRUCT_DEF
-        return format!("const constant {}*", ident);
+        return format!("const constant {ident}*");
     }
 
     // Fallback for buffer types
@@ -397,7 +396,7 @@ fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenSt
             for attr in &f.attrs {
                 if attr.path().is_ident("arg") {
                     if let Ok(nested) = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated) {
-                        for meta in nested.iter() {
+                        for meta in &nested {
                             match meta {
                                 Meta::NameValue(nv) => {
                                     if nv.path.is_ident("buffer") {
@@ -488,7 +487,7 @@ fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenSt
                 for attr in &f.attrs {
                     if attr.path().is_ident("arg") {
                         if let Ok(nested) = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated) {
-                            for meta in nested.iter() {
+                            for meta in &nested {
                                 if let Meta::Path(path) = meta {
                                     if path.is_ident("meta") {
                                         is_meta = true;
@@ -501,7 +500,7 @@ fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenSt
 
                 // Collect arg info for signature generation
                 arg_infos.push(ArgInfo {
-                    name: name.as_ref().map(|i| i.to_string()).unwrap_or_default(),
+                    name: name.as_ref().map(std::string::ToString::to_string).unwrap_or_default(),
                     name_ident: name.clone(),
                     buffer_index: idx,
                     metal_type: metal_type.clone(),
@@ -634,7 +633,7 @@ pub fn derive_metal_struct(input: TokenStream) -> TokenStream {
 
                 if !skip {
                     let metal_type = rust_type_to_metal(field_type);
-                    metal_fields.push(format!("    {} {};", metal_type, metal_field_name));
+                    metal_fields.push(format!("    {metal_type} {metal_field_name};"));
                 }
             }
         }
@@ -671,10 +670,10 @@ pub fn derive_metal_struct(input: TokenStream) -> TokenStream {
 
     let resolvable_impl = if has_dynamic_fields {
         // Create a resolved params type name
-        let resolved_name = syn::Ident::new(&format!("{}Resolved", name), name.span());
+        let resolved_name = syn::Ident::new(&format!("{name}Resolved"), name.span());
 
         // Metal struct name for the resolved type (includes Resolved suffix)
-        let resolved_metal_struct_name = format!("{}Resolved", metal_struct_name);
+        let resolved_metal_struct_name = format!("{metal_struct_name}Resolved");
 
         // Collect field definitions for the resolved struct
         let mut resolved_field_defs = Vec::new();
@@ -701,7 +700,7 @@ pub fn derive_metal_struct(input: TokenStream) -> TokenStream {
 
                         // Metal field uses inner type
                         let inner_metal_type = rust_type_to_metal(&inner_type);
-                        resolved_metal_fields.push(format!("    {} {};", inner_metal_type, field_name));
+                        resolved_metal_fields.push(format!("    {inner_metal_type} {field_name};"));
                     } else {
                         // Non-dynamic field - same type in resolved struct, clone value
                         resolved_field_defs.push(quote! {
@@ -714,7 +713,7 @@ pub fn derive_metal_struct(input: TokenStream) -> TokenStream {
 
                         // Use same Metal type
                         let metal_type = rust_type_to_metal(field_type);
-                        resolved_metal_fields.push(format!("    {} {};", metal_type, field_name));
+                        resolved_metal_fields.push(format!("    {metal_type} {field_name};"));
                     }
                 }
             }
@@ -777,7 +776,7 @@ pub fn derive_metal_struct(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Derive macro to generate MetalPolicy trait implementation from struct annotations.
+/// Derive macro to generate `MetalPolicy` trait implementation from struct annotations.
 ///
 /// # Example
 /// ```ignore
@@ -796,9 +795,9 @@ pub fn derive_metal_struct(input: TokenStream) -> TokenStream {
 /// ```
 ///
 /// Generates:
-/// - `header()` → "policies/policy_q8.metal"
-/// - `struct_name()` → "PolicyQ8"
-/// - `init_params_code()` → "pp.matrix = matrix; pp.scales = scale_bytes; pp.weights_per_block = params->weights_per_block;"
+/// - `header()` → "`policies/policy_q8.metal`"
+/// - `struct_name()` → "`PolicyQ8`"
+/// - `init_params_code()` → "pp.matrix = matrix; pp.scales = `scale_bytes`; `pp.weights_per_block` = params->weights_per_block;"
 #[proc_macro_derive(MetalPolicy, attributes(policy, param))]
 pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -917,7 +916,7 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
                                                 let source = lit.value();
                                                 // Convert "params.field" to "params->field"
                                                 let source_code = if source.contains('.') { source.replace('.', "->") } else { source };
-                                                init_statements.push(format!("pp.{} = {};", field_name, source_code));
+                                                init_statements.push(format!("pp.{field_name} = {source_code};"));
                                             }
                                         }
                                     }
@@ -1338,6 +1337,9 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
     let mut has_dispatch = true; // Default to true
     let mut dispatch_preset: Option<String> = None;
     let mut dtype_str: Option<String> = None;
+    let mut struct_defs_fn: Option<String> = None;
+    let mut struct_defs_method: Option<String> = None;
+    let mut include_exprs: Vec<Expr> = Vec::new();
 
     let mut errors = Vec::new();
 
@@ -1455,6 +1457,31 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                                 if let Some(v) = get_val(&nv.value) {
                                     dtype_str = Some(v);
                                 }
+                            } else if ident == "struct_defs_fn" {
+                                if let Some(v) = get_val(&nv.value) {
+                                    struct_defs_fn = Some(v);
+                                }
+                            } else if ident == "struct_defs_method" {
+                                if let Some(v) = get_val(&nv.value) {
+                                    struct_defs_method = Some(v);
+                                }
+                            }
+                        }
+                        Meta::List(list) if list.path.is_ident("include_exprs") => {
+                            let vals = match list.parse_args_with(Punctuated::<Lit, Token![,]>::parse_terminated) {
+                                Ok(v) => v,
+                                Err(e) => return TokenStream::from(e.to_compile_error()),
+                            };
+                            for lit in vals {
+                                let Lit::Str(s) = lit else {
+                                    return TokenStream::from(
+                                        syn::Error::new(lit.span(), "include_exprs(...) expects string literals").to_compile_error(),
+                                    );
+                                };
+                                match syn::parse_str::<Expr>(&s.value()) {
+                                    Ok(expr) => include_exprs.push(expr),
+                                    Err(e) => return TokenStream::from(e.to_compile_error()),
+                                }
                             }
                         }
                         Meta::List(_) => {}
@@ -1466,7 +1493,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
     }
 
     if !errors.is_empty() {
-        let errs = errors.iter().map(|e| e.to_compile_error());
+        let errs = errors.iter().map(syn::Error::to_compile_error);
         return TokenStream::from(quote! { #(#errs)* });
     }
 
@@ -1479,6 +1506,22 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
         quote! { Some(#root::tensor::Dtype::#ident) }
     } else {
         quote! { None }
+    };
+
+    let struct_defs_impl = if let Some(method_name) = struct_defs_method {
+        let method_ident = Ident::new(&method_name, Span::call_site());
+        quote::quote! {
+            self.#method_ident()
+        }
+    } else if let Some(fn_name) = struct_defs_fn {
+        let fn_ident = Ident::new(&fn_name, Span::call_site());
+        quote::quote! {
+            Self::#fn_ident()
+        }
+    } else {
+        quote::quote! {
+            <#args_type>::METAL_STRUCT_DEF.to_string()
+        }
     };
 
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
@@ -1748,12 +1791,12 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                 }
             } else {
                 return TokenStream::from(
-                    syn::Error::new(Span::call_site(), format!("Invalid vec_N preset: {}", preset)).to_compile_error(),
+                    syn::Error::new(Span::call_site(), format!("Invalid vec_N preset: {preset}")).to_compile_error(),
                 );
             }
         } else {
             return TokenStream::from(
-                syn::Error::new(Span::call_site(), format!("Unknown dispatch preset: {}", preset)).to_compile_error(),
+                syn::Error::new(Span::call_site(), format!("Unknown dispatch preset: {preset}")).to_compile_error(),
             );
         }
     } else if has_dispatch {
@@ -1780,7 +1823,9 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             }
 
             fn includes(&self) -> #root::Includes {
-                #root::Includes(vec![#(#includes),*])
+                let mut includes = vec![#(#includes),*];
+                #(includes.push(#include_exprs);)*
+                #root::Includes(includes)
             }
 
             fn dtype(&self) -> Option<#root::tensor::Dtype> {
@@ -1804,8 +1849,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             }
 
             fn struct_defs(&self) -> String {
-                // Return METAL_STRUCT_DEF from the Args type if it has one
-                <#args_type>::METAL_STRUCT_DEF.to_string()
+                #struct_defs_impl
             }
 
             #to_stage_impl
@@ -2240,13 +2284,13 @@ pub fn derive_conditional_kernel(input: TokenStream) -> TokenStream {
     conditional::derive_conditional_kernel_impl(input).into()
 }
 
-/// Derive macro for auto-generating CompiledStep boilerplate.
+/// Derive macro for auto-generating `CompiledStep` boilerplate.
 ///
 /// Use this on Step structs that manually implement `Step` trait.
 /// It generates:
 /// 1. A `Compiled{Step}` struct with Ref fields converted to `usize` indices
 /// 2. `Step::compile()` implementation that maps Ref names to symbol indices
-/// 3. `CompiledStep::execute()` implementation that fetches tensors from FastBindings
+/// 3. `CompiledStep::execute()` implementation that fetches tensors from `FastBindings`
 ///
 /// # Required Attributes
 /// - `#[compiled_step(kernel = "KernelType")]` - The kernel type to construct and run
@@ -2356,7 +2400,7 @@ pub fn derive_compiled_step(input: TokenStream) -> TokenStream {
         .iter()
         .map(|(fname, _)| {
             let idx_name = quote::format_ident!("{}_idx", fname);
-            let err_msg = format!("{} tensor not found at idx {{}}", fname);
+            let err_msg = format!("{fname} tensor not found at idx {{}}");
             quote! {
                 let #fname = fast_bindings
                     .get(self.#idx_name)
@@ -2654,7 +2698,7 @@ pub fn derive_stage(input: TokenStream) -> TokenStream {
             return TokenStream::from(
                 syn::Error::new(
                     emit_span,
-                    format!("unknown template placeholder `{{{}}}` in stage emit template", placeholder),
+                    format!("unknown template placeholder `{{{placeholder}}}` in stage emit template"),
                 )
                 .to_compile_error(),
             );
@@ -2757,7 +2801,7 @@ pub fn derive_stage(input: TokenStream) -> TokenStream {
 
     let binding_replacements = template_bindings.iter().map(|(name, expr)| {
         let var = quote::format_ident!("__stage_bind_{}", name);
-        let key = format!("{{{}}}", name);
+        let key = format!("{{{name}}}");
         quote::quote! {
             let #var = ::std::string::ToString::to_string(&(#expr));
             code = code.replace(#key, &#var);

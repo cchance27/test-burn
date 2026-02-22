@@ -84,4 +84,3 @@ metallic-sdk = { path = "../metallic-sdk" }
 
 [dev-dependencies]
 serial_test = "3.2.0"
-metallic-context = { path = "../metallic-context" }

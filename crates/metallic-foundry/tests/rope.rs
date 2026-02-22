@@ -1,11 +1,8 @@
 //! Comprehensive RoPE Test Suite for Foundry.
 //!
-//! Tests the RoPE kernel against legacy implementation and CPU reference.
+//! Tests the RoPE kernel against CPU reference.
 
 use half::f16;
-use metallic_context::{
-    Context, F16Element, kernels::rope::RoPEOp, tensor::{F16 as LegacyF16, Tensor as LegacyTensor, TensorInit as LegacyInit, TensorStorage as LegacyStorage}
-};
 use metallic_foundry::{
     Foundry, metals::rope::{Rope, RopeParamsResolved}, storage::Pooled, tensor::{F16 as FoundryF16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
@@ -70,7 +67,6 @@ fn cpu_rope(input: &[f16], cos: &[f16], sin: &[f16], dim: usize, seq_len: usize,
 // ============================================================================
 
 fn run_parity_test(cfg: TestConfig) {
-    let mut ctx = Context::<F16Element>::new().unwrap();
     let mut foundry = Foundry::new().unwrap();
     let mut rng = rng();
 
@@ -98,43 +94,6 @@ fn run_parity_test(cfg: TestConfig) {
             f16::from_f32(angle.sin())
         })
         .collect();
-
-    // =========================================================================
-    // Legacy Kernel
-    // =========================================================================
-    let input_legacy = LegacyTensor::<LegacyF16>::new(
-        vec![cfg.num_rows, cfg.dim],
-        LegacyStorage::Pooled(&mut ctx),
-        LegacyInit::CopyFrom(&input_data),
-    )
-    .unwrap();
-    let cos_legacy = LegacyTensor::<LegacyF16>::new(
-        vec![max_seq, half_dim],
-        LegacyStorage::Pooled(&mut ctx),
-        LegacyInit::CopyFrom(&cos_data),
-    )
-    .unwrap();
-    let sin_legacy = LegacyTensor::<LegacyF16>::new(
-        vec![max_seq, half_dim],
-        LegacyStorage::Pooled(&mut ctx),
-        LegacyInit::CopyFrom(&sin_data),
-    )
-    .unwrap();
-
-    let out_legacy = ctx
-        .call::<RoPEOp>(
-            (
-                input_legacy,
-                cos_legacy,
-                sin_legacy,
-                cfg.dim as u32,
-                cfg.seq_len as u32,
-                cfg.position_offset,
-            ),
-            None,
-        )
-        .unwrap();
-    let legacy_result = out_legacy.to_vec();
 
     // =========================================================================
     // Foundry Kernel
@@ -179,11 +138,9 @@ fn run_parity_test(cfg: TestConfig) {
     // =========================================================================
     // Comparison
     // =========================================================================
-    let mut legacy_vs_foundry: f32 = 0.0;
     let mut cpu_vs_foundry: f32 = 0.0;
 
     for i in 0..total_elements {
-        legacy_vs_foundry = legacy_vs_foundry.max((legacy_result[i].to_f32() - foundry_result[i].to_f32()).abs());
         cpu_vs_foundry = cpu_vs_foundry.max((cpu_result[i].to_f32() - foundry_result[i].to_f32()).abs());
     }
 
@@ -191,10 +148,8 @@ fn run_parity_test(cfg: TestConfig) {
         "\n[RoPE dim={} seq={} rows={} offset={}]",
         cfg.dim, cfg.seq_len, cfg.num_rows, cfg.position_offset
     );
-    println!("  Legacy vs Foundry max diff: {:.6}", legacy_vs_foundry);
     println!("  CPU vs Foundry max diff:    {:.6}", cpu_vs_foundry);
 
-    assert!(legacy_vs_foundry <= TOLERANCE, "Legacy vs Foundry mismatch: {}", legacy_vs_foundry);
     assert!(cpu_vs_foundry <= TOLERANCE, "CPU vs Foundry mismatch: {}", cpu_vs_foundry);
 }
 

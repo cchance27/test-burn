@@ -35,10 +35,6 @@ pub struct CliConfig {
     #[arg(long, value_enum, value_name = "BACKEND")]
     pub sdpa_backend: Option<SdpaBackendChoice>,
 
-    /// Inference engine to use (context or foundry)
-    #[arg(long, value_enum, default_value_t = Engine::Context)]
-    pub engine: Engine,
-
     /// Optional workflow JSON file path (Foundry engine only). If provided, may include model resources for multi-model workflows.
     #[arg(long, value_name = "WORKFLOW_JSON")]
     pub workflow: Option<String>,
@@ -141,15 +137,6 @@ pub enum SdpaBackendChoice {
     Graph,
 }
 
-/// Inference engine backend choice.
-#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
-pub enum Engine {
-    /// Use the legacy Context<T> implementation
-    Context,
-    /// Use the new Foundry (DSL) implementation
-    Foundry,
-}
-
 impl CliConfig {
     /// Get all prompts, using a single default prompt if none were provided.
     pub fn get_prompts(&self) -> Vec<String> {
@@ -231,7 +218,6 @@ mod tests {
             verbose: 0,
             output_format: OutputFormat::Tui,
             sdpa_backend: None,
-            engine: Engine::Context,
             workflow: None,
             workflow_kwargs: Vec::new(),
             thinking: false,
@@ -251,7 +237,6 @@ mod tests {
             verbose: 0,
             output_format: OutputFormat::Tui,
             sdpa_backend: None,
-            engine: Engine::Context,
             workflow: None,
             workflow_kwargs: Vec::new(),
             thinking: false,
@@ -271,7 +256,6 @@ mod tests {
             verbose: 0,
             output_format: OutputFormat::Tui,
             sdpa_backend: None,
-            engine: Engine::Context,
             workflow: None,
             workflow_kwargs: Vec::new(),
             thinking: false,
@@ -291,7 +275,6 @@ mod tests {
             verbose: 0,
             output_format: OutputFormat::Text,
             sdpa_backend: None,
-            engine: Engine::Foundry,
             workflow: None,
             workflow_kwargs: vec!["enable_thinking=0".to_string(), "tools=[]".to_string()],
             thinking: false,

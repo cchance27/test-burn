@@ -1,11 +1,6 @@
 //! Test suite for utility kernels: ElemwiseAdd, Arange, Ones, RandomUniform.
 
 use half::f16;
-use metallic_context::{
-    Context, F16Element, kernels::{
-        elemwise_add::BroadcastElemwiseAddInplaceOp, tensors::{ArangeOp, OnesOp, RandomUniformOp}
-    }, tensor::{F16 as LegacyF16, Tensor as LegacyTensor, TensorStorage as LegacyStorage}
-};
 use metallic_foundry::{
     Foundry, metals::{
         elemwise::ElemwiseAdd, tensor::{Arange, Ones, RandomUniform}
@@ -31,7 +26,6 @@ fn cpu_broadcast_add(a: &[f16], b: &[f16]) -> Vec<f16> {
 #[test]
 #[serial]
 fn test_elemwise_add_broadcast() {
-    let mut ctx = Context::<F16Element>::new().unwrap();
     let mut foundry = Foundry::new().unwrap();
     let mut rng = rng();
 
@@ -41,24 +35,6 @@ fn test_elemwise_add_broadcast() {
 
     let a_data: Vec<f16> = (0..total).map(|_| f16::from_f32(rng.random_range(-1.0..1.0))).collect();
     let b_data: Vec<f16> = (0..cols).map(|_| f16::from_f32(rng.random_range(-0.5..0.5))).collect();
-
-    // Legacy
-    let a_legacy = LegacyTensor::<LegacyF16>::new(
-        vec![rows, cols],
-        LegacyStorage::Pooled(&mut ctx),
-        metallic_context::TensorInit::CopyFrom(&a_data),
-    )
-    .unwrap();
-    let b_legacy = LegacyTensor::<LegacyF16>::new(
-        vec![cols],
-        LegacyStorage::Pooled(&mut ctx),
-        metallic_context::TensorInit::CopyFrom(&b_data),
-    )
-    .unwrap();
-    let _ = ctx
-        .call::<BroadcastElemwiseAddInplaceOp>((a_legacy.clone(), b_legacy), None)
-        .unwrap();
-    let legacy_result = a_legacy.to_vec();
 
     // Foundry
     let a_foundry = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![total], TensorInit::CopyFrom(&a_data)).unwrap();
@@ -74,18 +50,16 @@ fn test_elemwise_add_broadcast() {
     // CPU
     let cpu_result = cpu_broadcast_add(&a_data, &b_data);
 
-    let mut max_diff_legacy = 0.0f32;
     let mut max_diff_cpu = 0.0f32;
     for i in 0..total {
-        max_diff_legacy = max_diff_legacy.max((legacy_result[i].to_f32() - foundry_result[i].to_f32()).abs());
         max_diff_cpu = max_diff_cpu.max((cpu_result[i].to_f32() - foundry_result[i].to_f32()).abs());
     }
 
     println!(
-        "[ElemwiseAdd] Legacy vs Foundry: {:.6}, CPU vs Foundry: {:.6}",
-        max_diff_legacy, max_diff_cpu
+        "[ElemwiseAdd] CPU vs Foundry: {:.6}",
+        max_diff_cpu
     );
-    assert!(max_diff_legacy <= TOLERANCE && max_diff_cpu <= TOLERANCE);
+    assert!(max_diff_cpu <= TOLERANCE);
 }
 
 // ============================================================================
@@ -99,13 +73,9 @@ fn cpu_arange(length: usize) -> Vec<f16> {
 #[test]
 #[serial]
 fn test_arange() {
-    let mut ctx = Context::<F16Element>::new().unwrap();
     let mut foundry = Foundry::new().unwrap();
 
     let length = 128;
-
-    // Legacy
-    let legacy_result = ctx.call::<ArangeOp>(length, None).unwrap().to_vec();
 
     // Foundry
     let output = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![length], TensorInit::Uninitialized).unwrap();
@@ -117,18 +87,16 @@ fn test_arange() {
     // CPU
     let cpu_result = cpu_arange(length);
 
-    let mut max_diff_legacy = 0.0f32;
     let mut max_diff_cpu = 0.0f32;
     for i in 0..length {
-        max_diff_legacy = max_diff_legacy.max((legacy_result[i].to_f32() - foundry_result[i].to_f32()).abs());
         max_diff_cpu = max_diff_cpu.max((cpu_result[i].to_f32() - foundry_result[i].to_f32()).abs());
     }
 
     println!(
-        "[Arange] Legacy vs Foundry: {:.6}, CPU vs Foundry: {:.6}",
-        max_diff_legacy, max_diff_cpu
+        "[Arange] CPU vs Foundry: {:.6}",
+        max_diff_cpu
     );
-    assert!(max_diff_legacy <= TOLERANCE && max_diff_cpu <= TOLERANCE);
+    assert!(max_diff_cpu <= TOLERANCE);
 }
 
 // ============================================================================
@@ -142,13 +110,9 @@ fn cpu_ones(length: usize) -> Vec<f16> {
 #[test]
 #[serial]
 fn test_ones() {
-    let mut ctx = Context::<F16Element>::new().unwrap();
     let mut foundry = Foundry::new().unwrap();
 
     let length = 256;
-
-    // Legacy
-    let legacy_result = ctx.call::<OnesOp>(vec![length], None).unwrap().to_vec();
 
     // Foundry
     let output = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![length], TensorInit::Uninitialized).unwrap();
@@ -160,18 +124,16 @@ fn test_ones() {
     // CPU
     let cpu_result = cpu_ones(length);
 
-    let mut max_diff_legacy = 0.0f32;
     let mut max_diff_cpu = 0.0f32;
     for i in 0..length {
-        max_diff_legacy = max_diff_legacy.max((legacy_result[i].to_f32() - foundry_result[i].to_f32()).abs());
         max_diff_cpu = max_diff_cpu.max((cpu_result[i].to_f32() - foundry_result[i].to_f32()).abs());
     }
 
     println!(
-        "[Ones] Legacy vs Foundry: {:.6}, CPU vs Foundry: {:.6}",
-        max_diff_legacy, max_diff_cpu
+        "[Ones] CPU vs Foundry: {:.6}",
+        max_diff_cpu
     );
-    assert!(max_diff_legacy <= TOLERANCE && max_diff_cpu <= TOLERANCE);
+    assert!(max_diff_cpu <= TOLERANCE);
 }
 
 // ============================================================================
@@ -181,19 +143,12 @@ fn test_ones() {
 #[test]
 #[serial]
 fn test_random_uniform() {
-    let mut ctx = Context::<F16Element>::new().unwrap();
     let mut foundry = Foundry::new().unwrap();
 
     let length = 512;
     let min_val = 0.0f32;
     let max_val = 1.0f32;
     let seed = 42u32;
-
-    // Legacy
-    let legacy_result = ctx
-        .call::<RandomUniformOp>((vec![length], min_val, max_val, Some(seed)), None)
-        .unwrap()
-        .to_vec();
 
     // Foundry
     let output = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![length], TensorInit::Uninitialized).unwrap();
@@ -202,18 +157,14 @@ fn test_random_uniform() {
     foundry.run(&kernel).unwrap();
     let foundry_result = FoundryTensor::to_vec(&output, &foundry);
 
-    // Both should produce same values with same seed
-    let mut max_diff = 0.0f32;
-    for i in 0..length {
-        max_diff = max_diff.max((legacy_result[i].to_f32() - foundry_result[i].to_f32()).abs());
-        // Check range
+    // Check range
+    for i in foundry_result.iter().take(length) {
         assert!(
-            (min_val..=max_val).contains(&foundry_result[i].to_f32()),
+            (min_val..=max_val).contains(&i.to_f32()),
             "Value {} out of range",
-            foundry_result[i].to_f32()
+            i.to_f32()
         );
     }
 
-    println!("[RandomUniform] Legacy vs Foundry: {:.6}", max_diff);
-    assert!(max_diff <= TOLERANCE);
+    println!("[RandomUniform] Foundry values within range");
 }

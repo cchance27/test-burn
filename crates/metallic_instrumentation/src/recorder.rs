@@ -38,6 +38,7 @@ pub struct MetricsLayer {
 
 impl MetricsLayer {
     /// Construct a new metrics layer using the provided exporters.
+    #[must_use] 
     pub fn new(exporters: Vec<Box<dyn MetricExporter>>) -> Self {
         Self {
             exporters: Arc::new(exporters),
@@ -110,7 +111,7 @@ struct MetricVisitor {
 impl tracing::field::Visit for MetricVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "metric" {
-            let raw = format!("{:?}", value);
+            let raw = format!("{value:?}");
             // `tracing` records `%` formatted fields via the debug visitor, which
             // wraps string values in quotes. Attempt to recover the original JSON
             // payload by unescaping when possible so downstream deserialisation

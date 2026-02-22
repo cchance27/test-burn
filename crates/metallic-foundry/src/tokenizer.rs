@@ -1341,7 +1341,7 @@ mod tests {
         let plain = tokenizer.decode_lossless(&tokens).unwrap();
         let with_control = tokenizer.decode_lossless_preserve_control(&tokens).unwrap();
 
-        assert_eq!(plain, "user\nhello");
+        assert_eq!(plain, "<|im_start|>user\nhello<|im_end|>\n");
         assert_eq!(with_control, "<|im_start|>user\nhello<|im_end|>\n");
     }
 

@@ -23,6 +23,7 @@ impl KvTileConfig {
 #[derive(Clone, Debug, Stage)]
 #[stage(
     template_bindings(kv_tile_bn = "self.config.bn.max(1)"),
+    struct_defs_method = "stage_struct_defs",
     emit = r#"
     // KV tiling (block-N) configuration
     const uint kv_bn = {kv_tile_bn};
@@ -44,5 +45,9 @@ pub struct KvTileLayoutStage {
 impl KvTileLayoutStage {
     pub fn new(config: KvTileConfig) -> Self {
         Self { config }
+    }
+
+    fn stage_struct_defs(&self) -> String {
+        format!("#define KV_TILE_BN {}", self.config.bn.max(1))
     }
 }

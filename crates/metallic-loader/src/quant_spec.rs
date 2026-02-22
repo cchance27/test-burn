@@ -7,6 +7,7 @@ pub struct QuantBlockSpec {
 }
 
 impl QuantBlockSpec {
+    #[must_use] 
     pub const fn new(weights_per_block: usize, block_bytes: usize) -> Self {
         Self {
             weights_per_block,
@@ -33,6 +34,7 @@ pub const TQ1_0_SPEC: QuantBlockSpec = QuantBlockSpec::new(GGML_QK_K, 2 + 4 * 13
 pub const TQ2_0_SPEC: QuantBlockSpec = QuantBlockSpec::new(GGML_QK_K, 2 + GGML_QK_K / 4);
 pub const MXFP4_SPEC: QuantBlockSpec = QuantBlockSpec::new(32, 1 + 16);
 
+#[must_use] 
 pub fn block_quant_spec_for_dtype(dtype: Dtype) -> Option<QuantBlockSpec> {
     match dtype {
         Dtype::Q4_0 => Some(Q4_0_SPEC),
@@ -51,6 +53,7 @@ pub fn block_quant_spec_for_dtype(dtype: Dtype) -> Option<QuantBlockSpec> {
     }
 }
 
+#[must_use] 
 pub fn quantized_tensor_storage_bytes_for_dtype(dtype: Dtype, dims: &[usize]) -> Option<usize> {
     let spec = block_quant_spec_for_dtype(dtype)?;
     let element_count = dims.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d))?;

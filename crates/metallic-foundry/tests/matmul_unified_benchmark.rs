@@ -3,7 +3,6 @@ use std::time::Instant;
 use metallic_foundry::{
     Foundry, metals::matmul::MatMulStep, policy::activation::Activation, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
-use objc2_metal::MTLCommandBuffer as _;
 
 struct BenchmarkConfig {
     m: usize,
@@ -77,7 +76,7 @@ fn run_matmul_benchmark(foundry: &mut Foundry, cfg: BenchmarkConfig) {
         execute(foundry);
     }
     let buf = foundry.end_capture().unwrap();
-    buf.waitUntilCompleted();
+    buf.wait_until_completed();
     let duration = start.elapsed();
 
     let micros = duration.as_micros() as f64 / cfg.iterations as f64;

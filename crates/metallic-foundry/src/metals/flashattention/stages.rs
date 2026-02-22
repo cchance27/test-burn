@@ -1,9 +1,7 @@
-use std::sync::Arc;
-
 use metallic_macros::{KernelArgs, MetalStruct, Stage};
 
 use super::variants::{FlashDecodeScalar, FlashDecodeTgOut, FlashDecodeVariant};
-use crate::{compound::BufferArg, fusion::MetalPolicy, types::TensorArg};
+use crate::types::TensorArg;
 
 /// Handles layout and indexing for Multi-Head Attention (Decode).
 ///
@@ -13,21 +11,12 @@ use crate::{compound::BufferArg, fusion::MetalPolicy, types::TensorArg};
 #[derive(KernelArgs, Clone, Debug, Stage)]
 #[stage(
     includes("flashattention/flash_decode.metal"),
-    policy_field = "policy",
-    buffer_args_fn = "stage_buffer_args",
-    template_bindings(
-        q_t = "self.policy_elem_type(\"q\", \"half\")",
-        k_t = "self.policy_elem_type(\"k\", \"half\")",
-        v_t = "self.policy_elem_type(\"v\", \"half\")",
-        out_t = "self.policy_elem_type(\"output\", \"half\")"
-    ),
     emit = r#"
-    // HeadLayoutStage (Policy: {policy_short})
-    auto layout = run_flash_head_layout_stage<{q_t}, {k_t}, {v_t}, {out_t}>(
-        (const device {q_t}*)q,
-        (const device {k_t}*)k,
-        (const device {v_t}*)v,
-        (device {out_t}*)output,
+    auto layout = run_flash_head_layout_stage<half, half, half, half>(
+        (const device half*)q,
+        (const device half*)k,
+        (const device half*)v,
+        (device half*)output,
         q_stride_b,
         q_stride_h,
         k_stride_b,
@@ -38,18 +27,21 @@ use crate::{compound::BufferArg, fusion::MetalPolicy, types::TensorArg};
         out_stride_h,
         gid
     );
-    const device {q_t}* q_ptr = layout.q_ptr;
-    const device {k_t}* k_ptr = layout.k_ptr;
-    const device {v_t}* v_ptr = layout.v_ptr;
-    device {out_t}* output_ptr = layout.output_ptr;
+    const device half* q_ptr = layout.q_ptr;
+    const device half* k_ptr = layout.k_ptr;
+    const device half* v_ptr = layout.v_ptr;
+    device half* output_ptr = layout.output_ptr;
 "#,
     out_var = "output_ptr"
 )]
 pub struct HeadLayoutStage {
+    #[arg(metal_type = "const device half*")]
     pub q: TensorArg,
+    #[arg(metal_type = "const device half*")]
     pub k: TensorArg,
+    #[arg(metal_type = "const device half*")]
     pub v: TensorArg,
-    #[arg(output)]
+    #[arg(output, metal_type = "device half*")]
     pub output: TensorArg,
 
     pub q_stride_b: u32,
@@ -60,75 +52,9 @@ pub struct HeadLayoutStage {
     pub v_stride_h: u32,
     pub out_stride_b: u32,
     pub out_stride_h: u32,
-
-    #[arg(skip, stage_skip)]
-    pub policy: Arc<dyn MetalPolicy>,
 }
 
 impl HeadLayoutStage {
-    fn stage_buffer_args(&self) -> Vec<BufferArg> {
-        let buffers = vec![
-            ("q", 0, "const device half*"),
-            ("k", 1, "const device half*"),
-            ("v", 2, "const device half*"),
-            ("output", 3, "device half*"),
-        ];
-
-        let mut args = Vec::new();
-        // Resolve types from policy
-        let policy_types = self.policy.buffer_types();
-
-        for (name, idx, default_type) in buffers {
-            let type_str = policy_types
-                .iter()
-                .find(|(n, _)| *n == name)
-                .map(|(_, t)| *t)
-                .unwrap_or(default_type);
-
-            args.push(BufferArg {
-                name,
-                metal_type: type_str,
-                buffer_index: idx,
-            });
-        }
-
-        // Add scalar strides
-        let scalars = [
-            ("q_stride_b", 4),
-            ("q_stride_h", 5),
-            ("k_stride_b", 6),
-            ("k_stride_h", 7),
-            ("v_stride_b", 8),
-            ("v_stride_h", 9),
-            ("out_stride_b", 10),
-            ("out_stride_h", 11),
-        ];
-
-        for (name, idx) in scalars {
-            args.push(BufferArg {
-                name,
-                metal_type: "constant uint&",
-                buffer_index: idx,
-            });
-        }
-
-        args
-    }
-
-    fn policy_elem_type(&self, name: &str, def_elem: &str) -> String {
-        let policy_types = self.policy.buffer_types();
-        policy_types
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, t)| *t)
-            .unwrap_or(def_elem)
-            .trim_end_matches('*')
-            .trim_start_matches("const device ")
-            .trim_start_matches("device ")
-            .trim()
-            .to_string()
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         q: TensorArg,
@@ -139,7 +65,6 @@ impl HeadLayoutStage {
         k_strides: (u32, u32),
         v_strides: (u32, u32),
         out_strides: (u32, u32),
-        policy: Arc<dyn MetalPolicy>,
     ) -> Self {
         Self {
             q,
@@ -154,7 +79,6 @@ impl HeadLayoutStage {
             v_stride_h: v_strides.1,
             out_stride_b: out_strides.0,
             out_stride_h: out_strides.1,
-            policy,
         }
     }
 }
@@ -172,7 +96,6 @@ impl HeadLayoutStage {
 #[derive(KernelArgs, Clone, Debug, Stage)]
 #[stage(
     includes("simd.metal", "flashattention/flash_decode.metal", "softmax/streaming.metal"),
-    policy_field = "policy",
     struct_defs = "SdpaParams",
     template_bindings(emit_call = "self.fused_emit_call()"),
     emit = r#"
@@ -185,17 +108,11 @@ pub struct FlashDecodeFusedStage<const HEAD_DIM: usize> {
     pub sdpa_params: SdpaParams,
     #[arg(skip, stage_skip)]
     pub variant: FlashDecodeVariant,
-    #[arg(skip, stage_skip)]
-    pub policy: Arc<dyn MetalPolicy>,
 }
 
 impl<const HEAD_DIM: usize> FlashDecodeFusedStage<HEAD_DIM> {
-    pub fn new(sdpa_params: SdpaParams, variant: FlashDecodeVariant, policy: Arc<dyn MetalPolicy>) -> Self {
-        Self {
-            sdpa_params,
-            variant,
-            policy,
-        }
+    pub fn new(sdpa_params: SdpaParams, variant: FlashDecodeVariant) -> Self {
+        Self { sdpa_params, variant }
     }
 
     fn fused_emit_call(&self) -> String {
@@ -248,7 +165,6 @@ impl<const HEAD_DIM: usize> FlashDecodeFusedStage<HEAD_DIM> {
 #[derive(KernelArgs, Clone, Debug, Stage)]
 #[stage(
     includes("simd.metal", "flashattention/flash_decode.metal", "softmax/streaming.metal"),
-    policy_field = "policy",
     struct_defs = "SdpaParams",
     template_bindings(emit_call = "self.standalone_emit_call()"),
     emit = r#"
@@ -261,17 +177,11 @@ pub struct FlashDecodeStage<const HEAD_DIM: usize> {
     pub sdpa_params: SdpaParams,
     #[arg(skip, stage_skip)]
     pub variant: FlashDecodeVariant,
-    #[arg(skip, stage_skip)]
-    pub policy: Arc<dyn MetalPolicy>,
 }
 
 impl<const HEAD_DIM: usize> FlashDecodeStage<HEAD_DIM> {
-    pub fn new(sdpa_params: SdpaParams, variant: FlashDecodeVariant, policy: Arc<dyn MetalPolicy>) -> Self {
-        Self {
-            sdpa_params,
-            variant,
-            policy,
-        }
+    pub fn new(sdpa_params: SdpaParams, variant: FlashDecodeVariant) -> Self {
+        Self { sdpa_params, variant }
     }
 
     fn standalone_emit_call(&self) -> String {

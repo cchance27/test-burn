@@ -147,7 +147,7 @@ impl CompiledStep for CompiledRmsNormStep {
     policy_field = "policy",
     template_bindings(policy_struct = "self.policy.struct_name()"),
     emit = r#"
-    RMSNORM_RUN_CORE_STAGE({policy_struct}, input, output, gamma, params, scale_bytes, gid, lid);
+    RMSNORM_RUN_CORE_STAGE({policy_struct}, input, output, gamma, params, scale_bytes, gid, lid, tptg);
 "#,
     out_var = "output_ptr"
 )]

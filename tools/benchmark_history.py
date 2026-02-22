@@ -30,9 +30,9 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Dict[str, float]]:
     
     # Pass through arguments
     if args.q8: cmd.append("--q8")
+    if args.q4_0: cmd.append("--q4_0")
     if args.fp16: cmd.append("--fp16")
     if args.max_tokens: cmd.extend(["--max-tokens", str(args.max_tokens)])
-    if args.engine: cmd.extend(["--engine", args.engine])
     if args.iterations: cmd.extend(["--iterations", str(args.iterations)])
 
     print(f"Running benchmark: {' '.join(cmd)}", flush=True)
@@ -48,7 +48,7 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Dict[str, float]]:
     output_lines = []
     
     while True:
-        line = process.stdout.readline()
+        line = process.stdout.readline() # type: ignore
         if not line and process.poll() is not None:
             break
         if line:
@@ -83,7 +83,7 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Dict[str, float]]:
     return_code = process.poll()
     if return_code != 0:
         print(f"Benchmark failed (exit code {return_code})", flush=True)
-        return None
+        return None # type: ignore
 
     return metrics
 
@@ -92,9 +92,9 @@ def main():
     parser = argparse.ArgumentParser(description="Benchmark past git commits to find performance regressions.")
     parser.add_argument("--commits", type=int, default=5, help="Number of past commits to benchmark")
     parser.add_argument("--q8", action="store_true", help="Run Q8 benchmark")
+    parser.add_argument("--q4_0", action="store_true", help="Run Q4_0 benchmark")
     parser.add_argument("--fp16", action="store_true", help="Run FP16 benchmark")
     parser.add_argument("--max-tokens", type=int, default=256, help="Max tokens (default: 256)")
-    parser.add_argument("--engine", type=str, default="foundry", help="Engine to use (default: foundry)")
     parser.add_argument("--iterations", type=int, default=5, help="Iterations per benchmark (default: 5)")
     parser.add_argument("--reverse", action="store_true", help="Run benchmarks from oldest to newest")
     parser.add_argument("--sleep", type=int, default=0, help="Sleep N seconds between benchmarks to let GPU cool down")

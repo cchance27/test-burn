@@ -10,7 +10,7 @@ The following are design goals and rules for our Agents and Developers for the p
 - Perform cargo build runs periodically to make sure to avoid regressions.
 - Do not roll back code or delete files without checking with a superior. 
 -  The project is stored on git commits, so you can reference git diffs and status when you want to review recent changes.
--  Before turning in a task as complete make sure that critical cargo commands were run.
+- Before we perform a git commit (when requested by the user), perform final cleanup checks.
    a. Run `cargo +nightly fmt` && `cargo clippy --fix --allow-dirty --allow-staged` && `cargo build`
 - NEVER return a task or mark it as complete with PLACEHOLDER functions are placeholder comments, we implement functions and components fully. Only ever use placeholders if we plan to replace the placeholder in our next step that we're already planning to execute, and placeholders should have todo!() so that it will crash out if we forget to finish them.
 - Always use idiomatic rust where possible.

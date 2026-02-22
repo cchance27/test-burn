@@ -29,11 +29,11 @@ impl TryFrom<GGUFDataType> for Dtype {
             GGUFDataType::I8 => Ok(Dtype::I8),
             GGUFDataType::I16 => Ok(Dtype::I16),
             GGUFDataType::I32 => Ok(Dtype::I32),
-            GGUFDataType::I64 => Err(GGUFError::UnsupportedDataType(format!("{:?}", value))), // No direct I64 in SDK Dtype yet? SDK defines F64 but not I64? SDK Dtype has F64.
+            GGUFDataType::I64 => Err(GGUFError::UnsupportedDataType(format!("{value:?}"))), // No direct I64 in SDK Dtype yet? SDK defines F64 but not I64? SDK Dtype has F64.
             GGUFDataType::F64 => Ok(Dtype::F64),
             GGUFDataType::BF16 => Ok(Dtype::BF16),
-            GGUFDataType::MXFP4 => Err(GGUFError::UnsupportedDataType(format!("{:?}", value))),
-            _ => Err(GGUFError::UnsupportedDataType(format!("Unsupported GGUF type: {:?}", value))),
+            GGUFDataType::MXFP4 => Err(GGUFError::UnsupportedDataType(format!("{value:?}"))),
+            _ => Err(GGUFError::UnsupportedDataType(format!("Unsupported GGUF type: {value:?}"))),
         }
     }
 }
@@ -46,7 +46,7 @@ pub enum GGUFLayoutHint {
 
 impl GGUFLayoutHint {
     fn from_architecture(arch: Option<&str>) -> Self {
-        match arch.map(|s| s.to_ascii_lowercase()) {
+        match arch.map(str::to_ascii_lowercase) {
             Some(ref a) if a.contains("falcon") || a.contains("refact") => GGUFLayoutHint::Kn,
             _ => GGUFLayoutHint::Nk,
         }
@@ -104,8 +104,7 @@ fn layout_hint_from_metadata_with_key(metadata: &GGUFMetadata, arch: Option<&str
 fn layout_debug_enabled() -> bool {
     std::env::var(METALLIC_GGUF_LAYOUT_DEBUG_ENV)
         .ok()
-        .map(|v| v.trim() != "0")
-        .unwrap_or(false)
+        .is_some_and(|v| v.trim() != "0")
 }
 
 fn log_layout_hint(arch: Option<&str>, hint: GGUFLayoutHint, source: Option<(String, String)>) {
@@ -115,12 +114,11 @@ fn log_layout_hint(arch: Option<&str>, hint: GGUFLayoutHint, source: Option<(Str
     match source {
         Some((key, value)) => {
             eprintln!(
-                "[GGUF_LAYOUT] arch={:?} hint={:?} source_key={} source_value={}",
-                arch, hint, key, value
+                "[GGUF_LAYOUT] arch={arch:?} hint={hint:?} source_key={key} source_value={value}"
             );
         }
         None => {
-            eprintln!("[GGUF_LAYOUT] arch={:?} hint={:?} source_key=<none>", arch, hint);
+            eprintln!("[GGUF_LAYOUT] arch={arch:?} hint={hint:?} source_key=<none>");
         }
     }
 }
@@ -311,13 +309,13 @@ impl GGUFModel {
 impl GGUFValue {
     fn to_metadata_value(&self) -> MetadataValue<'_> {
         match self {
-            Self::U8(v) => MetadataValue::Int(*v as i64),
-            Self::I8(v) => MetadataValue::Int(*v as i64),
-            Self::U16(v) => MetadataValue::Int(*v as i64),
-            Self::I16(v) => MetadataValue::Int(*v as i64),
-            Self::U32(v) => MetadataValue::Int(*v as i64),
-            Self::I32(v) => MetadataValue::Int(*v as i64),
-            Self::F32(v) => MetadataValue::Float(*v as f64),
+            Self::U8(v) => MetadataValue::Int(i64::from(*v)),
+            Self::I8(v) => MetadataValue::Int(i64::from(*v)),
+            Self::U16(v) => MetadataValue::Int(i64::from(*v)),
+            Self::I16(v) => MetadataValue::Int(i64::from(*v)),
+            Self::U32(v) => MetadataValue::Int(i64::from(*v)),
+            Self::I32(v) => MetadataValue::Int(i64::from(*v)),
+            Self::F32(v) => MetadataValue::Float(f64::from(*v)),
             Self::Bool(v) => MetadataValue::Bool(*v),
             Self::String(v) => MetadataValue::String(Cow::Borrowed(v)),
             Self::Array(v) => MetadataValue::Array(v.iter().map(|item| item.to_metadata_value()).collect()),

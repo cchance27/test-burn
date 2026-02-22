@@ -42,7 +42,7 @@ impl EnvVarGuard<'static> {
     }
 }
 
-impl<'a> Drop for EnvVarGuard<'a> {
+impl Drop for EnvVarGuard<'_> {
     fn drop(&mut self) {
         if let Some(previous) = &self.previous {
             Environment::set(self.var, previous);

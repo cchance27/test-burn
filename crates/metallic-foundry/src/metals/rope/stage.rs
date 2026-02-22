@@ -9,7 +9,7 @@ use crate::{metals::rope::RopeParams, types::TensorArg};
     struct_defs = "RopeParams",
     emit = r#"
     threadgroup half4 q_shared[ROPE_MAX_HEAD_DIM_VEC];
-    run_rope_decode_stage(q_shared, q_ptr, cos_buf, sin_buf, params_rope, lid.x);
+    run_rope_decode_stage(q_shared, q_ptr, cos, sin, params_rope, lid.x);
     const threadgroup half4* q_ptr_roped = q_shared;
 "#,
     out_var = "q_ptr_roped"

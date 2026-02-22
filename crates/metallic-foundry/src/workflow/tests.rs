@@ -33,7 +33,7 @@ fn workflow_compile_fails_on_mismatched_logits_binding() {
                     }
                 }
             }
-            "while" => {
+            "while" | "while_batched" => {
                 for key in ["body", "phases"] {
                     let Some(serde_json::Value::Array(arr)) = map.get_mut(key) else {
                         continue;
@@ -70,7 +70,7 @@ fn workflow_compile_fails_on_mismatched_logits_binding() {
                         }
                     }
                 }
-                "while" => {
+                "while" | "while_batched" => {
                     for key in ["body", "phases"] {
                         let Some(serde_json::Value::Array(arr)) = map.get_mut(key) else {
                             continue;

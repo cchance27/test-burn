@@ -178,7 +178,7 @@ impl ReduceOp {
 /// - `to_level`: Ending shuffle distance (typically 1)
 ///
 /// # Example
-/// ```ignore
+/// ```text
 /// // Full 32-lane reduction (default)
 /// SimdReduceConfig::default()  // from=16, to=1, op=Add
 ///
@@ -246,7 +246,7 @@ impl SimdReduceConfig {
 /// Builder for generating Metal code with automatic variable management.
 ///
 /// # Example
-/// ```ignore
+/// ```text
 /// let mut b = CodeBuilder::new("rmsnorm");
 /// let inv_rms = b.declare_var("inv_rms", MetalType::Float);
 /// b.emit_decl_init(&inv_rms, "compute_inv_rms(input)");

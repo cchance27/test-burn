@@ -58,10 +58,8 @@ fn test_batched_prefill_multiturn_consistency() -> Result<(), Box<dyn std::error
     let mut prompt2 = tokenizer.encode(&format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n", long_user_input))?;
 
     // Remove BOS
-    if let Some(bos) = tokenizer.special_tokens().bos_token_id {
-        if prompt2.first() == Some(&bos) {
-            prompt2.remove(0);
-        }
+    if let Some(bos) = tokenizer.special_tokens().bos_token_id && prompt2.first() == Some(&bos) {
+        prompt2.remove(0);
     }
 
     println!("Prompt1 len: {}", prompt1.len());

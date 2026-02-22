@@ -9,7 +9,6 @@ PROMPT="create a short js fibonacci function"
 MAX_TOKENS=50
 ITERATIONS=5
 ENABLE_PROFILING=0
-ENGINE="context"
 WORKFLOW=""
 IGNORE_EOS_STOP=1
 WORKFLOW_BATCH_SIZE=1
@@ -32,7 +31,6 @@ show_help() {
     echo "  --max-tokens <n>   Max tokens to generate (default: $MAX_TOKENS)"
     echo "  --iterations <n>   Number of iterations per model (default: $ITERATIONS)"
     echo "  --profiles         Enable profiling (METALLIC_ENABLE_PROFILING=1)"
-    echo "  --engine <name>    Engine to use (context, foundry) (default: $ENGINE)"
     echo "  --workflow <path>  Workflow JSON to use (foundry only; default: text_generation.json)"
     echo "  --batch-size <n>   Foundry workflow batch size (default: $WORKFLOW_BATCH_SIZE)"
     echo "  --help             Show this help"
@@ -53,7 +51,6 @@ while [[ $# -gt 0 ]]; do
         --max-tokens) MAX_TOKENS="$2"; shift 2 ;;
         --iterations) ITERATIONS="$2"; shift 2 ;;
         --profiles) ENABLE_PROFILING=1; shift ;;
-        --engine) ENGINE="$2"; shift 2 ;;
         --workflow) WORKFLOW="$2"; shift 2 ;;
         --batch-size) WORKFLOW_BATCH_SIZE="$2"; shift 2 ;;
         --help) show_help; exit 0 ;;
@@ -71,16 +68,13 @@ fi
 echo "[metallic] MAX_TOKENS=${MAX_TOKENS}"
 echo "[metallic] prompt=${PROMPT}"
 echo "[metallic] iterations=${ITERATIONS}"
-echo "[metallic] engine=${ENGINE}"
 echo "[metallic] profiling=${ENABLE_PROFILING}"
 echo "[metallic] ignore_eos_stop=${IGNORE_EOS_STOP}"
 echo "[metallic] workflow_batch_size=${WORKFLOW_BATCH_SIZE}"
-if [[ "${ENGINE}" == "foundry" ]]; then
-    if [[ -z "${WORKFLOW}" ]]; then
-        WORKFLOW="crates/metallic-foundry/workflows/text_generation.json"
-    fi
-    echo "[metallic] workflow=${WORKFLOW}"
+if [[ -z "${WORKFLOW}" ]]; then
+    WORKFLOW="crates/metallic-foundry/workflows/text_generation.json"
 fi
+echo "[metallic] workflow=${WORKFLOW}"
 echo
 
 calculate_stats() {
@@ -176,16 +170,14 @@ run_benchmark() {
             METALLIC_METRICS_JSONL_PATH="${jsonl_path}"
             METALLIC_RECORD_CB_GPU_TIMING=1
           )
-          if [[ "${ENGINE}" == "foundry" ]]; then
-            env_cmd+=(METALLIC_FOUNDRY_PER_KERNEL_PROFILING=1)
-          fi
+          env_cmd+=(METALLIC_FOUNDRY_PER_KERNEL_PROFILING=1)
         fi
         
         # Run and capture stderr (where metrics are printed)
         local output
         output=$("${env_cmd[@]}" \
           "${bin_path}" "${model}" "${PROMPT}" \
-          --seed 42 --output-format=none --max-tokens="${MAX_TOKENS}" --engine="${ENGINE}" \
+          --seed 42 --output-format=none --max-tokens="${MAX_TOKENS}" \
           --repeat-penalty 1.0 --repeat-last-n 0 --presence-penalty 0.0 --frequency-penalty 0.0 \
           ${WORKFLOW:+--workflow "${WORKFLOW}"} 2>&1)
         
@@ -222,7 +214,7 @@ run_benchmark() {
     done
     
     echo ""
-    echo "== Results for ${name} (${ENGINE}) =="
+    echo "== Results for ${name} =="
     # Use ${array[@]+"${array[@]}"} to avoid unbound variable errors on empty arrays in older bash versions
     calculate_stats "Model Load (s)" ${load_times[@]+"${load_times[@]}"}
     calculate_stats "Tokenization (s)" ${tok_times[@]+"${tok_times[@]}"}
@@ -237,7 +229,7 @@ run_benchmark() {
     calculate_stats "Total (s)" ${total_times[@]+"${total_times[@]}"}
     calculate_stats "Total (tps)" ${total_tps[@]+"${total_tps[@]}"}
 
-    if [[ "${ENABLE_PROFILING}" -eq 1 && "${ENGINE}" == "foundry" ]]; then
+    if [[ "${ENABLE_PROFILING}" -eq 1 ]]; then
         echo
         echo "== Top GPU ops (from ${jsonl_path}) =="
         bash ./tools/summarize_metrics_jsonl.sh "${jsonl_path}" 15 || true

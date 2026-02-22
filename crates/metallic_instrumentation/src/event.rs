@@ -36,7 +36,7 @@ pub enum MetricEvent {
     KernelBackendSelected { op_name: String, backend: String, reason: String },
     /// Captures resource cache utilisation metrics.
     ResourceCacheAccess { cache_key: String, hit: bool, bytes: u64 },
-    /// Periodic summary of a resource cache (e.g., mpsgraph_sdpa) for dashboards.
+    /// Periodic summary of a resource cache (e.g., `mpsgraph_sdpa`) for dashboards.
     ResourceCacheSummary {
         cache: String,
         hits: u64,
@@ -52,7 +52,7 @@ pub enum MetricEvent {
         strategy: String,
         /// Number of entries evicted.
         count: u64,
-        /// Reason for eviction (e.g., "size_limit_exceeded", "idle_timeout", "manual_clear").
+        /// Reason for eviction (e.g., "`size_limit_exceeded`", "`idle_timeout`", "`manual_clear`").
         reason: String,
         /// Cache size after eviction.
         size_after: u64,

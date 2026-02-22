@@ -1,6 +1,10 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#ifndef ACTIVATION
+#define ACTIVATION ActivationSiLU
+#endif
+
 // SwigluParams struct is injected by Foundry via struct_defs()
 
 // ============================================================================

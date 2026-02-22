@@ -12,6 +12,10 @@ use crate::{
     app::ChatApp, components::common::{Button, ButtonVariant, IconButton}, state::AppState, theme::{colors, radius, spacing}
 };
 
+type SubmitCallback = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+type ChangeCallback = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+type EscapeCallback = Rc<dyn Fn(&mut Window, &mut App)>;
+
 // Actions for text input
 gpui::actions!(
     text_input,
@@ -30,9 +34,9 @@ pub struct TextInput {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
-    on_submit: Option<Rc<dyn Fn(&str, &mut Window, &mut App)>>,
-    on_change: Option<Rc<dyn Fn(&str, &mut Window, &mut App)>>,
-    on_escape: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_submit: Option<SubmitCallback>,
+    on_change: Option<ChangeCallback>,
+    on_escape: Option<EscapeCallback>,
     /// Track if mouse is dragging for text selection
     is_selecting: bool,
     /// Anchor point for mouse selection (where mouse down started)

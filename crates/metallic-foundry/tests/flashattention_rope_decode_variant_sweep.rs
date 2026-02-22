@@ -6,7 +6,6 @@ use metallic_foundry::{
         flashattention::{FlashDecodeScalar, FlashDecodeTgOut, FlashDecodeVariant, stages::SdpaParams, step::RopeFlashDecodeStep}, rope::RopeParamsResolved
     }, spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
-use objc2_metal::MTLCommandBuffer as _;
 
 fn parse_env_usize(key: &'static str) -> Option<usize> {
     std::env::var(key).ok().and_then(|s| s.trim().parse::<usize>().ok())
@@ -61,7 +60,7 @@ fn bench(foundry: &mut Foundry, label: &str, warmup: usize, trials: usize, iters
             f(foundry);
         }
         let buf = foundry.end_capture().unwrap();
-        buf.waitUntilCompleted();
+        buf.wait_until_completed();
         let elapsed = start.elapsed();
         avgs.push(elapsed.as_micros() as f64 / iters_per_trial as f64);
     }
@@ -301,7 +300,7 @@ fn flashattention_rope_decode_variant_sweep() -> Result<(), MetalError> {
                 dim: head_dim,
                 seq_len: kv_len,
                 position_offset: kv_len.saturating_sub(1),
-                total_elements: (n_heads as u32) * head_dim,
+                total_elements: n_heads * head_dim,
             };
             let sdpa_params = SdpaParams {
                 kv_len,

@@ -1,11 +1,8 @@
 //! Comprehensive RepeatKvHeads Test Suite for Foundry.
 //!
-//! Tests the RepeatKvHeads kernel against legacy implementation and CPU reference.
+//! Tests the RepeatKvHeads kernel against CPU reference.
 
 use half::f16;
-use metallic_context::{
-    Context, F16Element, context::RepeatKvWorkspaceKind, kernels::repeat_kv_heads::RepeatKvHeadsOp, tensor::{Tensor as LegacyTensor, TensorStorage as LegacyStorage}
-};
 use metallic_foundry::{
     Foundry, metals::repeat_kv_heads::{RepeatKvHeads, RepeatKvHeadsParamsResolved}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
@@ -68,7 +65,6 @@ fn cpu_repeat_kv_heads(
 // ============================================================================
 
 fn run_parity_test(cfg: TestConfig) {
-    let mut ctx = Context::<F16Element>::new().unwrap();
     let mut foundry = Foundry::new().unwrap();
     let mut rng = rng();
 
@@ -78,55 +74,6 @@ fn run_parity_test(cfg: TestConfig) {
 
     // Generate random input
     let input_data: Vec<f16> = (0..input_elements).map(|_| f16::from_f32(rng.random_range(-1.0..1.0))).collect();
-
-    // =========================================================================
-    // Legacy Kernel
-    // =========================================================================
-    let mut input_legacy = LegacyTensor::<F16Element>::new(
-        vec![cfg.batch * cfg.n_kv_heads, cfg.seq, cfg.head_dim],
-        LegacyStorage::Pooled(&mut ctx),
-        metallic_context::TensorInit::Uninitialized,
-    )
-    .unwrap();
-
-    // Copy data with proper strides (cache_stride)
-    {
-        let slice = input_legacy.as_mut_slice();
-        for b in 0..cfg.batch {
-            for kv_h in 0..cfg.n_kv_heads {
-                let batch_head = b * cfg.n_kv_heads + kv_h;
-                for s in 0..cfg.seq {
-                    for d in 0..cfg.head_dim {
-                        let src_idx = ((batch_head * cfg.cache_stride) + s) * cfg.head_dim + d;
-                        let dst_idx = ((batch_head * cfg.seq) + s) * cfg.head_dim + d;
-                        if src_idx < input_data.len() && dst_idx < slice.len() {
-                            slice[dst_idx] = input_data[src_idx];
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let out_legacy = ctx
-        .call::<RepeatKvHeadsOp>(
-            (
-                input_legacy,
-                group_size as u32,
-                cfg.batch as u32,
-                cfg.n_kv_heads as u32,
-                cfg.n_heads as u32,
-                cfg.seq as u32,
-                cfg.head_dim as u32,
-                cfg.seq as u32, // cache_stride = seq for simple test
-                0,              // layer_idx
-                RepeatKvWorkspaceKind::Key,
-                false, // prefer_shared
-            ),
-            None,
-        )
-        .unwrap();
-    let legacy_result = out_legacy.to_vec();
 
     // =========================================================================
     // Foundry Kernel
@@ -191,32 +138,26 @@ fn run_parity_test(cfg: TestConfig) {
     // =========================================================================
     // Comparison
     // =========================================================================
-    let mut legacy_vs_foundry: f32 = 0.0;
     let mut cpu_vs_foundry: f32 = 0.0;
 
     for i in 0..output_elements {
-        legacy_vs_foundry = legacy_vs_foundry.max((legacy_result[i].to_f32() - foundry_result[i].to_f32()).abs());
         cpu_vs_foundry = cpu_vs_foundry.max((cpu_result[i].to_f32() - foundry_result[i].to_f32()).abs());
     }
 
     // Sanity check: verify results are non-zero (meaningful data)
     let foundry_max_abs = foundry_result.iter().map(|x| x.to_f32().abs()).fold(0.0f32, f32::max);
-    let legacy_max_abs = legacy_result.iter().map(|x| x.to_f32().abs()).fold(0.0f32, f32::max);
     assert!(
         foundry_max_abs > 0.1,
         "Foundry output appears to be all zeros - test may be invalid"
     );
-    assert!(legacy_max_abs > 0.1, "Legacy output appears to be all zeros - test may be invalid");
 
     println!(
         "\n[RepeatKvHeads batch={} heads={}/{} seq={} dim={}]",
         cfg.batch, cfg.n_heads, cfg.n_kv_heads, cfg.seq, cfg.head_dim
     );
-    println!("  Legacy vs Foundry max diff: {:.6}", legacy_vs_foundry);
     println!("  CPU vs Foundry max diff:    {:.6}", cpu_vs_foundry);
-    println!("  Output max abs: Legacy={:.4}, Foundry={:.4}", legacy_max_abs, foundry_max_abs);
+    println!("  Output max abs: Foundry={:.4}", foundry_max_abs);
 
-    assert!(legacy_vs_foundry <= TOLERANCE, "Legacy vs Foundry mismatch: {}", legacy_vs_foundry);
     assert!(cpu_vs_foundry <= TOLERANCE, "CPU vs Foundry mismatch: {}", cpu_vs_foundry);
 }
 

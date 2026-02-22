@@ -1,6 +1,6 @@
 //! GemmV2 Parity Test Suite
 //!
-//! Compares GemmV2 (Stage composition) against legacy MLX GEMM.
+//! Compares GemmV2 (Stage composition) against CPU reference.
 //!
 //! Coverage:
 //! - F16 x F16 GEMM
@@ -9,9 +9,6 @@
 //! - Transpose modes (NN, NT)
 
 use half::f16;
-use metallic_context::{
-    Context, F16Element, kernels::matmul_mlx::MatMulMlxOp, tensor::{Tensor as LegacyTensor, TensorInit as LegacyInit, TensorStorage, TensorType, quantized::QuantizedQ8_0Tensor}
-};
 use metallic_foundry::{
     Foundry, metals::{
         gemm::{
@@ -61,78 +58,6 @@ impl Default for GemmTestConfig {
 // ============================================================================
 // CPU Reference Implementation
 // ============================================================================
-
-#[allow(clippy::too_many_arguments)]
-fn run_mlx_gemm_f16(
-    a_data: &[f16],
-    b_data: &[f16],
-    m: usize,
-    n: usize,
-    k: usize,
-    trans_a: bool,
-    trans_b: bool,
-    _foundry: &Foundry,
-) -> Vec<f16> {
-    let mut ctx = Context::<F16Element>::new().expect("Failed to create context");
-
-    let a_rows = if trans_a { k } else { m };
-    let a_cols = if trans_a { m } else { k };
-    let a_legacy =
-        LegacyTensor::<F16Element>::new(vec![a_rows, a_cols], TensorStorage::Dedicated(&ctx), LegacyInit::CopyFrom(a_data)).unwrap();
-
-    let b_rows = if trans_b { n } else { k };
-    let b_cols = if trans_b { k } else { n };
-    let b_legacy =
-        LegacyTensor::<F16Element>::new(vec![b_rows, b_cols], TensorStorage::Dedicated(&ctx), LegacyInit::CopyFrom(b_data)).unwrap();
-
-    let out = ctx
-        .call::<MatMulMlxOp>(
-            (&a_legacy, TensorType::Dense(&b_legacy), None, None, trans_a, trans_b, 1.0, 0.0),
-            None,
-        )
-        .expect("MLX GEMM failed");
-
-    out.to_vec()
-}
-
-fn run_mlx_gemm_q8(
-    a_data: &[f16],
-    b_q8: &QuantizedQ8_0Tensor,
-    m: usize,
-    _n: usize,
-    k: usize,
-    trans_a: bool,
-    trans_b: bool,
-) -> Option<Vec<f16>> {
-    let mut ctx = Context::<F16Element>::new().expect("Failed to create context");
-
-    let a_rows = if trans_a { k } else { m };
-    let a_cols = if trans_a { m } else { k };
-    let a_legacy =
-        LegacyTensor::<F16Element>::new(vec![a_rows, a_cols], TensorStorage::Dedicated(&ctx), LegacyInit::CopyFrom(a_data)).unwrap();
-
-    let res = ctx.call::<MatMulMlxOp>(
-        (
-            &a_legacy,
-            TensorType::Quant(metallic_context::tensor::QuantizedTensor::Q8_0(b_q8)),
-            None,
-            None,
-            trans_a,
-            trans_b,
-            1.0,
-            0.0,
-        ),
-        None,
-    );
-
-    match res {
-        Ok(out) => Some(out.to_vec()),
-        Err(e) => {
-            println!("MLX Q8 GEMM skipped: {:?}", e);
-            None
-        }
-    }
-}
 
 fn quantize_q8(data: &[f16], n: usize, k: usize, transpose_b: bool) -> (Vec<u8>, Vec<u8>) {
     let blocks_per_k = k.div_ceil(32);
@@ -220,7 +145,7 @@ fn quantize_q4_0(data: &[f16], n: usize, k: usize, transpose_b: bool) -> (Vec<u8
             //
             // Foundry internally wants adjacent-pair packing; perform the same transform as the loader.
             let mut qs = [0u8; 16];
-            for j in 0..16 {
+            for (j, q) in qs.iter_mut().enumerate() {
                 let ki0 = k_start + j;
                 let ki1 = k_start + 16 + j;
 
@@ -257,7 +182,7 @@ fn quantize_q4_0(data: &[f16], n: usize, k: usize, transpose_b: bool) -> (Vec<u8
                 let uq0 = (q0 + 8) as u8; // 0..15
                 let uq1 = (q1 + 8) as u8; // 0..15
 
-                qs[j] = (uq1 << 4) | uq0;
+                *q = (uq1 << 4) | uq0;
             }
 
             // De-interleave GGML layout into adjacent pairs for the Metal policy.
@@ -316,6 +241,12 @@ fn run_cpu_gemm_f16(
 // Test Runner
 // ============================================================================
 
+struct SimpleQ8Tensor {
+    data: Vec<u8>,
+    scales: Vec<u8>,
+    blocks_per_k: usize,
+}
+
 fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
     let mut foundry = Foundry::new().unwrap();
     let mut rng = rng();
@@ -346,14 +277,11 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
     // Create tensors
     let a = FoundryTensor::<metallic_foundry::F16, Pooled>::new(&mut foundry, a_dims, TensorInit::CopyFrom(&a_data)).unwrap();
 
-    // We need a Context<F16> to create the quantized tensor
-    let ctx_f16 = Context::<metallic_context::F16Element>::new().unwrap();
-
-    let (b_quantized, b_f16): (Option<QuantizedQ8_0Tensor>, Option<FoundryTensor<metallic_foundry::F16, Pooled>>) = match cfg.quant_b {
+    let (b_quantized, b_f16): (Option<SimpleQ8Tensor>, Option<FoundryTensor<metallic_foundry::F16, Pooled>>) = match cfg.quant_b {
         TestQuantization::Q8 => {
             let (w, s) = quantize_q8(&b_data, cfg.n, cfg.k, cfg.transpose_b);
-            let q8 = QuantizedQ8_0Tensor::from_split_bytes_in_context(b_dims.clone(), &w, &s, &ctx_f16).unwrap();
-            (Some(q8), None)
+            let blocks_per_k = cfg.k.div_ceil(32);
+            (Some(SimpleQ8Tensor { data: w, scales: s, blocks_per_k }), None)
         }
         TestQuantization::Q4 => (None, None),
         TestQuantization::F16 => {
@@ -369,8 +297,8 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
     let cpu_b_data = match cfg.quant_b {
         TestQuantization::Q8 => {
             let q8 = b_quantized.as_ref().unwrap();
-            let weights = q8.data.to_vec();
-            let scales_raw = q8.scales.to_vec();
+            let weights = &q8.data;
+            let scales_raw = &q8.scales;
             let mut dequant = vec![f16::ZERO; cfg.n * cfg.k];
             let blocks_per_k = q8.blocks_per_k;
 
@@ -471,25 +399,36 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
         Activation::None,
     );
 
-    // DEBUG: Dump source
-    // println!("=== Generated Metal Source ===");
-    // println!("{}", kernel.source());
-    // println!("=== End Metal Source ===");
-
     let (b_arg, b_scales_arg) = match cfg.quant_b {
         TestQuantization::Q8 => {
             let q8 = b_quantized.as_ref().unwrap();
+            let b_dims = vec![cfg.n, cfg.k.div_ceil(32) * 32];
+            let s_dims = vec![cfg.n, cfg.k.div_ceil(32)];
+
+            // Create Metal buffers for Q8 data
+            let w_buf = foundry.device.new_buffer_with_bytes(
+                metallic_foundry::types::nonnull_void_ptr_from_slice(&q8.data, "Q8_W").unwrap(),
+                q8.data.len(),
+                metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+            ).unwrap();
+            
+            let s_buf = foundry.device.new_buffer_with_bytes(
+                metallic_foundry::types::nonnull_void_ptr_from_slice(&q8.scales, "Q8_S").unwrap(),
+                q8.scales.len(),
+                metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+            ).unwrap();
+
             let b_data_arg = TensorArg::from_buffer(
-                metallic_foundry::MetalBuffer(q8.data.buf.clone()),
+                w_buf,
                 metallic_foundry::Dtype::Q8_0,
-                q8.data.dims.clone(),
-                q8.data.strides.clone(),
+                b_dims.clone(),
+                metallic_foundry::tensor::compute_strides(&b_dims),
             );
             let b_scales_arg = TensorArg::from_buffer(
-                metallic_foundry::MetalBuffer(q8.scales.buf.clone()),
+                s_buf,
                 metallic_foundry::Dtype::F16,
-                q8.scales.dims.clone(),
-                q8.scales.strides.clone(),
+                s_dims.clone(),
+                metallic_foundry::tensor::compute_strides(&s_dims),
             );
             (b_data_arg, b_scales_arg)
         }
@@ -565,82 +504,25 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
         }
     }
 
-    // ========== Run MLX Reference ==========
-    let mlx_output = if let Some(q8) = &b_quantized {
-        run_mlx_gemm_q8(&a_data, q8, cfg.m, cfg.n, cfg.k, cfg.transpose_a, cfg.transpose_b)
-    } else if let Some(_b) = &b_f16 {
-        Some(run_mlx_gemm_f16(
-            &a_data,
-            &b_data,
-            cfg.m,
-            cfg.n,
-            cfg.k,
-            cfg.transpose_a,
-            cfg.transpose_b,
-            &foundry,
-        ))
-    } else {
-        None // For Q4, skip MLX parity for now
-    };
-
-    let mlx_f32: Option<Vec<f32>> = mlx_output.map(|v| v.iter().map(|x| x.to_f32()).collect());
-
     // Debug print first few values
     println!("First 5 values:");
     println!("  CPU: {:?}", &cpu_f32[..5.min(cpu_f32.len())]);
     println!("  GPU: {:?}", &gpu_f32[..5.min(gpu_f32.len())]);
-    let mut mlx_diff = 0.0f32;
-    let mut v2_vs_mlx_fail = false;
-    let mut first_mlx_diff_idx = None;
-    if let Some(_mlx) = &mlx_f32 {
-        println!("  MLX: {:?}", &_mlx[..5.min(_mlx.len())]);
-        for i in 0..gpu_f32.len() {
-            let diff = (gpu_f32[i] - _mlx[i]).abs();
-            if diff > mlx_diff {
-                mlx_diff = diff;
-            }
-            if diff > 1e-2 && first_mlx_diff_idx.is_none() {
-                v2_vs_mlx_fail = true;
-                first_mlx_diff_idx = Some(i);
-            }
-        }
-        if let Some(idx) = first_mlx_diff_idx {
-            println!(
-                "First MLX divergence at index {}: GPU={}, MLX={}, diff={}",
-                idx,
-                gpu_f32[idx],
-                _mlx[idx],
-                (gpu_f32[idx] - _mlx[idx]).abs()
-            );
-        }
-    } else {
-        println!("  MLX: Skipped (not implemented for this config)");
-    }
 
     println!("\n=== GEMM V2 Parity Test ===");
     println!("Shape: M={}, N={}, K={}", cfg.m, cfg.n, cfg.k);
     println!("Transpose: A={}, B={}", cfg.transpose_a, cfg.transpose_b);
     println!("Tile config: {:?}", tile_config);
-    println!("Max diff CPU: {:.6}, MLX: {:.6}", max_diff, mlx_diff);
+    println!("Max diff CPU: {:.6}", max_diff);
 
-    if v2_vs_cpu_fail || v2_vs_mlx_fail {
+    if v2_vs_cpu_fail {
         panic!(
-            "Parity failure! Shape {}x{}x{}, trans_a={}, trans_b={}. Max diff CPU: {:.6}, MLX: {:.6}",
-            cfg.m, cfg.n, cfg.k, cfg.transpose_a, cfg.transpose_b, max_diff, mlx_diff
+            "Parity failure! Shape {}x{}x{}, trans_a={}, trans_b={}. Max diff CPU: {:.6}",
+            cfg.m, cfg.n, cfg.k, cfg.transpose_a, cfg.transpose_b, max_diff
         );
     }
 
-    if mlx_f32.is_some() {
-        let tol = 1e-2f32;
-        if mlx_diff > tol {
-            panic!(
-                "MLX Parity failure! Shape {}x{}x{}, trans_a={}, trans_b={}. Max diff MLX: {:.6}, Tol: {:.6}",
-                cfg.m, cfg.n, cfg.k, cfg.transpose_a, cfg.transpose_b, mlx_diff, tol
-            );
-        }
-    }
-
-    println!("✓ PASSED (CPU & MLX)");
+    println!("✓ PASSED (CPU)");
 }
 
 // ============================================================================
@@ -1222,22 +1104,37 @@ fn test_gemm_v2_step_runtime_policy_selection_q8() {
         FoundryTensor::<metallic_foundry::F16, Pooled>::new(&mut foundry, vec![a_rows, a_cols], TensorInit::CopyFrom(&a_data)).unwrap();
 
     // Create B tensor (Q8)
-    let ctx_f16 = Context::<metallic_context::F16Element>::new().unwrap();
     let (w, s) = quantize_q8(&b_data, n, k, transpose_b);
-    let q8_tensor = QuantizedQ8_0Tensor::from_split_bytes_in_context(vec![n, k], &w, &s, &ctx_f16).unwrap();
+    let blocks_per_k = k.div_ceil(32);
+    let q8_tensor = SimpleQ8Tensor { data: w, scales: s, blocks_per_k };
 
     // Convert Q8 tensor parts to Foundry TensorArgs
+    let w_buf = foundry.device.new_buffer_with_bytes(
+        metallic_foundry::types::nonnull_void_ptr_from_slice(&q8_tensor.data, "Q8_W").unwrap(),
+        q8_tensor.data.len(),
+        metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+    ).unwrap();
+    
+    let s_buf = foundry.device.new_buffer_with_bytes(
+        metallic_foundry::types::nonnull_void_ptr_from_slice(&q8_tensor.scales, "Q8_S").unwrap(),
+        q8_tensor.scales.len(),
+        metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+    ).unwrap();
+
+    let b_dims = vec![n, k.div_ceil(32) * 32];
+    let s_dims = vec![n, k.div_ceil(32)];
+
     let b_weights_arg = TensorArg::from_buffer(
-        metallic_foundry::MetalBuffer(q8_tensor.data.buf.clone()),
+        w_buf,
         metallic_foundry::Dtype::Q8_0,
-        q8_tensor.data.dims.clone(),
-        q8_tensor.data.strides.clone(),
+        b_dims.clone(),
+        metallic_foundry::tensor::compute_strides(&b_dims),
     );
     let b_scales_arg = TensorArg::from_buffer(
-        metallic_foundry::MetalBuffer(q8_tensor.scales.buf.clone()),
+        s_buf,
         metallic_foundry::Dtype::F16,
-        q8_tensor.scales.dims.clone(),
-        q8_tensor.scales.strides.clone(),
+        s_dims.clone(),
+        metallic_foundry::tensor::compute_strides(&s_dims),
     );
 
     // Output tensor
@@ -1310,6 +1207,7 @@ fn test_gemm_v2_step_runtime_policy_selection_q8() {
         max_diff
     );
 }
+
 #[test]
 #[serial]
 fn test_gemm_v2_q4_0_32x32x32() {
