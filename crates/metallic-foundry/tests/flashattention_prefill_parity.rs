@@ -1,6 +1,5 @@
-use std::sync::{Mutex, OnceLock};
-
 use half::f16;
+use metallic_env::{EnvVarGuard, FoundryEnvVar};
 use metallic_foundry::{
     Foundry, MetalError, metals::{flashattention::step::run_flash_decode, sdpa::step::SdpaMaterializedStep}, spec::{DynamicValue, Step, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
@@ -29,45 +28,18 @@ fn fill_f16(state: &mut u32, len: usize, scale: f32) -> Vec<f16> {
         .collect()
 }
 
-fn with_env_lock<R>(f: impl FnOnce() -> R) -> R {
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock.lock().unwrap();
+fn with_prefill_warps<R>(warps: u32, f: impl FnOnce() -> R) -> R {
+    let warps_v = warps.to_string();
+    let _warps_guard = EnvVarGuard::set(FoundryEnvVar::FaPrefillWarps, &warps_v);
     f()
 }
 
-fn with_env_var<R>(key: &'static str, value: &'static str, f: impl FnOnce() -> R) -> R {
-    with_env_lock(|| {
-        let old = std::env::var(key).ok();
-        // `set_var`/`remove_var` are `unsafe` on newer Rust because the process environment is
-        // globally shared and mutation is not data-race-safe. We guard with a global mutex.
-        unsafe { std::env::set_var(key, value) };
-        let out = f();
-        match old {
-            Some(v) => unsafe { std::env::set_var(key, v) },
-            None => unsafe { std::env::remove_var(key) },
-        }
-        out
-    })
-}
-
-fn with_env_vars2<R>(k1: &'static str, v1: &'static str, k2: &'static str, v2: &'static str, f: impl FnOnce() -> R) -> R {
-    with_env_lock(|| {
-        let old1 = std::env::var(k1).ok();
-        let old2 = std::env::var(k2).ok();
-        unsafe { std::env::set_var(k1, v1) };
-        unsafe { std::env::set_var(k2, v2) };
-        let out = f();
-        match old1 {
-            Some(v) => unsafe { std::env::set_var(k1, v) },
-            None => unsafe { std::env::remove_var(k1) },
-        }
-        match old2 {
-            Some(v) => unsafe { std::env::set_var(k2, v) },
-            None => unsafe { std::env::remove_var(k2) },
-        }
-        out
-    })
+fn with_prefill_warps_and_split_k<R>(warps: u32, split_k: u32, f: impl FnOnce() -> R) -> R {
+    let warps_v = warps.to_string();
+    let split_k_v = split_k.to_string();
+    let _warps_guard = EnvVarGuard::set(FoundryEnvVar::FaPrefillWarps, &warps_v);
+    let _split_k_guard = EnvVarGuard::set(FoundryEnvVar::FaPrefillSplitK, &split_k_v);
+    f()
 }
 
 fn run_prefill_case(n_heads: u32, head_dim: u32, m: u32, kv_len: u32, query_offset: u32) -> Result<(), MetalError> {
@@ -142,7 +114,7 @@ fn run_prefill_case(n_heads: u32, head_dim: u32, m: u32, kv_len: u32, query_offs
 
 #[test]
 fn flashattention_prefill_matches_materialized_warps4_d64() -> Result<(), MetalError> {
-    with_env_var("METALLIC_FA_PREFILL_WARPS", "4", || {
+    with_prefill_warps(4, || {
         // m spans <16, ==16, >16 to cover both partial and full tiles for WARPS=4 (TileM=16).
         run_prefill_case(14, 64, 7, 7, 0)?;
         run_prefill_case(14, 64, 16, 16, 0)?;
@@ -153,7 +125,7 @@ fn flashattention_prefill_matches_materialized_warps4_d64() -> Result<(), MetalE
 
 #[test]
 fn flashattention_prefill_matches_materialized_warps4_d128() -> Result<(), MetalError> {
-    with_env_var("METALLIC_FA_PREFILL_WARPS", "4", || {
+    with_prefill_warps(4, || {
         run_prefill_case(8, 128, 7, 7, 0)?;
         run_prefill_case(8, 128, 16, 16, 0)?;
         run_prefill_case(8, 128, 17, 17, 0)?;
@@ -164,7 +136,7 @@ fn flashattention_prefill_matches_materialized_warps4_d128() -> Result<(), Metal
 #[test]
 fn flashattention_prefill_splitk_matches_materialized_d64() -> Result<(), MetalError> {
     // Force Split-K even for smaller KV so we can validate correctness deterministically.
-    with_env_vars2("METALLIC_FA_PREFILL_WARPS", "8", "METALLIC_FA_PREFILL_SPLIT_K", "4", || {
+    with_prefill_warps_and_split_k(8, 4, || {
         run_prefill_case(14, 64, 32, 256, 224)?;
         run_prefill_case(14, 64, 17, 256, 239)?;
         run_prefill_case(14, 64, 32, 1024, 992)?;
@@ -174,7 +146,7 @@ fn flashattention_prefill_splitk_matches_materialized_d64() -> Result<(), MetalE
 
 #[test]
 fn flashattention_prefill_splitk_matches_materialized_d128() -> Result<(), MetalError> {
-    with_env_vars2("METALLIC_FA_PREFILL_WARPS", "8", "METALLIC_FA_PREFILL_SPLIT_K", "4", || {
+    with_prefill_warps_and_split_k(8, 4, || {
         run_prefill_case(8, 128, 32, 256, 224)?;
         run_prefill_case(8, 128, 17, 256, 239)?;
         run_prefill_case(8, 128, 32, 1024, 992)?;

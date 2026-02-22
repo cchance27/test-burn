@@ -13,8 +13,10 @@ use crate::{
 /// This is the primary DSL op for performant attention (FlashAttention).
 /// It dispatches to:
 /// - `flashattention` online fused path when `m == 1` (Flash Decode)
-/// - `flashattention` prefill path when `m > 1` (Flash Prefill, currently D=64 only)
-/// - Fallback to `SdpaReferenceStep` (materialized) if conditions not met or debug flags set.
+/// - `flashattention` prefill path when `m > 1` (Flash Prefill)
+///
+/// Unsupported shapes/configs are fail-fast by design. Use `SdpaReferenceStep` explicitly
+/// if materialized SDPA behavior is desired.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlashAttentionStep {
     pub q: Ref,
@@ -154,63 +156,24 @@ impl CompiledStep for CompiledFlashAttentionStep {
         }
 
         if force_materialized {
-            if debug_sdpa && verbose_sdpa {
-                tracing::info!(target: "metallic_foundry::metals::sdpa", "FlashAttention forced -> reference (materialized)");
-            }
-            return super::reference::execute_sdpa_reference(
-                foundry,
-                q,
-                k,
-                v,
-                output,
-                n_heads,
-                head_dim,
-                kv_seq_len,
-                q_offset_val,
-                m,
-                self.step.causal,
-            );
+            return Err(MetalError::OperationNotSupported(
+                "METALLIC_SDPA_FORCE_MATERIALIZED is not supported for FlashAttentionStep. Use SdpaReferenceStep explicitly.".into(),
+            ));
+        }
+
+        if disable_fa {
+            return Err(MetalError::OperationNotSupported(
+                "FlashAttention is disabled via METALLIC_DISABLE_FA/METALLIC_SDPA_DISABLE_ONLINE. Use SdpaReferenceStep explicitly.".into(),
+            ));
         }
 
         if m == 1 {
-            if disable_fa {
-                if debug_sdpa {
-                    tracing::info!(target: "metallic_foundry::metals::sdpa", "FlashAttention disabled -> reference");
-                }
-                return super::reference::execute_sdpa_reference(
-                    foundry,
-                    q,
-                    k,
-                    v,
-                    output,
-                    n_heads,
-                    head_dim,
-                    kv_seq_len,
-                    q_offset_val,
-                    1,
-                    self.step.causal,
-                );
-            }
-
             // Only use the online path when we're not asked to mask out any portion of K/V.
             // For decode, the common invariant is: query_offset == kv_seq_len - 1 (no future tokens exist).
             if self.step.causal && (q_offset_val + 1 != kv_seq_len) {
-                if debug_sdpa {
-                    tracing::info!(target: "metallic_foundry::metals::sdpa", "FlashAttention m=1 but causal offset mismatch -> reference");
-                }
-                return super::reference::execute_sdpa_reference(
-                    foundry,
-                    q,
-                    k,
-                    v,
-                    output,
-                    n_heads,
-                    head_dim,
-                    kv_seq_len,
-                    q_offset_val,
-                    1,
-                    self.step.causal,
-                );
+                return Err(MetalError::OperationNotSupported(format!(
+                    "FlashAttention decode causal offset mismatch: query_offset({q_offset_val}) + 1 != kv_seq_len({kv_seq_len})"
+                )));
             }
 
             if debug_sdpa {
@@ -249,29 +212,13 @@ impl CompiledStep for CompiledFlashAttentionStep {
                 || matches!(output.dims(), [d] if *d == d_model)
                 || matches!(output.dims(), [1, d] if *d == d_model);
             if !(q_ok && out_ok) {
-                if debug_sdpa {
-                    tracing::warn!(
-                        target: "metallic_foundry::metals::sdpa",
-                        q_dims = ?q.dims(),
-                        q_strides = ?q.strides(),
-                        out_dims = ?output.dims(),
-                        out_strides = ?output.strides(),
-                        "FlashAttention requested but tensor layout unsupported -> reference (materialized)"
-                    );
-                }
-                return super::reference::execute_sdpa_reference(
-                    foundry,
-                    q,
-                    k,
-                    v,
-                    output,
-                    n_heads,
-                    head_dim,
-                    kv_seq_len,
-                    q_offset_val,
-                    1,
-                    self.step.causal,
-                );
+                return Err(MetalError::OperationNotSupported(format!(
+                    "FlashAttention decode layout unsupported: q_dims={:?} q_strides={:?} out_dims={:?} out_strides={:?}",
+                    q.dims(),
+                    q.strides(),
+                    output.dims(),
+                    output.strides()
+                )));
             }
 
             // Optional debug validation
@@ -359,23 +306,17 @@ impl CompiledStep for CompiledFlashAttentionStep {
                 1,
                 self.step.kv_head_major,
             );
-        } else if !disable_fa {
+        } else {
             // Prefill online path (M>1): currently only supports causal attention with the standard
             // invariant `query_offset + m == kv_seq_len`.
             if !self.step.causal {
-                if debug_sdpa {
-                    tracing::info!(target: "metallic_foundry::metals::sdpa", "FlashAttention prefill non-causal -> reference");
-                }
+                return Err(MetalError::OperationNotSupported(
+                    "FlashAttention prefill requires causal=true".into(),
+                ));
             } else if q_offset_val + m != kv_seq_len {
-                if debug_sdpa {
-                    tracing::info!(
-                        target: "metallic_foundry::metals::sdpa",
-                        query_offset = q_offset_val,
-                        m,
-                        kv_seq_len,
-                        "FlashAttention prefill causal offset mismatch -> reference"
-                    );
-                }
+                return Err(MetalError::OperationNotSupported(format!(
+                    "FlashAttention prefill causal offset mismatch: query_offset({q_offset_val}) + m({m}) != kv_seq_len({kv_seq_len})"
+                )));
             } else {
                 if debug_sdpa {
                     tracing::info!(target: "metallic_foundry::metals::sdpa", "FlashAttention -> online (prefill) m={}", m);
@@ -403,23 +344,6 @@ impl CompiledStep for CompiledFlashAttentionStep {
                 );
             }
         }
-
-        if debug_sdpa && verbose_sdpa {
-            tracing::info!(target: "metallic_foundry::metals::sdpa", "FlashAttention -> reference (materialized) (prefill/fallback)");
-        }
-        super::reference::execute_sdpa_reference(
-            foundry,
-            q,
-            k,
-            v,
-            output,
-            n_heads,
-            head_dim,
-            kv_seq_len,
-            q_offset_val,
-            m,
-            self.step.causal,
-        )
     }
 
     fn name(&self) -> &'static str {

@@ -1,8 +1,7 @@
-use std::{
-    sync::{Mutex, OnceLock}, time::Instant
-};
+use std::time::Instant;
 
 use half::f16;
+use metallic_env::{EnvVarGuard, FoundryEnvVar};
 use metallic_foundry::{
     Foundry, MetalError, metals::flashattention::step::run_flash_decode, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
@@ -80,26 +79,10 @@ fn bench(
     Ok(())
 }
 
-fn with_env_lock<R>(f: impl FnOnce() -> R) -> R {
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock.lock().unwrap();
+fn with_prefill_warps<R>(warps: u32, f: impl FnOnce() -> R) -> R {
+    let warps_v = warps.to_string();
+    let _warps_guard = EnvVarGuard::set(FoundryEnvVar::FaPrefillWarps, &warps_v);
     f()
-}
-
-fn with_env_var<R>(key: &str, value: &str, f: impl FnOnce() -> R) -> R {
-    with_env_lock(|| {
-        let old = std::env::var(key).ok();
-        // `set_var`/`remove_var` are `unsafe` on newer Rust because the process environment is
-        // globally shared and mutation is not data-race-safe. We guard with a global mutex.
-        unsafe { std::env::set_var(key, value) };
-        let out = f();
-        match old {
-            Some(v) => unsafe { std::env::set_var(key, v) },
-            None => unsafe { std::env::remove_var(key) },
-        }
-        out
-    })
 }
 
 fn lcg_next_f32(state: &mut u32) -> f32 {
@@ -197,8 +180,7 @@ fn flashattention_prefill_variant_sweep() -> Result<(), MetalError> {
 
                 for w in warps {
                     let label = format!("m={m} warps={w} (query_offset={query_offset})");
-                    let w_s = w.to_string();
-                    let bench_result = with_env_var("METALLIC_FA_PREFILL_WARPS", &w_s, || {
+                    let bench_result = with_prefill_warps(w, || {
                         bench(&mut foundry, &label, warmup, trials, iters_per_trial, |foundry| {
                             run_flash_decode(
                                 foundry,

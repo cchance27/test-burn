@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use metallic_env::{EnvVarGuard, FoundryEnvVar};
 use metallic_foundry::{
     Foundry, workflow::{Value, WorkflowRunner, WorkflowSpec, register_op}
 };
@@ -43,10 +44,8 @@ fn while_batched_trims_after_eos_at_batch_boundary() {
     });
 
     // Ensure EOS stop is enabled for this test (default behavior).
-    unsafe {
-        std::env::remove_var("METALLIC_IGNORE_EOS_STOP");
-        std::env::set_var("METALLIC_FOUNDRY_DECODE_BATCH_SIZE", "4");
-    }
+    let _ignore_eos_guard = EnvVarGuard::unset(FoundryEnvVar::IgnoreEosStop);
+    let _decode_batch_guard = EnvVarGuard::set(FoundryEnvVar::FoundryDecodeBatchSize, "4");
 
     let mut foundry = Foundry::new().expect("foundry init");
     let models: FxHashMap<String, Arc<metallic_foundry::model::CompiledModel>> = FxHashMap::default();

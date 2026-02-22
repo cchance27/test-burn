@@ -2,13 +2,13 @@
 
 This doc tracks the current state of the **decode (M=1)** and **prefill (M>1)** FlashAttention paths in Metallic Foundry (Metal backend).
 
-## Current Status (2026-01-28)
+## Current Status (2026-02-22)
 
 - **Decode (M=1):** Fused **RoPE → FlashAttention decode** with streaming softmax (online max/logsumexp) and fused `P·V` accumulation.
 - **Prefill (M>1):** Tiled **FA1-style online softmax prefill** for `head_dim ∈ {64, 128}` with optional **Split‑K** for large KV.
-- **Default Behavior:** Enabled by default for supported configurations. Unsupported shapes fall back to the materialized SDPA path.
+- **Default Behavior:** Enabled by default for supported configurations. Unsupported shapes/configurations fail fast with explicit errors.
 - **Tuning knobs added:** Prefill `WARPS` selector and Split‑K selector (env overrides) for benchmarking without code changes.
-- **Fallbacks:** `SdpaReferenceStep` / materialized SDPA is used when `METALLIC_DISABLE_FA=1` or the configuration is unsupported.
+- **No implicit fallback:** `FlashAttentionStep` does not silently route to materialized SDPA. Use `SdpaReferenceStep` explicitly when needed.
 
 ## Composition (How it’s built)
 
@@ -25,7 +25,10 @@ The fused decode path is implemented as a **compound kernel**:
   - `FlashDecodeFusedStage` consumes Q from RoPE’s shared buffer.
 
 Key sources:
-- Kernel: `crates/metallic-foundry/src/metals/flashattention/flash_decode.metal`
+- Kernels:
+  - `crates/metallic-foundry/src/metals/flashattention/decode_common.metal`
+  - `crates/metallic-foundry/src/metals/flashattention/decode_layout.metal`
+  - `crates/metallic-foundry/src/metals/flashattention/decode_kernels.metal`
 - Stage wiring: `crates/metallic-foundry/src/metals/flashattention/stages.rs`
 - Dispatch/args: `crates/metallic-foundry/src/metals/flashattention/step.rs`
 - DSL dispatch: `crates/metallic-foundry/src/metals/sdpa/step.rs`
@@ -39,7 +42,10 @@ Prefill is implemented as standalone compound kernels (no RoPE):
   - Reduce: `SdpaPrefillSplitKReduceStage` → `flash_prefill_splitk_reduce_d{64|128}<WARPS>()`
 
 Prefill sources:
-- Kernel(s): `crates/metallic-foundry/src/metals/flashattention/flash_prefill.metal`
+- Kernels:
+  - `crates/metallic-foundry/src/metals/flashattention/prefill_loaders.metal`
+  - `crates/metallic-foundry/src/metals/flashattention/prefill_online.metal`
+  - `crates/metallic-foundry/src/metals/flashattention/prefill_splitk.metal`
 - Stage wiring: `crates/metallic-foundry/src/metals/flashattention/stages.rs`
 - Dispatch/selector: `crates/metallic-foundry/src/metals/flashattention/step.rs`
 
@@ -92,11 +98,11 @@ Legend:
 ## Known Limitations / Risks
 
 - **Numerical differences:** output differs slightly from the materialized path due to different accumulation order (streaming softmax). Tests use a loose tolerance.
-- **Head dim:** currently supports `head_dim==64` and `head_dim==128` for both decode and prefill. Other dims fall back.
+- **Head dim:** currently supports `head_dim==64` and `head_dim==128` for both decode and prefill. Other dims fail fast.
 - **Batch size:** prefill dispatch is currently `batch=1` (grid.z = 1). Decode path may support batch in the fused stack, but Foundry inference is typically batch=1.
 - **Split‑K scratch:** Split‑K prefill uses FP32 scratch buffers for partials (performance/memory tradeoff). This is expected for correctness; later optimizations can shrink or pack scratch.
 - **Fixed-capacity intermediates:** Foundry commonly uses fixed buffers (e.g. Q: `[1, 32, d_model]`, Out: `[32, d_model]`). The online path assumes decode uses the **first row** (m=1) and requires the last dimension to be contiguous.
-- **Quantization Policy Bypass (DEBT):** logic currently hardcodes F16 loading (`half` pointers) and does not utilize the `MetalPolicy` trait. This breaks the SLP (Separation of Loading Policy) architecture. Future work must refactor this to use `Arc<dyn MetalPolicy>` for proper handle of Q8/F16 separation.
+- **Quantization boundary (intentional SRP):** FlashAttention/SDPA kernels stay quant-policy-agnostic and consume typed tensor/layout contracts. Quantization policy logic stays in loader/policy components; quantized KV attention should pass a format descriptor + buffers rather than import policy types into FA stages.
 
 ## Prefill (M>1) gotchas (important)
 
@@ -174,7 +180,7 @@ This must be opt-in by capability and auto-selected:
 - Enable only when:
   - policy loader provides quant KV for the active model/session
   - device capability/heuristics predict a win (kv_len, head_dim, etc.)
-- Always provide “fail fast / fallback” behavior for unsupported formats.
+- Always provide fail-fast behavior for unsupported formats.
 
 ### Testing requirements
 
@@ -203,11 +209,11 @@ Add parity coverage analogous to current prefill parity tests:
 
 ## Debugging / Safety Knobs
 
-- **`METALLIC_DISABLE_FA=1`**: Disables Flash Attention and forces fallback to `SdpaReferenceStep` (Materialized).
-- `METALLIC_SDPA_FORCE_MATERIALIZED=1`: Alias for disabling FA (legacy).
+- **`METALLIC_DISABLE_FA=1`**: `FlashAttentionStep` fails fast (no implicit route to materialized SDPA).
+- `METALLIC_SDPA_FORCE_MATERIALIZED=1`: `FlashAttentionStep` fails fast (materialized path must be selected explicitly via `SdpaReferenceStep`).
 - `METALLIC_DEBUG_SDPA=1` (+ `METALLIC_DEBUG_SDPA_VERBOSE=1`): Logs SDPA dispatch decisions, shapes, and active path.
 - `METALLIC_SDPA_DEBUG_ONLINE_COMPARE=1`: Runs online+materialized once and prints max-abs-diff diagnostics (slow; debug-only).
-- `METALLIC_SDPA_DEBUG_ONLINE_COMPARE_PREFILL=1`: Runs online+materialized once for a prefill call and prints a bounded max-abs-diff (slow; debug-only).
+- `METALLIC_SDPA_DEBUG_ONLINE_COMPARE_PREFILL=1`: currently logs a one-shot prefill compare marker (bounded compare wiring is pending).
 
 ### Prefill tuning knobs (M>1)
 

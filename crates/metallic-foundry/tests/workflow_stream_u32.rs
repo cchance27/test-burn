@@ -1,11 +1,10 @@
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 
+use metallic_env::{EnvVarGuard, FoundryEnvVar};
 use metallic_foundry::{
     Foundry, workflow::{Value, WorkflowRunner, WorkflowSpec, register_op}
 };
 use rustc_hash::FxHashMap;
-
-static INIT_ENV: Once = Once::new();
 
 #[test]
 fn workflow_stream_u32_emits_tokens_via_channel() {
@@ -34,10 +33,8 @@ fn workflow_stream_u32_emits_tokens_via_channel() {
     });
 
     // Ensure batching doesn't trip guardrails in this test.
-    INIT_ENV.call_once(|| unsafe {
-        std::env::set_var("METALLIC_IGNORE_EOS_STOP", "1");
-        std::env::set_var("METALLIC_FOUNDRY_DECODE_BATCH_SIZE", "8");
-    });
+    let _ignore_eos_guard = EnvVarGuard::set(FoundryEnvVar::IgnoreEosStop, "1");
+    let _decode_batch_guard = EnvVarGuard::set(FoundryEnvVar::FoundryDecodeBatchSize, "8");
 
     let mut foundry = Foundry::new().expect("foundry init");
     let models: FxHashMap<String, Arc<metallic_foundry::model::CompiledModel>> = FxHashMap::default();

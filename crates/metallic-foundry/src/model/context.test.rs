@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+use metallic_env::{EnvVarGuard, FoundryEnvVar};
+
 use super::*;
 use crate::spec::Architecture;
 
@@ -40,17 +42,9 @@ fn test_context_config_priority() {
     assert_eq!(config2.max_context_len, 2048);
 
     // 3. Env var acts as a cap
-    set_env_safe("METALLIC_MAX_CONTEXT_LEN", "1024");
+    let _max_context_guard = EnvVarGuard::set(FoundryEnvVar::MaxContextLen, "1024");
     let config3 = ContextConfig::from_architecture(&arch, None);
     assert_eq!(config3.max_context_len, 1024);
-    unset_env_safe("METALLIC_MAX_CONTEXT_LEN");
-}
-
-fn set_env_safe(k: &str, v: &str) {
-    unsafe { std::env::set_var(k, v) }
-}
-fn unset_env_safe(k: &str) {
-    unsafe { std::env::remove_var(k) }
 }
 
 #[test]

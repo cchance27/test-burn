@@ -5,6 +5,7 @@ use std::{
 use metallic_foundry::{
     BPETokenizer, Foundry, MetalError, generation::default_text_generation_workflow, model::{CompiledModel, ModelBuilder}, workflow::{Value, WorkflowRunner}
 };
+use metallic_env::{EnvVarGuard, FoundryEnvVar};
 use metallic_loader::ModelLoader;
 use rustc_hash::FxHashMap;
 
@@ -121,10 +122,7 @@ fn test_batched_prefill_multiturn_consistency() -> Result<(), Box<dyn std::error
                 .build(&mut foundry)?,
         );
 
-        unsafe {
-            std::env::set_var("METALLIC_DISABLE_BATCHED_PREFILL", "1");
-            std::env::remove_var("METALLIC_FORCE_BATCHED_PREFILL");
-        }
+        let _disable_batched_prefill_guard = EnvVarGuard::set(FoundryEnvVar::DisableBatchedPrefill, "1");
 
         // Turn 1
         let out1 = run_default_workflow_generate(&mut foundry, model_baseline.clone(), &prompt1, 20, 0.0, 1, 1.0, 0.0, 1.0, 64, 42)?;
@@ -147,10 +145,7 @@ fn test_batched_prefill_multiturn_consistency() -> Result<(), Box<dyn std::error
                 .build(&mut foundry)?,
         );
 
-        unsafe {
-            std::env::remove_var("METALLIC_FORCE_BATCHED_PREFILL");
-            std::env::remove_var("METALLIC_DISABLE_BATCHED_PREFILL");
-        }
+        let _disable_batched_prefill_guard = EnvVarGuard::unset(FoundryEnvVar::DisableBatchedPrefill);
 
         // Turn 1
         let out1 = run_default_workflow_generate(&mut foundry, model_test.clone(), &prompt1, 20, 0.0, 1, 1.0, 0.0, 1.0, 64, 42)?;
