@@ -9,8 +9,16 @@ fn bench_iterations() -> usize {
     std::env::var("METALLIC_FUSED_POLICY_BENCH_ITERS")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
-        .map(|v| v.clamp(100, 500))
+        .map(|v| v.clamp(1, 500))
         .unwrap_or(200)
+}
+
+fn bench_warmup() -> usize {
+    std::env::var("METALLIC_FUSED_POLICY_BENCH_WARMUP")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|v| v.min(100))
+        .unwrap_or(20)
 }
 
 fn bind_all_symbols(symbols: &SymbolTable, bindings: &TensorBindings) -> FastBindings {
@@ -229,7 +237,7 @@ fn benchmark_fused_qkv_mixed_policy_materialized() -> Result<(), MetalError> {
     };
 
     let iterations = bench_iterations();
-    let warmup = 20usize;
+    let warmup = bench_warmup();
     let k_dim = 4096usize;
     let n_dim = 4096usize;
     let n_kv = 1024usize;
@@ -269,7 +277,7 @@ fn benchmark_fused_swiglu_mixed_policy_materialized() -> Result<(), MetalError> 
     };
 
     let iterations = bench_iterations();
-    let warmup = 20usize;
+    let warmup = bench_warmup();
     let k_dim = 4096usize;
     let n_dim = 4096usize;
     println!("FusedSwiGlu mixed-policy benchmark (materialized): iters={iterations}, warmup={warmup}, k_dim={k_dim}, n_dim={n_dim}");
