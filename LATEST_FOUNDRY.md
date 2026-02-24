@@ -53,9 +53,9 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Kernel DType Helper Layer (NEW):** Added `metals/dtypes/runtime_types.metal` and migrated `gemv`/`rmsnorm` hot paths to helper-based load/store/cast APIs to reduce per-kernel type boilerplate and prepare compute/storage/accum rollout.
 - **Extensible Design:** New quantization schemes (Q4, INT8) can be added by implementing `MetalPolicy` without modifying core kernel generation logic.
 - **Zero-Leakage Enforcement**: Successfully removed all explicit `short_name() == "f16"` or `is_q8` branching from kernel stages and execution steps.
-- **Mixed-Quant Safety Paths (Current):** Fused QKV and fused SwiGLU now detect mixed policy tuples at runtime and fail-fast by design (no silent fallback/decomposition).
-- **Mixed-Quant Perf Caveat:** Mixed-policy models lose fused-path performance until tuple-policy fused kernels are implemented.
-- **Mixed-Quant Fast-Path Plan:** Next step is tuple-policy fused kernel variants (e.g., `(q,k,v)` / `(gate,up)`) to recover fused performance while keeping fail-fast behavior explicit for unsupported tuples.
+- **Mixed-Quant Fused Paths (Implemented):** Fused QKV and fused SwiGLU now support tuple-policy execution (e.g., `(q,k,v)` / `(gate,up)`) without decomposing into unfused fallback paths.
+- **Mixed-Quant Kernel Varianting (Implemented):** Kernel cache/variant keys now include policy tuples for mixed quant combinations while preserving uniform fast paths.
+- **Mixed-Quant Hardening (Deferred):** Explicit tuple allowlists + per-tuple parity gates are deferred until the per-variant benchmark/perf optimization campaign.
 
 ### 6. Backend Reliability & Correctness
 - **Q8 Inference Fixed:** Resolved garbage output regression by enforcing strict runtime dtype validation for GEMM prefill kernels (was defaulting to F16).
@@ -127,21 +127,10 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Selector work:** auto-select per device + shape (kv_len, m) and expose env overrides for benchmarking.
 - **KV-cache quantization (proposal):** add a policy-driven quantized KV-cache format (e.g. int8 + per-block scales) consumable by FlashAttention tile loaders for bandwidth/memory wins, gated by device/heuristics and protected by parity/regression tests.
 
-### 3) Mixed-Quant Fused Kernel Performance Recovery
-
-- **Current state:** mixed-policy combinations now fail-fast in fused `FusedQkv` and fused SwiGLU paths to preserve correctness and keep behavior explicit.
-- **Problem:** mixed-policy models currently lose fused-path performance because unsupported dtype tuples are rejected.
-- **Next sprint tasks:**
-  - Introduce tuple-policy kernel varianting for fused ops (e.g. `(q,k,v)` and `(gate,up)` policy tuples).
-  - Extend kernel cache keys/registry to include policy tuples while avoiding variant explosion.
-  - Avoid fallback-path complexity; keep fail-fast and add explicit supported tuple sets as kernels land.
-  - Add focused mixed-quant perf benchmarks and parity tests to gate optimization work.
-
 ### 4) Dynamic Runtime DType kernel support (accum, storage, compute)
 
 - **Goal:** close remaining sprint items for mixed dtype support while keeping performance-first constraints.
 - **Remaining items:**
-  - Add tuple-policy fused execution variants for mixed-policy `FusedQkv` and fused SwiGLU (`(q,k,v)` and `(gate,up)` tuples).
   - Run full model-level mixed GGUF validation matrix (long prefill/decode transitions, GQA cases) to confirm no hidden path regressions.
   - Expand fused RoPE→FlashAttention parity/perf sweep for dense F32 across `head_dim={64,128}` and long KV lengths.
   - Publish a single authoritative “supported dtype combos” table (storage/compute/accum + fail-fast rules) across docs (`LATEST_FOUNDRY.md`, `docs/QUANTIZATION.md`).
@@ -375,3 +364,9 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Debug Knobs:** `METALLIC_DEBUG_TOKENIZE` and `METALLIC_DEBUG_CHAT_TEMPLATE` print formatted prompts + token heads for parity debugging.
 - **Multi-Turn Delta Mode:** `format_chat(mode="delta")` + `prefill(mode="delta")` enable KV reuse across turns without replaying the full prompt. Delta mode supports both full-history and delta-only message inputs (TUI uses deltas after the first turn).
 - **Runner Cache + Memoization:** `WorkflowRunner` caches compiled workflows/ops and invalidates on workflow spec changes; ops can declare memoization specs for caching pure outputs (e.g. tokenization).
+
+### 20. Mixed-Quant Fused Kernel Performance Recovery (COMPLETED CORE / HARDENING DEFERRED)
+- **Completed:** tuple-policy fused execution landed for `FusedQkv` (`(q,k,v)`) and fused SwiGLU/FFN (`(gate,up)`), including mixed-policy kernel generation and dispatch.
+- **Completed:** tuple-aware kernel cache keying landed for fused mixed-policy variants with preserved uniform fast-path variants.
+- **Completed:** focused mixed-policy fused benchmarks were added (`fused_mixed_policy_benchmark.rs`) with materialized iteration runs and runtime progress logging for `--nocapture` workflows.
+- **Deferred (intentional):** explicit tuple allowlists and strict per-tuple parity gate enforcement are postponed until the dedicated per-variant benchmarking and kernel-level perf optimization campaign.
