@@ -7,7 +7,7 @@ use crate::{compound::BufferArg, fusion::MetalPolicy, policy::f16::PolicyF16};
 
 #[derive(Debug, Clone, Stage)]
 #[stage(
-    includes("rmsnorm/rmsnorm.metal"),
+    includes("dtypes/runtime_types.metal", "rmsnorm/rmsnorm.metal"),
     struct_defs = "RmsNormParams",
     policy_field = "policy",
     buffer_args_fn = "stage_buffer_args",
@@ -59,7 +59,7 @@ impl RmsNormComputeStage {
         vec![
             BufferArg {
                 name: "input",
-                metal_type: "const device half*",
+                metal_type: "const device InputStorageT*",
                 buffer_index: self.input_buffer as u32,
             },
             BufferArg {

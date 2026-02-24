@@ -287,8 +287,8 @@ These are the “next sprint” items we still need to remove or generalize to s
    - Even with DSL overrides, the built-in default metadata key list is primarily Qwen2/Llama oriented.
 7. Executor still seeds compile-time baseline globals for DSL compilation.
    - `CompiledModel::new` sets globals like `n_layers/d_model/n_heads/...` directly to enable DSL compilation/repeat unrolling.
-8. Legacy executor fallback paths still exist.
-   - There is still a DEBT legacy path for weight bindings if a DSL spec omits `weight_bindings`.
+8. Legacy executor fallback paths have been reduced; fail-fast behavior is preferred.
+   - Workflows/specs should provide explicit `weight_bindings`; missing bindings are treated as configuration errors.
 
 ---
 

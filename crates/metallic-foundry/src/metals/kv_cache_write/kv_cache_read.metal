@@ -5,8 +5,8 @@ using namespace metal;
 /// Cache layout: [n_kv_heads, max_seq_len, head_dim]
 /// Output layout: [n_kv_heads, seq_len, head_dim]
 kernel void kv_cache_read_kernel(
-    const device half* cache [[buffer(0)]],
-    device half* output [[buffer(1)]],
+    const device InputStorageT* cache [[buffer(0)]],
+    device OutputStorageT* output [[buffer(1)]],
     const constant KvCacheReadParamsResolved* params [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
@@ -25,5 +25,5 @@ kernel void kv_cache_read_kernel(
                    + pos_idx * params->head_dim 
                    + dim_idx;
     
-    output[gid] = cache[cache_idx];
+    metallic_store_output(output, gid, metallic_to_accum(metallic_load_input(cache, cache_idx)));
 }

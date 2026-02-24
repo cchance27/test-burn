@@ -4,7 +4,7 @@ use std::any::{Any, TypeId};
 
 pub use error::MetalError;
 use instrument::CaptureMetrics;
-use metallic_env::DUMP_METAL_SOURCE_DIR;
+use metallic_env::{ACCUM_DTYPE, DEBUG_KERNEL_BINDINGS, DUMP_METAL_SOURCE_DIR};
 use rustc_hash::FxHashMap;
 pub use spec::*;
 pub use tensor::*;
@@ -51,6 +51,8 @@ pub struct Foundry {
     active_stream: Option<CommandStream>,
     /// Optional capture-level metrics accumulator (enabled only when profiling is on).
     capture_metrics: Option<CaptureMetrics>,
+    /// Cached once at startup to avoid per-dispatch environment reads on the hot path.
+    debug_kernel_bindings_enabled: bool,
 }
 
 impl Foundry {
@@ -78,6 +80,7 @@ impl Foundry {
             resources,
             active_stream: None,
             capture_metrics: None,
+            debug_kernel_bindings_enabled: DEBUG_KERNEL_BINDINGS.get().ok().flatten().unwrap_or(false),
         })
     }
 
@@ -199,6 +202,8 @@ impl Foundry {
     /// This bypasses the pipeline lookup/compilation step, which is useful for
     /// repeatedly dispatching the same kernel (e.g. in autoregressive loops).
     pub fn dispatch_pipeline<K: Kernel>(&mut self, pipeline: &MetalPipeline, kernel: &K, config: DispatchConfig) -> Result<(), MetalError> {
+        self.log_kernel_bindings_if_enabled(kernel, config);
+
         if let Some(stream) = self.active_stream.as_mut() {
             // Batched dispatch path
             if let Some(metrics) = self.capture_metrics.as_mut() {
@@ -305,6 +310,85 @@ impl Foundry {
         self.dispatch(kernel, config)
     }
 
+    fn log_kernel_bindings_if_enabled<K: Kernel>(&self, kernel: &K, config: DispatchConfig) {
+        if !self.debug_kernel_bindings_enabled {
+            return;
+        }
+
+        let kernel_name = kernel.function_name();
+        let bindings = kernel.debug_bindings();
+        if bindings.is_empty() {
+            tracing::debug!(kernel = kernel_name, "kernel binding debug: no bind metadata available");
+            return;
+        }
+
+        tracing::debug!(
+            kernel = kernel_name,
+            grid_x = config.grid.width,
+            grid_y = config.grid.height,
+            grid_z = config.grid.depth,
+            group_x = config.group.width,
+            group_y = config.group.height,
+            group_z = config.group.depth,
+            "kernel binding debug begin"
+        );
+
+        let mut seen_by_signature: FxHashMap<(String, String), crate::tensor::Dtype> = FxHashMap::default();
+        for binding in bindings {
+            if let Some(dtype) = binding.tensor_dtype {
+                let policy_desc = match crate::policy::resolve_policy_detailed(dtype, crate::policy::active_policy_variant()) {
+                    Ok(resolved) => format!(
+                        "policy={} source={:?} storage={:?} compute={:?}",
+                        resolved.policy.short_name(),
+                        resolved.resolution.source_dtype,
+                        resolved.resolution.storage_dtype,
+                        resolved.resolution.compute_dtype
+                    ),
+                    Err(err) => format!("policy_resolution_error={err:#}"),
+                };
+
+                tracing::debug!(
+                    kernel = kernel_name,
+                    buffer = binding.buffer_index,
+                    arg = %binding.name,
+                    metal_type = %binding.metal_type,
+                    rust_type = %binding.rust_type,
+                    tensor_dtype = ?dtype,
+                    max_linear_index = binding.max_linear_index,
+                    policy = %policy_desc,
+                    "kernel binding"
+                );
+
+                let sig = (binding.name.clone(), binding.metal_type.clone());
+                if let Some(prev_dtype) = seen_by_signature.get(&sig).copied()
+                    && prev_dtype != dtype
+                {
+                    tracing::warn!(
+                        kernel = kernel_name,
+                        arg = %binding.name,
+                        metal_type = %binding.metal_type,
+                        prev_dtype = ?prev_dtype,
+                        curr_dtype = ?dtype,
+                        "same arg+metal_type observed with different underlying tensor dtypes"
+                    );
+                } else {
+                    seen_by_signature.insert(sig, dtype);
+                }
+            } else {
+                tracing::debug!(
+                    kernel = kernel_name,
+                    buffer = binding.buffer_index,
+                    arg = %binding.name,
+                    metal_type = %binding.metal_type,
+                    rust_type = %binding.rust_type,
+                    "kernel binding (non-tensor)"
+                );
+            }
+        }
+
+        tracing::debug!(kernel = kernel_name, "kernel binding debug end");
+    }
+
     /// Check if command buffer capture is currently active.
     pub fn is_capturing(&self) -> bool {
         self.active_stream.is_some()
@@ -393,6 +477,25 @@ pub trait Kernel {
     /// This is auto-generated by the `KernelArgs` derive macro.
     fn bind(&self, encoder: &crate::types::ComputeCommandEncoder);
 
+    /// Optional runtime binding debug metadata.
+    fn debug_bindings(&self) -> Vec<crate::compound::BindingDebugArg> {
+        Vec::new()
+    }
+
+    /// Fast runtime specialization hash for pipeline cache keys.
+    /// Defaults to hashing primary dtype when available.
+    fn runtime_dtype_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        match self.dtype() {
+            Some(dtype) => {
+                let mut hasher = rustc_hash::FxHasher::default();
+                dtype.hash(&mut hasher);
+                hasher.finish()
+            }
+            None => 0,
+        }
+    }
+
     /// Returns the dispatch configuration (grid_size, group_size) for this kernel.
     /// Override this to enable the simplified `Foundry::run()` API.
     /// Default implementation panics - kernels must opt-in by implementing this.
@@ -441,6 +544,347 @@ This kernel cannot be used as a Stage in a CompoundKernel.",
         )
     }
 }
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RuntimeDtypeSlot {
+    used: bool,
+    dtype: Option<Dtype>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RuntimeDtypeSlots {
+    tensor: RuntimeDtypeSlot,
+    input: RuntimeDtypeSlot,
+    output: RuntimeDtypeSlot,
+    bias: RuntimeDtypeSlot,
+    residual: RuntimeDtypeSlot,
+    gamma: RuntimeDtypeSlot,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RuntimeIndexInfo {
+    has_known_index: bool,
+    max_linear_index: u64,
+}
+
+impl RuntimeIndexInfo {
+    fn ingest_binding(&mut self, binding: &crate::compound::BindingDebugArg) {
+        if let Some(max_idx) = binding.max_linear_index {
+            self.has_known_index = true;
+            self.max_linear_index = self.max_linear_index.max(max_idx);
+        }
+    }
+
+    fn select_index_width(self) -> u32 {
+        if self.has_known_index && self.max_linear_index > u64::from(u32::MAX) {
+            64
+        } else {
+            32
+        }
+    }
+}
+
+impl RuntimeDtypeSlots {
+    fn ingest_binding(&mut self, kernel_name: &str, binding: &crate::compound::BindingDebugArg) -> Result<(), MetalError> {
+        let metal_type = binding.metal_type.as_str();
+        let dtype = binding.tensor_dtype;
+
+        if metal_type.contains("TensorStorageT") {
+            Self::ingest_slot(kernel_name, "TensorStorageT", &mut self.tensor, binding, dtype)?;
+        }
+        if metal_type.contains("InputStorageT") {
+            Self::ingest_slot(kernel_name, "InputStorageT", &mut self.input, binding, dtype)?;
+        }
+        if metal_type.contains("OutputStorageT") {
+            Self::ingest_slot(kernel_name, "OutputStorageT", &mut self.output, binding, dtype)?;
+        }
+        if metal_type.contains("BiasStorageT") {
+            Self::ingest_slot(kernel_name, "BiasStorageT", &mut self.bias, binding, dtype)?;
+        }
+        if metal_type.contains("ResidualStorageT") {
+            Self::ingest_slot(kernel_name, "ResidualStorageT", &mut self.residual, binding, dtype)?;
+        }
+        if metal_type.contains("GammaStorageT") {
+            Self::ingest_slot(kernel_name, "GammaStorageT", &mut self.gamma, binding, dtype)?;
+        }
+        Ok(())
+    }
+
+    fn ingest_slot(
+        kernel_name: &str,
+        alias: &'static str,
+        slot: &mut RuntimeDtypeSlot,
+        binding: &crate::compound::BindingDebugArg,
+        dtype: Option<Dtype>,
+    ) -> Result<(), MetalError> {
+        slot.used = true;
+        if let Some(dtype) = dtype {
+            if let Some(prev) = slot.dtype {
+                if prev != dtype {
+                    return Err(MetalError::OperationFailed(format!(
+                        "Kernel `{}` has conflicting {} dtypes: {:?} vs {:?} (arg=`{}`, buffer={}).",
+                        kernel_name, alias, prev, dtype, binding.name, binding.buffer_index
+                    )));
+                }
+            } else {
+                slot.dtype = Some(dtype);
+            }
+        }
+        Ok(())
+    }
+
+    fn fill_used_from_fallback(&mut self, fallback_dtype: Dtype) {
+        let fill = |slot: &mut RuntimeDtypeSlot| {
+            if slot.used && slot.dtype.is_none() {
+                slot.dtype = Some(fallback_dtype);
+            }
+        };
+        fill(&mut self.tensor);
+        fill(&mut self.input);
+        fill(&mut self.output);
+        fill(&mut self.bias);
+        fill(&mut self.residual);
+        fill(&mut self.gamma);
+    }
+
+    fn emit_defines(self, kernel_name: &str, index_width: u32) -> Result<String, MetalError> {
+        let mut out = String::new();
+        self.emit_slot_define(
+            kernel_name,
+            &mut out,
+            "METALLIC_DTYPE_TENSOR_STORAGE",
+            "TensorStorageT",
+            self.tensor,
+        )?;
+        self.emit_slot_define(kernel_name, &mut out, "METALLIC_DTYPE_INPUT_STORAGE", "InputStorageT", self.input)?;
+        self.emit_slot_define(
+            kernel_name,
+            &mut out,
+            "METALLIC_DTYPE_OUTPUT_STORAGE",
+            "OutputStorageT",
+            self.output,
+        )?;
+        self.emit_slot_define(kernel_name, &mut out, "METALLIC_DTYPE_BIAS_STORAGE", "BiasStorageT", self.bias)?;
+        self.emit_slot_define(
+            kernel_name,
+            &mut out,
+            "METALLIC_DTYPE_RESIDUAL_STORAGE",
+            "ResidualStorageT",
+            self.residual,
+        )?;
+        self.emit_slot_define(kernel_name, &mut out, "METALLIC_DTYPE_GAMMA_STORAGE", "GammaStorageT", self.gamma)?;
+        let (compute_dtype, accum_dtype) = self.infer_math_dtypes();
+        out.push_str(&format!("#define METALLIC_DTYPE_COMPUTE {}\n", metal_math_type(compute_dtype)?));
+        out.push_str(&format!("#define METALLIC_DTYPE_ACCUM {}\n", metal_math_type(accum_dtype)?));
+        out.push_str(&format!("#define METALLIC_INDEX_WIDTH {}\n", index_width));
+        Ok(out)
+    }
+
+    fn iter_dtypes(self) -> [Option<Dtype>; 6] {
+        [
+            self.tensor.dtype,
+            self.input.dtype,
+            self.output.dtype,
+            self.bias.dtype,
+            self.residual.dtype,
+            self.gamma.dtype,
+        ]
+    }
+
+    fn infer_math_dtypes(self) -> (Dtype, Dtype) {
+        let mut has_quant = false;
+        let mut has_f32 = false;
+        let mut has_bf16 = false;
+        for dtype in self.iter_dtypes().into_iter().flatten() {
+            has_quant |= dtype.is_quantized();
+            has_f32 |= matches!(dtype, Dtype::F32);
+            has_bf16 |= matches!(dtype, Dtype::BF16);
+        }
+
+        // Favor fast-path compute by default (F16), while widening when runtime dtypes require it.
+        let quant_compute = crate::policy::active_policy_variant().quant_compute.dtype();
+        let compute_dtype = if has_f32 {
+            Dtype::F32
+        } else if has_bf16 {
+            Dtype::BF16
+        } else if has_quant {
+            quant_compute
+        } else {
+            Dtype::F16
+        };
+
+        let accum_dtype = resolve_accum_dtype_override(compute_dtype);
+        (compute_dtype, accum_dtype)
+    }
+
+    fn emit_slot_define(
+        self,
+        kernel_name: &str,
+        out: &mut String,
+        macro_name: &'static str,
+        alias: &'static str,
+        slot: RuntimeDtypeSlot,
+    ) -> Result<(), MetalError> {
+        if !slot.used {
+            return Ok(());
+        }
+        let dtype = slot.dtype.ok_or_else(|| {
+            MetalError::OperationFailed(format!(
+                "Kernel `{}` uses {} but no tensor dtype could be inferred from bindings.",
+                kernel_name, alias
+            ))
+        })?;
+        let metal_ty = metal_storage_type(dtype)?;
+        out.push_str(&format!("#define {} {}\n", macro_name, metal_ty));
+        Ok(())
+    }
+}
+
+fn resolve_accum_dtype_override(compute_dtype: Dtype) -> Dtype {
+    let requested = match ACCUM_DTYPE.get() {
+        Ok(Some(raw)) => match raw.trim().to_ascii_lowercase().as_str() {
+            "f16" | "half" => Dtype::F16,
+            "bf16" | "bfloat16" => Dtype::BF16,
+            "f32" | "float" => Dtype::F32,
+            other => panic!(
+                "Invalid {}='{}': unsupported accum dtype '{}', expected one of f16|bf16|f32",
+                ACCUM_DTYPE.key(),
+                raw,
+                other
+            ),
+        },
+        Ok(None) => Dtype::F32,
+        Err(err) => panic!("Failed to read {}: {err:#}", ACCUM_DTYPE.key()),
+    };
+
+    // Fail-fast if requested accumulation is narrower than compute precision.
+    let rank = |dtype: Dtype| match dtype {
+        Dtype::F16 => 0u8,
+        Dtype::BF16 => 1u8,
+        Dtype::F32 => 2u8,
+        _ => 255u8,
+    };
+    if rank(requested) < rank(compute_dtype) {
+        panic!(
+            "{}={} is incompatible with compute dtype {:?} (accum dtype cannot be narrower than compute).",
+            ACCUM_DTYPE.key(),
+            match requested {
+                Dtype::F16 => "f16",
+                Dtype::BF16 => "bf16",
+                Dtype::F32 => "f32",
+                _ => "unknown",
+            },
+            compute_dtype
+        );
+    }
+
+    requested
+}
+
+#[cfg(test)]
+mod math_dtype_tests {
+    use metallic_env::ACCUM_DTYPE;
+
+    use super::resolve_accum_dtype_override;
+    use crate::tensor::Dtype;
+
+    #[test]
+    #[serial_test::serial]
+    fn accum_override_accepts_explicit_f32() {
+        let _guard = ACCUM_DTYPE.set_guard("f32".to_string()).expect("set accum env");
+        assert_eq!(resolve_accum_dtype_override(Dtype::F32), Dtype::F32);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[should_panic(expected = "accum dtype cannot be narrower than compute")]
+    fn accum_override_rejects_narrower_than_compute() {
+        let _guard = ACCUM_DTYPE.set_guard("f16".to_string()).expect("set accum env");
+        let _ = resolve_accum_dtype_override(Dtype::F32);
+    }
+}
+
+#[cfg(test)]
+mod runtime_index_tests {
+    use super::RuntimeIndexInfo;
+    use crate::compound::BindingDebugArg;
+
+    fn tensor_binding(max_linear_index: Option<u64>) -> BindingDebugArg {
+        BindingDebugArg {
+            name: "input".to_string(),
+            buffer_index: 0,
+            metal_type: "const device InputStorageT*".to_string(),
+            rust_type: "TensorArg".to_string(),
+            tensor_dtype: Some(crate::tensor::Dtype::F16),
+            max_linear_index,
+        }
+    }
+
+    #[test]
+    fn index_width_defaults_to_32_when_unknown() {
+        let mut info = RuntimeIndexInfo::default();
+        info.ingest_binding(&tensor_binding(None));
+        assert_eq!(info.select_index_width(), 32);
+    }
+
+    #[test]
+    fn index_width_uses_64_when_max_index_exceeds_u32() {
+        let mut info = RuntimeIndexInfo::default();
+        info.ingest_binding(&tensor_binding(Some(u64::from(u32::MAX) + 1)));
+        assert_eq!(info.select_index_width(), 64);
+    }
+}
+
+fn metal_storage_type(dtype: Dtype) -> Result<&'static str, MetalError> {
+    match dtype {
+        Dtype::F16 => Ok("half"),
+        Dtype::F32 => Ok("float"),
+        Dtype::BF16 => Ok("bfloat"),
+        Dtype::U32 => Ok("uint"),
+        Dtype::Q4_0 | Dtype::Q4_1 | Dtype::Q5_K | Dtype::Q6_K | Dtype::Q8_0 => Ok("uchar"),
+        other => Err(MetalError::OperationNotSupported(format!(
+            "No Metal storage mapping for dtype {:?}",
+            other
+        ))),
+    }
+}
+
+fn metal_math_type(dtype: Dtype) -> Result<&'static str, MetalError> {
+    match dtype {
+        Dtype::F16 => Ok("half"),
+        Dtype::F32 => Ok("float"),
+        Dtype::BF16 => Ok("bfloat"),
+        Dtype::U32 => Ok("uint"),
+        other => Err(MetalError::OperationNotSupported(format!(
+            "No Metal math type mapping for dtype {:?}",
+            other
+        ))),
+    }
+}
+
+fn runtime_dtype_defines_for_kernel<K: Kernel>(kernel: &K) -> Result<String, MetalError> {
+    let mut slots = RuntimeDtypeSlots::default();
+    let mut index_info = RuntimeIndexInfo::default();
+    let kernel_name = kernel.function_name();
+
+    for binding in kernel.debug_bindings() {
+        slots.ingest_binding(kernel_name, &binding)?;
+        index_info.ingest_binding(&binding);
+    }
+
+    // Fallback for aliases that are present but had no concrete tensor bound (e.g. optional args).
+    // Keeps previous behavior when only `dtype()` is available.
+    if let Some(dtype) = kernel.dtype() {
+        let fallback_storage_dtype = crate::policy::resolve_policy_detailed(dtype, crate::policy::active_policy_variant())
+            .map_err(|err| MetalError::OperationFailed(format!("policy resolution failed for {:?}: {err:#}", dtype)))?
+            .resolution
+            .storage_dtype;
+        slots.fill_used_from_fallback(fallback_storage_dtype);
+    }
+
+    slots.emit_defines(kernel_name, index_info.select_index_width())
+}
+
 /// Internal helper for pipeline compilation from kernel metadata.
 pub fn compile_pipeline<K: Kernel>(device: &MetalDevice, kernel: &K) -> Result<MetalPipeline, MetalError> {
     use std::path::PathBuf;
@@ -476,6 +920,9 @@ pub fn compile_pipeline<K: Kernel>(device: &MetalDevice, kernel: &K) -> Result<M
     if !includes.contains(&"policies/base.metal") {
         includes.insert(0, "policies/base.metal");
     }
+    if !includes.contains(&"dtypes/runtime_types.metal") {
+        includes.insert(1, "dtypes/runtime_types.metal");
+    }
 
     if let Some(dtype) = kernel.dtype() {
         let policy = crate::policy::resolve_policy(dtype);
@@ -483,6 +930,13 @@ pub fn compile_pipeline<K: Kernel>(device: &MetalDevice, kernel: &K) -> Result<M
         if !includes.contains(&policy_h) {
             includes.push(policy_h);
         }
+    }
+
+    let runtime_dtype_defines = runtime_dtype_defines_for_kernel(kernel)?;
+    if !runtime_dtype_defines.is_empty() {
+        full_source.push_str("// Auto-generated runtime dtype defines\n");
+        full_source.push_str(&runtime_dtype_defines);
+        full_source.push('\n');
     }
 
     let mut source_path_ctx: Option<PathBuf> = None;

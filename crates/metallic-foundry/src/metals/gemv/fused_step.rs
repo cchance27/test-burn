@@ -39,13 +39,13 @@ pub struct CompiledFusedGemvStep {
 
 #[derive(Debug, KernelArgs)]
 pub struct FusedGemvArgs {
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device uchar*")]
     pub weights: TensorArg,
-    #[arg(buffer = 1)]
+    #[arg(buffer = 1, metal_type = "const device uchar*")]
     pub scales: Option<TensorArg>,
-    #[arg(buffer = 2)]
+    #[arg(buffer = 2, metal_type = "const device InputStorageT*")]
     pub input: TensorArg,
-    #[arg(buffer = 3)]
+    #[arg(buffer = 3, output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     #[arg(buffer = 4)]
     pub k_dim: u32,
@@ -53,13 +53,13 @@ pub struct FusedGemvArgs {
     pub n_dim: u32,
     #[arg(buffer = 6)]
     pub weights_per_block: u32,
-    #[arg(buffer = 7)]
+    #[arg(buffer = 7, metal_type = "const device BiasStorageT*")]
     pub bias: TensorArg,
     #[arg(buffer = 8)]
     pub has_bias: u32,
     #[arg(buffer = 9)]
     pub alpha: f32,
-    #[arg(buffer = 10)]
+    #[arg(buffer = 10, metal_type = "const device GammaStorageT*")]
     pub gamma: TensorArg,
     #[arg(buffer = 11)]
     pub epsilon: f32,
@@ -143,6 +143,14 @@ impl CompiledStep for CompiledFusedGemvStep {
         } else {
             self.step.weights_per_block.resolve(bindings)
         };
+
+        // Fast fused path is F16-only by design.
+        if !matches!(input.dtype, crate::tensor::Dtype::F16) {
+            return Err(MetalError::OperationNotSupported(format!(
+                "FusedGemv supports only F16 input dtype; got {:?}. Use explicit RMSNorm + GEMV steps for non-F16 paths.",
+                input.dtype
+            )));
+        }
 
         let args = FusedGemvArgs {
             weights,

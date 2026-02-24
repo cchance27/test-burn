@@ -11,7 +11,7 @@ fn flashattention_includes_flash_decode_metal() {
     let stage = FlashDecodeStage::<64>::new(SdpaParams::default(), select_flash_decode_variant_m2m3(64, 1024));
     let includes = stage.includes();
     assert!(
-        includes.contains(&"flashattention/flash_decode.metal"),
+        includes.contains(&"flashattention/decode_kernels.metal"),
         "expected flash decode include, got: {includes:?}"
     );
 }

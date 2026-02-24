@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Foundry, MetalError, compound::CompiledCompoundKernel, fusion::MetalPolicy, metals::{
-        common::{cache::get_or_build_compound_kernel, composition::manual_output}, mma::stages::{GemmEpilogueStage, MmaLoopStage, TileConfig, TileLayoutStage, TileLoadAStage, TileLoadBStage}
+        common::{cache::get_or_build_compound_kernel, composition::manual_output, dtype_contract::KernelDtypeDescriptor}, mma::stages::{GemmEpilogueStage, MmaLoopStage, TileConfig, TileLayoutStage, TileLoadAStage, TileLoadBStage}
     }, policy::activation::Activation, spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
@@ -85,22 +85,22 @@ impl GemmParams {
 #[derive(Debug, KernelArgs)]
 pub struct GemmV2Args {
     /// Input activation matrix A [M, K]
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub a: TensorArg,
     /// Weight matrix B [K, N]
-    #[arg(buffer = 1)]
+    #[arg(buffer = 1, metal_type = "const device uchar*")]
     pub b: TensorArg,
     /// Output matrix D [M, N]
-    #[arg(buffer = 2, output)]
+    #[arg(buffer = 2, output, metal_type = "device OutputStorageT*")]
     pub d: TensorArg,
     /// Optional C matrix for residual [M, N]
-    #[arg(buffer = 3)]
+    #[arg(buffer = 3, metal_type = "const device ResidualStorageT*")]
     pub c: TensorArg,
     /// Optional bias [N]
-    #[arg(buffer = 4)]
+    #[arg(buffer = 4, metal_type = "const device BiasStorageT*")]
     pub bias: TensorArg,
     /// B scales for quantized weights
-    #[arg(buffer = 5)]
+    #[arg(buffer = 5, metal_type = "const device uchar*")]
     pub b_scales: TensorArg,
     /// Weights per block for quantized B
     #[arg(buffer = 6)]
@@ -240,6 +240,16 @@ impl CompiledStep for super::CompiledGemmV2Step {
         let output = fast_bindings
             .get(self.d)
             .ok_or_else(|| MetalError::InputNotFound("output tensor".into()))?;
+        let c_tensor = if let Some(idx) = self.c {
+            Some(fast_bindings.get(idx).ok_or_else(|| MetalError::InputNotFound("C tensor".into()))?)
+        } else {
+            None
+        };
+        let bias_tensor = if let Some(idx) = self.bias {
+            Some(fast_bindings.get(idx).ok_or_else(|| MetalError::InputNotFound("bias".into()))?)
+        } else {
+            None
+        };
 
         // Resolve dimensions
         let m = self.m_dim.resolve(bindings);
@@ -247,7 +257,12 @@ impl CompiledStep for super::CompiledGemmV2Step {
         let k = self.k_dim.resolve(bindings);
 
         // Select tile config
-        let config = self.tile_config.unwrap_or_else(|| TileConfig::auto_select(m as usize, n as usize));
+        let config = self.tile_config.unwrap_or_else(|| {
+            let storage_bytes = KernelDtypeDescriptor::from_source_dtype(output.dtype)
+                .map(|desc| desc.storage_size_bytes)
+                .unwrap_or_else(|_| output.dtype.size_bytes());
+            TileConfig::auto_select_for_storage(m as usize, n as usize, storage_bytes)
+        });
 
         // Build params
         let params = GemmParams::simple(m as i32, n as i32, k as i32, self.transpose_a, self.transpose_b, config);
@@ -256,8 +271,43 @@ impl CompiledStep for super::CompiledGemmV2Step {
         // Check if we need alpha/beta/bias
         let has_alpha_beta = self.alpha != 1.0 || self.beta != 0.0 || self.c.is_some();
 
-        // Resolve Policy and LoaderStage from the bound weights dtype (do not rely on DSL hints).
+        // Resolve policies from runtime tensor dtypes (no DSL hints).
+        let a_policy = crate::policy::resolve_policy(a.dtype);
         let policy = crate::policy::resolve_policy(b.dtype);
+        let out_policy = crate::policy::resolve_policy(output.dtype);
+
+        // Activations/output/residual/bias must be dense (non-block-quant) tensors.
+        if a_policy.has_scale() {
+            return Err(MetalError::OperationNotSupported(format!(
+                "GemmV2 does not support quantized activation tensor dtype {:?}.",
+                a.dtype
+            )));
+        }
+        if out_policy.has_scale() {
+            return Err(MetalError::OperationNotSupported(format!(
+                "GemmV2 does not support quantized output tensor dtype {:?}.",
+                output.dtype
+            )));
+        }
+        if let Some(c_ref) = c_tensor {
+            let c_policy = crate::policy::resolve_policy(c_ref.dtype);
+            if c_policy.has_scale() {
+                return Err(MetalError::OperationNotSupported(format!(
+                    "GemmV2 does not support quantized residual tensor dtype {:?}.",
+                    c_ref.dtype
+                )));
+            }
+        }
+        if let Some(bias_ref) = bias_tensor {
+            let bias_policy = crate::policy::resolve_policy(bias_ref.dtype);
+            if bias_policy.has_scale() {
+                return Err(MetalError::OperationNotSupported(format!(
+                    "GemmV2 does not support quantized bias tensor dtype {:?}.",
+                    bias_ref.dtype
+                )));
+            }
+        }
+
         let loader = policy.loader_stage();
 
         // Bind Weights and Scales using LoaderStage
@@ -290,7 +340,7 @@ impl CompiledStep for super::CompiledGemmV2Step {
 
         // Get kernel (cached) - uses unified getter for all quant types.
         let kernel = get_gemm_kernel(
-            std::sync::Arc::new(crate::policy::f16::PolicyF16),
+            a_policy.clone(),
             policy.clone(),
             self.transpose_a,
             self.transpose_b,
@@ -301,17 +351,15 @@ impl CompiledStep for super::CompiledGemmV2Step {
         );
 
         // Build bias arg - use output as dummy if no bias
-        let bias = if let Some(idx) = self.bias {
-            let bias_tensor = fast_bindings.get(idx).ok_or_else(|| MetalError::InputNotFound("bias".into()))?;
-            TensorArg::from_tensor(bias_tensor)
+        let bias = if let Some(bias_ref) = bias_tensor {
+            TensorArg::from_tensor(bias_ref)
         } else {
             TensorArg::from_tensor(output) // Dummy
         };
 
         // Build C arg - use output as dummy if no residual
-        let c = if let Some(idx) = self.c {
-            let c_tensor = fast_bindings.get(idx).ok_or_else(|| MetalError::InputNotFound("C tensor".into()))?;
-            TensorArg::from_tensor(c_tensor)
+        let c = if let Some(c_ref) = c_tensor {
+            TensorArg::from_tensor(c_ref)
         } else {
             TensorArg::from_tensor(output) // Dummy
         };

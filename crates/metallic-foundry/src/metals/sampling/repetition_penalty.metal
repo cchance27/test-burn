@@ -1,8 +1,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
-kernel void apply_repetition_penalty_f16(
-    device half* logits [[buffer(0)]],
+kernel void apply_repetition_penalty(
+    device OutputStorageT* logits [[buffer(0)]],
     // Packed pairs: [tok_0, count_0, tok_1, count_1, ...]
     const device uint* recent_pairs [[buffer(1)]],
     constant RepetitionPenaltyParams& params [[buffer(2)]],
@@ -34,7 +34,7 @@ kernel void apply_repetition_penalty_f16(
         return;
     }
 
-    float v = static_cast<float>(logits[tok]);
+    float v = metallic_load_input(logits, tok);
     if (has_repeat) {
         const float scale = powr(penalty, static_cast<float>(count));
         v = (v > 0.0f) ? (v / scale) : (v * scale);
@@ -48,6 +48,5 @@ kernel void apply_repetition_penalty_f16(
     if (has_frequency) {
         v -= frequency_penalty * static_cast<float>(count);
     }
-    logits[tok] = static_cast<half>(v);
+    metallic_store_output(logits, tok, metallic_to_accum(v));
 }
-

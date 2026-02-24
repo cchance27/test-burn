@@ -1,6 +1,6 @@
 use half::f16;
 use metallic_foundry::{
-    Foundry, metals::swiglu::ffn_step::FusedFfnSwiGluRmsNormStep, spec::{Step, TensorBindings}, storage::Pooled, tensor::{F16, Q8_0, Tensor as FoundryTensor, TensorInit}
+    Foundry, metals::swiglu::ffn_step::FusedFfnSwiGluRmsNormStep, spec::{Step, TensorBindings}, storage::Pooled, tensor::{F16, F32, Q8_0, Tensor as FoundryTensor, TensorInit}
 };
 use ndarray::Array2;
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -252,5 +252,134 @@ fn test_fused_ffn_swiglu_rmsnorm_q8_parity_m2() -> Result<(), Box<dyn std::error
     // Q8 path uses fp16 activation math + int8 dequantization; allow a slightly looser tolerance.
     assert!(max_diff < 5.0, "max diff too high: {}", max_diff);
 
+    Ok(())
+}
+
+#[test]
+fn test_fused_ffn_swiglu_rmsnorm_mixed_policy_fails_fast() -> Result<(), Box<dyn std::error::Error>> {
+    let mut foundry = Foundry::new()?;
+    let mut bindings = TensorBindings::new();
+
+    let m: usize = 1;
+    let k_dim: usize = 32;
+    let n_dim: usize = 32;
+    bindings.set_int_global("m", m);
+
+    let input_f16 = vec![f16::from_f32(0.5); m * k_dim];
+    let gamma_f16 = vec![f16::from_f32(1.0); k_dim];
+    let b_gate_f16 = vec![f16::from_f32(0.0); n_dim];
+    let b_up_f16 = vec![f16::from_f32(0.0); n_dim];
+
+    // Gate is quantized Q8, Up is dense F16 -> mixed-policy should hard-fail.
+    let w_gate_q8 = vec![0u8; n_dim * k_dim];
+    let s_gate_bytes = vec![0u8; n_dim * 2];
+    let w_up_f16 = vec![f16::from_f32(0.1); n_dim * k_dim];
+
+    let input = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![m, k_dim], TensorInit::CopyFrom(&input_f16))?;
+    let gamma = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![k_dim], TensorInit::CopyFrom(&gamma_f16))?;
+    let w_gate = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![n_dim, k_dim], TensorInit::CopyFrom(&w_gate_q8))?;
+    let s_gate = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![n_dim * 2], TensorInit::CopyFrom(&s_gate_bytes))?;
+    let w_up = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_dim, k_dim], TensorInit::CopyFrom(&w_up_f16))?;
+    let b_gate = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_dim], TensorInit::CopyFrom(&b_gate_f16))?;
+    let b_up = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_dim], TensorInit::CopyFrom(&b_up_f16))?;
+    let output = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![m, n_dim], TensorInit::Uninitialized)?;
+
+    bindings.insert("input".to_string(), metallic_foundry::types::TensorArg::from_tensor(&input));
+    bindings.insert("gamma".to_string(), metallic_foundry::types::TensorArg::from_tensor(&gamma));
+    bindings.insert("w_gate".to_string(), metallic_foundry::types::TensorArg::from_tensor(&w_gate));
+    bindings.insert(
+        "w_gate_scales".to_string(),
+        metallic_foundry::types::TensorArg::from_tensor(&s_gate),
+    );
+    bindings.insert("w_up".to_string(), metallic_foundry::types::TensorArg::from_tensor(&w_up));
+    bindings.insert("b_gate".to_string(), metallic_foundry::types::TensorArg::from_tensor(&b_gate));
+    bindings.insert("b_up".to_string(), metallic_foundry::types::TensorArg::from_tensor(&b_up));
+    bindings.insert("output".to_string(), metallic_foundry::types::TensorArg::from_tensor(&output));
+
+    let fused = FusedFfnSwiGluRmsNormStep {
+        input: "input".into(),
+        gamma: "gamma".into(),
+        w_gate: "w_gate".into(),
+        w_up: "w_up".into(),
+        b_gate: Some("b_gate".into()),
+        b_up: Some("b_up".into()),
+        output: "output".into(),
+        weights_per_block: 32,
+        epsilon: Some(1e-6),
+    };
+
+    let err = fused
+        .execute(&mut foundry, &mut bindings)
+        .expect_err("mixed-policy fused FFN SwiGLU should fail fast");
+    let msg = err.to_string();
+    assert!(msg.contains("mixed-policy is unsupported"), "unexpected error: {msg}");
+    Ok(())
+}
+
+#[test]
+fn test_fused_ffn_swiglu_rmsnorm_f32_dense_parity_m1() -> Result<(), Box<dyn std::error::Error>> {
+    let mut foundry = Foundry::new()?;
+    let mut bindings = TensorBindings::new();
+    let mut rng = StdRng::seed_from_u64(44);
+
+    let m: usize = 1;
+    let k_dim: usize = 32;
+    let n_dim: usize = 32;
+    bindings.set_int_global("m", m);
+
+    let input_cpu = Array2::from_shape_fn((m, k_dim), |_| rng.random_range(-1.0f32..1.0f32));
+    let gamma_cpu: Vec<f32> = (0..k_dim).map(|_| rng.random_range(0.9f32..1.1f32)).collect();
+    let w_gate_cpu = Array2::from_shape_fn((n_dim, k_dim), |_| rng.random_range(-0.1f32..0.1f32));
+    let w_up_cpu = Array2::from_shape_fn((n_dim, k_dim), |_| rng.random_range(-0.1f32..0.1f32));
+    let b_gate_cpu: Vec<f32> = (0..n_dim).map(|_| rng.random_range(-0.01f32..0.01f32)).collect();
+    let b_up_cpu: Vec<f32> = (0..n_dim).map(|_| rng.random_range(-0.01f32..0.01f32)).collect();
+
+    let input_vec: Vec<f32> = input_cpu.iter().copied().collect();
+    let w_gate_vec: Vec<f32> = w_gate_cpu.iter().copied().collect();
+    let w_up_vec: Vec<f32> = w_up_cpu.iter().copied().collect();
+
+    let input = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![m, k_dim], TensorInit::CopyFrom(&input_vec))?;
+    let gamma = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![k_dim], TensorInit::CopyFrom(&gamma_cpu))?;
+    let w_gate = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![n_dim, k_dim], TensorInit::CopyFrom(&w_gate_vec))?;
+    let w_up = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![n_dim, k_dim], TensorInit::CopyFrom(&w_up_vec))?;
+    let b_gate = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![n_dim], TensorInit::CopyFrom(&b_gate_cpu))?;
+    let b_up = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![n_dim], TensorInit::CopyFrom(&b_up_cpu))?;
+    let output = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![m, n_dim], TensorInit::Uninitialized)?;
+
+    bindings.insert("input".to_string(), metallic_foundry::types::TensorArg::from_tensor(&input));
+    bindings.insert("gamma".to_string(), metallic_foundry::types::TensorArg::from_tensor(&gamma));
+    bindings.insert("w_gate".to_string(), metallic_foundry::types::TensorArg::from_tensor(&w_gate));
+    bindings.insert("w_up".to_string(), metallic_foundry::types::TensorArg::from_tensor(&w_up));
+    bindings.insert("b_gate".to_string(), metallic_foundry::types::TensorArg::from_tensor(&b_gate));
+    bindings.insert("b_up".to_string(), metallic_foundry::types::TensorArg::from_tensor(&b_up));
+    bindings.insert("output".to_string(), metallic_foundry::types::TensorArg::from_tensor(&output));
+
+    let fused = FusedFfnSwiGluRmsNormStep {
+        input: "input".into(),
+        gamma: "gamma".into(),
+        w_gate: "w_gate".into(),
+        w_up: "w_up".into(),
+        b_gate: Some("b_gate".into()),
+        b_up: Some("b_up".into()),
+        output: "output".into(),
+        weights_per_block: 32,
+        epsilon: Some(1e-6),
+    };
+
+    fused.execute(&mut foundry, &mut bindings)?;
+    foundry.synchronize()?;
+
+    let input_norm = cpu_rmsnorm_rows(&input_cpu, &gamma_cpu, 1e-6);
+    let gate_ref = cpu_matmul_xt(&input_norm, &w_gate_cpu);
+    let up_ref = cpu_matmul_xt(&input_norm, &w_up_cpu);
+    let out_ref = cpu_swiglu(&gate_ref, &up_ref, &b_gate_cpu, &b_up_cpu);
+
+    let out_gpu: Vec<f32> = output.to_vec(&foundry);
+    let mut max_diff = 0.0f32;
+    for (g, c) in out_gpu.iter().zip(out_ref.iter()) {
+        max_diff = max_diff.max((g - c).abs());
+    }
+
+    assert!(max_diff < 0.2, "max diff too high: {}", max_diff);
     Ok(())
 }

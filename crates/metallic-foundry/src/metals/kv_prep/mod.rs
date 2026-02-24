@@ -146,7 +146,7 @@ impl KvPrepFusedParams {
     }
 }
 
-/// Fused KV-prep kernel for F16 activations.
+/// Fused KV-prep kernel for dense activations (runtime storage type).
 ///
 /// Constraints:
 /// - head_dim must be even (RoPE pairs)
@@ -157,25 +157,30 @@ impl KvPrepFusedParams {
 #[derive(Kernel, KernelArgs, Clone, Default)]
 #[kernel(
     source = "kv_prep/kv_prep_fused.metal",
-    function = "kv_prep_fused_kernel_f16",
+    function = "kv_prep_fused_kernel",
     args = KvPrepFusedParamsResolved,
     dispatch = per_element,
-    dtype = F16,
+    include_exprs("crate::policy::resolve_policy(self.q.dtype()).header()"),
     step = false
 )]
 pub struct KvPrepFused {
+    #[arg(metal_type = "const device InputStorageT*")]
     pub q: TensorArg,
+    #[arg(metal_type = "const device InputStorageT*")]
     pub k: TensorArg,
+    #[arg(metal_type = "const device InputStorageT*")]
     pub v: TensorArg,
 
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub q_rot: TensorArg,
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub k_cache: TensorArg,
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub v_cache: TensorArg,
 
+    #[arg(metal_type = "const device TensorStorageT*")]
     pub cos: TensorArg,
+    #[arg(metal_type = "const device TensorStorageT*")]
     pub sin: TensorArg,
 
     pub params: KvPrepFusedParamsResolved,

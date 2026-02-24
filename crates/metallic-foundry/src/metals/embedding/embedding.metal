@@ -18,7 +18,7 @@ ALWAYS_INLINE void run_embedding_core(
     const device uchar* table_bytes,
     const device uchar* scale_bytes,
     const device uint* indices,
-    device half* out,
+    device OutputStorageT* out,
     constant EmbeddingParams* params,
     uint gid
 ) {
@@ -33,7 +33,7 @@ ALWAYS_INLINE void run_embedding_core(
 
     uint tok = indices[pos];
     if (tok >= vocab_size) {
-        out[gid] = (half)0;
+        metallic_store_output(out, gid, metallic_to_accum(0.0f));
         return;
     }
 
@@ -58,5 +58,5 @@ ALWAYS_INLINE void run_embedding_core(
 #endif
     }
 
-    out[gid] = (half)(val[0] * scale + affine);
+    metallic_store_output(out, gid, metallic_to_accum(val[0] * scale + affine));
 }

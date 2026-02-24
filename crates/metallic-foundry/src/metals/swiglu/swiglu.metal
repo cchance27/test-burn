@@ -7,6 +7,10 @@ using namespace metal;
 
 // SwigluParams struct is injected by Foundry via struct_defs()
 
+// Fast vectorized path aliases (currently F16-specialized).
+typedef FastScalarT SwigluFastScalarT;
+typedef FastVec4T SwigluFastVec4T;
+
 // ============================================================================
 // SIMD GEMV Epilogue (for fused decode path)
 // ============================================================================
@@ -20,12 +24,12 @@ struct SwiGluEpilogue {
         uint lane_id,
         uint logical_col,
         const uint N[HEADS],
-        const device half *bias[HEADS],
+        const device BiasStorageT *bias[HEADS],
         const uint has_bias_flags[HEADS],
         const float alpha,
         const float beta,
-        const device half *residual,
-        device half *result_y[HEADS]
+        const device ResidualStorageT *residual,
+        device OutputStorageT *result_y[HEADS]
     ) {
         if (logical_col >= N[0]) return;
 
@@ -44,13 +48,13 @@ struct SwiGluEpilogue {
         up += simd_shuffle_xor(up, 1u);
 
         if (lane_id == 0) {
-            if (has_bias_flags[0] && bias[0]) gate += (float)bias[0][logical_col];
-            if (has_bias_flags[1] && bias[1]) up += (float)bias[1][logical_col];
+            if (has_bias_flags[0] && bias[0]) gate += (float)metallic_load_bias(bias[0], (ulong)logical_col);
+            if (has_bias_flags[1] && bias[1]) up += (float)metallic_load_bias(bias[1], (ulong)logical_col);
 
             float agg_gate = ACTIVATION::apply(gate);
             float val = agg_gate * up;
 
-            result_y[0][logical_col] = (half)val;
+            metallic_store_output(result_y[0], (ulong)logical_col, metallic_to_accum(val));
         }
     }
 };
@@ -58,9 +62,9 @@ struct SwiGluEpilogue {
 template<typename ACTIVATION>
 ALWAYS_INLINE void run_swiglu_write_stage(
     float2 input_var,
-    device half* output,
-    const device half* b_gate,
-    const device half* b_up,
+    device OutputStorageT* output,
+    const device BiasStorageT* b_gate,
+    const device BiasStorageT* b_up,
     uint has_b_gate,
     uint has_b_up,
     uint lane_id,
@@ -72,14 +76,15 @@ ALWAYS_INLINE void run_swiglu_write_stage(
         float gate = input_var.x;
         float up = input_var.y;
         if (has_b_gate != 0) {
-            gate += (float)b_gate[row_idx];
+            gate += (float)metallic_load_bias(b_gate, (ulong)row_idx);
         }
         if (has_b_up != 0) {
-            up += (float)b_up[row_idx];
+            up += (float)metallic_load_bias(b_up, (ulong)row_idx);
         }
         float activated_gate = ACTIVATION::apply(gate);
         float val = activated_gate * up;
-        output[batch_idx * n_dim + row_idx] = (half)val;
+        const ulong out_idx = (ulong)batch_idx * (ulong)n_dim + (ulong)row_idx;
+        metallic_store_output(output, out_idx, metallic_to_accum(val));
     }
 }
 
@@ -88,193 +93,119 @@ ALWAYS_INLINE void run_swiglu_write_stage(
 // Only compiled when NOT in a fused compound kernel context.
 // ============================================================================
 
-template<typename ACTIVATION>
+template<typename ACTIVATION, typename TGate, typename TOutput, typename TBias>
 ALWAYS_INLINE void run_swiglu_stage(
-    const device half* gate,
-    device half* up_inout,
-    const device half* gate_bias,
-    const device half* up_bias,
+    const device TGate* gate,
+    device TOutput* up_inout,
+    const device TBias* gate_bias,
+    const device TBias* up_bias,
     constant SwigluParams* params,
     uint3 gid,
     uint3 lid,
     uint3 tptg
 ) {
-    uint total_elements = params->total_elements;
-    uint bias_len = params->bias_len;
-    uint vector_width = params->vector_width;
-    uint gate_leading_stride = params->gate_leading_stride;
-    uint up_leading_stride = params->up_leading_stride;
-    
-    // Calculate global thread index from CompoundKernel standard arguments
-    uint global_id = gid.x * tptg.x + lid.x; 
-    
-    if (bias_len == 0u) return; 
-    
-    const uint kVectorWidth = 4;
-    const uint row_length = bias_len;
-    
-    if (vector_width == kVectorWidth) {
-        const uint vecs_per_row = row_length / kVectorWidth;
+    const uint total_elements = params->total_elements;
+    const uint bias_len = params->bias_len;
+    const uint vector_width = params->vector_width;
+    const uint gate_leading_stride = params->gate_leading_stride;
+    const uint up_leading_stride = params->up_leading_stride;
+    const uint global_id = gid.x * tptg.x + lid.x;
+
+    if (bias_len == 0u) return;
+    if (global_id >= total_elements) return;
+
+    const bool use_f16_vectorized = (vector_width == 4u)
+        && METALLIC_FASTPATH_INPUT_HALF
+        && METALLIC_FASTPATH_OUTPUT_HALF
+        && METALLIC_FASTPATH_BIAS_HALF;
+
+    if (use_f16_vectorized) {
+        const device SwigluFastScalarT* gate_half = (const device SwigluFastScalarT*)gate;
+        device SwigluFastScalarT* up_half = (device SwigluFastScalarT*)up_inout;
+        const device SwigluFastScalarT* gate_bias_half = (const device SwigluFastScalarT*)gate_bias;
+        const device SwigluFastScalarT* up_bias_half = (const device SwigluFastScalarT*)up_bias;
+
+        const uint row_length = bias_len;
+        const uint vecs_per_row = row_length / 4u;
         if (vecs_per_row == 0u) return;
-        
+
         const uint total_rows = total_elements / row_length;
         const uint total_vector_threads = total_rows * vecs_per_row;
-        const uint remainder = total_elements - total_vector_threads * kVectorWidth;
-        
+        const uint remainder = total_elements - total_vector_threads * 4u;
+
         if (global_id < total_vector_threads) {
-            using ScalarVec = half4;
+            using ScalarVec = SwigluFastVec4T;
             using AccumVec = float4;
-            
+
             const uint row = global_id / vecs_per_row;
             const uint col_vec = global_id % vecs_per_row;
-            const uint col = col_vec * kVectorWidth;
-            
+            const uint col = col_vec * 4u;
+
             const uint gate_index = row * gate_leading_stride + col;
             const uint up_index = row * up_leading_stride + col;
-            
-            const device ScalarVec* gate_vec_ptr = 
-                reinterpret_cast<const device ScalarVec*>(gate + gate_index);
-            device ScalarVec* up_vec_ptr = 
-                reinterpret_cast<device ScalarVec*>(up_inout + up_index);
-            const device ScalarVec* gate_bias_vec = 
-                reinterpret_cast<const device ScalarVec*>(gate_bias);
-            const device ScalarVec* up_bias_vec = 
-                reinterpret_cast<const device ScalarVec*>(up_bias);
-                
-            // Load and add biases
-            AccumVec gate_vals = (AccumVec)(gate_vec_ptr[0]) + (AccumVec)(gate_bias_vec[col_vec]);
-            AccumVec up_vals = (AccumVec)(up_vec_ptr[0]) + (AccumVec)(up_bias_vec[col_vec]);
-            
-            AccumVec activated = ACTIVATION::apply(gate_vals);
-            
-            // Output
+
+            const device ScalarVec* gate_vec_ptr = reinterpret_cast<const device ScalarVec*>(gate_half + gate_index);
+            device ScalarVec* up_vec_ptr = reinterpret_cast<device ScalarVec*>(up_half + up_index);
+            const device ScalarVec* gate_bias_vec = reinterpret_cast<const device ScalarVec*>(gate_bias_half);
+            const device ScalarVec* up_bias_vec = reinterpret_cast<const device ScalarVec*>(up_bias_half);
+
+            const AccumVec gate_vals = (AccumVec)(gate_vec_ptr[0]) + (AccumVec)(gate_bias_vec[col_vec]);
+            const AccumVec up_vals = (AccumVec)(up_vec_ptr[0]) + (AccumVec)(up_bias_vec[col_vec]);
+            const AccumVec activated = ACTIVATION::apply(gate_vals);
             up_vec_ptr[0] = (ScalarVec)(activated * up_vals);
-            
-        } else if (global_id < total_vector_threads + remainder) {
-            const uint scalar_linear = total_vector_threads * kVectorWidth + (global_id - total_vector_threads);
+            return;
+        }
+
+        if (global_id < total_vector_threads + remainder) {
+            const uint scalar_linear = total_vector_threads * 4u + (global_id - total_vector_threads);
             const uint row = scalar_linear / row_length;
             const uint col = scalar_linear % row_length;
-            
             const uint gate_index = row * gate_leading_stride + col;
             const uint up_index = row * up_leading_stride + col;
-            
-            float gate_val = (float)gate[gate_index] + (float)gate_bias[col];
-            float up_val = (float)up_inout[up_index] + (float)up_bias[col];
-            float activated = ACTIVATION::apply(gate_val);
-            up_inout[up_index] = (half)(activated * up_val);
+
+            const float gate_val = (float)gate_half[gate_index] + (float)gate_bias_half[col];
+            const float up_val = (float)up_half[up_index] + (float)up_bias_half[col];
+            const float activated = ACTIVATION::apply(gate_val);
+            up_half[up_index] = (SwigluFastScalarT)(activated * up_val);
         }
-    } else {
-        // Scalar fallback
-        if (global_id < total_elements) {
-            const uint row = global_id / row_length;
-            const uint col = global_id % row_length;
-            const uint gate_index = row * gate_leading_stride + col;
-            const uint up_index = row * up_leading_stride + col;
-            
-            float gate_val = (float)gate[gate_index] + (float)gate_bias[col];
-            float up_val = (float)up_inout[up_index] + (float)up_bias[col];
-            float activated = ACTIVATION::apply(gate_val);
-            up_inout[up_index] = (half)(activated * up_val);
-        }
+        return;
     }
+
+    const uint row = global_id / bias_len;
+    const uint col = global_id % bias_len;
+    const uint gate_index = row * gate_leading_stride + col;
+    const uint up_index = row * up_leading_stride + col;
+    const float gate_val = (float)gate[gate_index] + (float)gate_bias[col];
+    const float up_val = (float)up_inout[up_index] + (float)up_bias[col];
+    const float activated = ACTIVATION::apply(gate_val);
+    up_inout[up_index] = (TOutput)(activated * up_val);
 }
 
 #ifndef FUSED_KERNEL
 
-/// SwiGLU Fused Activation kernel for half precision.
+/// SwiGLU Fused Activation kernel for runtime storage/bias/output types.
 ///
 /// Computes: output = ACTIVATION(gate + gate_bias) * (up + up_bias)
 ///
-/// This kernel uses vectorization (half4) when bias_len is aligned.
-kernel void swiglu_fused_activation_f16(
-    const device half* gate [[buffer(0)]],
-    device half* up_inout [[buffer(1)]],
-    const device half* gate_bias [[buffer(2)]],
-    const device half* up_bias [[buffer(3)]],
+/// This kernel uses vectorization (SwigluFastVec4T) when bias_len is aligned.
+kernel void swiglu_fused_activation(
+    const device InputStorageT* gate [[buffer(0)]],
+    device OutputStorageT* up_inout [[buffer(1)]],
+    const device BiasStorageT* gate_bias [[buffer(2)]],
+    const device BiasStorageT* up_bias [[buffer(3)]],
     constant SwigluParams* params [[buffer(4)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    uint total_elements = params->total_elements;
-    uint bias_len = params->bias_len;
-    uint vector_width = params->vector_width;
-    uint gate_leading_stride = params->gate_leading_stride;
-    uint up_leading_stride = params->up_leading_stride;
-    
-    if (bias_len == 0u) return;
-    
-    const uint kVectorWidth = 4;
-    const uint row_length = bias_len;
-    
-    // Vectorized path
-    if (vector_width == kVectorWidth) {
-        const uint vecs_per_row = row_length / kVectorWidth;
-        if (vecs_per_row == 0u) return;
-        
-        const uint total_rows = total_elements / row_length;
-        const uint total_vector_threads = total_rows * vecs_per_row;
-        const uint remainder = total_elements - total_vector_threads * kVectorWidth;
-        
-        if (gid < total_vector_threads) {
-            using ScalarVec = half4;
-            using AccumVec = float4;
-            
-            const uint row = gid / vecs_per_row;
-            const uint col_vec = gid % vecs_per_row;
-            const uint col = col_vec * kVectorWidth;
-            
-            const uint gate_index = row * gate_leading_stride + col;
-            const uint up_index = row * up_leading_stride + col;
-            
-            const device ScalarVec* gate_vec_ptr = 
-                reinterpret_cast<const device ScalarVec*>(gate + gate_index);
-            device ScalarVec* up_vec_ptr = 
-                reinterpret_cast<device ScalarVec*>(up_inout + up_index);
-            const device ScalarVec* gate_bias_vec = 
-                reinterpret_cast<const device ScalarVec*>(gate_bias);
-            const device ScalarVec* up_bias_vec = 
-                reinterpret_cast<const device ScalarVec*>(up_bias);
-            
-            // Load and add biases
-            AccumVec gate_vals = (AccumVec)(gate_vec_ptr[0]) + (AccumVec)(gate_bias_vec[col_vec]);
-            AccumVec up_vals = (AccumVec)(up_vec_ptr[0]) + (AccumVec)(up_bias_vec[col_vec]);
-            
-            // Apply Activation
-            AccumVec activated = ACTIVATION::apply(gate_vals);
-            
-            // Output
-            up_vec_ptr[0] = (ScalarVec)(activated * up_vals);
-            return;
-        } else if (gid < total_vector_threads + remainder) {
-            // Handle remainder elements
-            const uint scalar_linear = total_vector_threads * kVectorWidth + (gid - total_vector_threads);
-            const uint row = scalar_linear / row_length;
-            const uint col = scalar_linear % row_length;
-            
-            const uint gate_index = row * gate_leading_stride + col;
-            const uint up_index = row * up_leading_stride + col;
-            
-            float gate_val = (float)gate[gate_index] + (float)gate_bias[col];
-            float up_val = (float)up_inout[up_index] + (float)up_bias[col];
-            float activated = ACTIVATION::apply(gate_val);
-            up_inout[up_index] = (half)(activated * up_val);
-            return;
-        } else {
-            return;
-        }
-    }
-    
-    // Scalar fallback
-    if (gid >= total_elements) return;
-    
-    const uint row = gid / row_length;
-    const uint col = gid % row_length;
-    const uint gate_index = row * gate_leading_stride + col;
-    const uint up_index = row * up_leading_stride + col;
-    
-    float gate_val = (float)gate[gate_index] + (float)gate_bias[col];
-    float up_val = (float)up_inout[up_index] + (float)up_bias[col];
-    float activated = ACTIVATION::apply(gate_val);
-    up_inout[up_index] = (half)(activated * up_val);
+    run_swiglu_stage<ACTIVATION>(
+        gate,
+        up_inout,
+        gate_bias,
+        up_bias,
+        params,
+        uint3(gid, 0u, 0u),
+        uint3(0u, 0u, 0u),
+        uint3(1u, 1u, 1u)
+    );
 }
 
 #endif // FUSED_KERNEL

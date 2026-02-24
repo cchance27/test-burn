@@ -240,21 +240,43 @@ pub(crate) fn derive_stage(input: TokenStream) -> TokenStream {
         _ => panic!("Stage only supports structs"),
     };
 
-    let buffer_args = arg_infos.iter().filter(|info| !info.stage_skip).map(|info| {
+    let require_explicit_metal_type = |info: &ArgInfo| -> Result<String, syn::Error> {
+        if let Some(mtype) = info.metal_type.clone() {
+            return Ok(mtype);
+        }
+        if info.is_buffer {
+            let field_name = info
+                .name_ident
+                .as_ref()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| info.name.clone());
+            return Err(syn::Error::new_spanned(
+                &info.rust_type_actual,
+                format!(
+                    "Stage `{}` field `{}` is missing #[arg(metal_type = \"...\")]. Explicit metal_type is required for buffer/tensor args.",
+                    name, field_name
+                ),
+            ));
+        }
+        Ok(infer_metal_type(&info.rust_type_actual, info.is_buffer, info.is_output))
+    };
+
+    let mut buffer_args = Vec::new();
+    for info in arg_infos.iter().filter(|info| !info.stage_skip) {
         let arg_name = &info.name;
         let idx = info.buffer_index;
-        let mtype = info
-            .metal_type
-            .clone()
-            .unwrap_or_else(|| infer_metal_type(&info.rust_type_actual, info.is_buffer, info.is_output));
-        quote::quote! {
+        let mtype = match require_explicit_metal_type(info) {
+            Ok(v) => v,
+            Err(err) => return TokenStream::from(err.to_compile_error()),
+        };
+        buffer_args.push(quote::quote! {
             #root::compound::BufferArg {
                 name: #arg_name,
                 metal_type: #mtype,
                 buffer_index: #idx as u32,
             }
-        }
-    });
+        });
+    }
 
     // Generate includes vec
     let mut static_includes: Vec<String> = Vec::new();

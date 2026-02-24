@@ -46,15 +46,17 @@ pub struct RepeatKvHeadsParams {
 #[derive(Kernel, KernelArgs, Clone, Default)]
 #[kernel(
     source = "repeat_kv_heads/repeat_kv_heads.metal",
-    function = "repeat_kv_heads_kernel_f16",
+    function = "repeat_kv_heads_kernel",
     args = "RepeatKvHeadsParamsResolved",
+    include_exprs("crate::policy::resolve_policy(self.input.dtype()).header()"),
     step = true
 )]
 pub struct RepeatKvHeads {
     /// Input tensor [batch * n_kv_heads, cache_stride, head_dim].
+    #[arg(metal_type = "const device InputStorageT*")]
     pub input: TensorArg,
     /// Output tensor [batch * n_heads, seq, head_dim].
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     /// Kernel parameters.
     pub params: RepeatKvHeadsParamsResolved,

@@ -46,6 +46,21 @@ impl TileConfig {
         }
     }
 
+    /// Select tile config with storage-byte aware guardrails.
+    ///
+    /// Existing heuristics are tuned for 2-byte storage (fp16). For wider storage
+    /// (fp32 now, bf16 later), prefer conservative tiles to reduce threadgroup pressure.
+    pub fn auto_select_for_storage(m: usize, n: usize, storage_bytes: usize) -> Self {
+        let base = Self::auto_select(m, n);
+        if storage_bytes <= 2 {
+            return base;
+        }
+        match base {
+            TileConfig::HighPerformance | TileConfig::SkinnyN => TileConfig::Default,
+            keep => keep,
+        }
+    }
+
     /// Get tile sizes: (BM, BN, BK, WM, WN)
     pub fn tile_sizes(&self) -> (u32, u32, u32, u32, u32) {
         match self {
@@ -65,7 +80,7 @@ impl TileConfig {
 
     /// Threadgroup memory padding to avoid bank conflicts.
     pub fn tgp_padding(&self) -> u32 {
-        4 // 16 bytes / sizeof(half) = 4 elements padding
+        4 // Keep one 16-byte cacheline worth of padding in tile elements.
     }
 }
 
@@ -95,8 +110,8 @@ impl TileConfig {
     const ushort simd_lane_id = lid.x % 32;
     
     // Threadgroup memory allocation
-    threadgroup half As[TGP_MEM_SIZE_A];
-    threadgroup half Bs[TGP_MEM_SIZE_B];
+    threadgroup MmaTileT As[TGP_MEM_SIZE_A];
+    threadgroup MmaTileT Bs[TGP_MEM_SIZE_B];
     
     // Tile bounds in output
     const short tgp_bm = min(GEMM_BM, params.m - tile_m * GEMM_BM);
@@ -188,30 +203,31 @@ struct BlockSwizzle {
 /// Uses SimpleTileLoader for F16 (no dequant needed).
 #[derive(Debug, Clone, DeriveStage)]
 #[stage(
-    includes("mma/tile_loader.metal"),
+    includes("dtypes/runtime_types.metal", "mma/tile_loader.metal"),
     policy_field = "policy",
     template_bindings(
         batch_offset = "self.policy.bytes(\"batch_idx * params.batch_stride_a\")",
         tile_offset = "self.policy.bytes(if self.transpose_a { \"tile_m * GEMM_BM\" } else { \"tile_m * GEMM_BM * params.lda\" })"
     ),
     emit = r#"
-    // Initialize A tile loader (F16 activations)
+    // Initialize A tile loader with explicit storage->compute cast.
     const device uchar* A_batch = (const device uchar*)a + {batch_offset};
     const device uchar* A_tile = A_batch + {tile_offset};
     
-    SimpleTileLoader<half, 
+    SimpleTileLoader<InputStorageT,
+                     MmaTileT,
                      GEMM_TRANSPOSE_A ? GEMM_BK : GEMM_BM, 
                      GEMM_TRANSPOSE_A ? GEMM_BM : GEMM_BK,
                      GEMM_TRANSPOSE_A ? GEMM_BM + GEMM_TGP_PADDING : GEMM_BK + GEMM_TGP_PADDING,
                      !GEMM_TRANSPOSE_A,
                      GEMM_TGP_SIZE> loader_a(
-        (const device half*)A_tile, params.lda, As, simd_group_id, simd_lane_id
+        (const device InputStorageT*)A_tile, params.lda, As, simd_group_id, simd_lane_id
     );
 "#,
     out_var = "loader_a"
 )]
 pub struct TileLoadAStage {
-    #[arg(buffer = 0, metal_type = "const device half*")]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub a: TensorArg,
     /// Policy for A (typically F16 for activations)
     #[arg(skip, stage_skip)]
@@ -247,7 +263,7 @@ impl TileLoadAStage {
     const device uchar* B_batch = b + {batch_offset};
     const uint blocks_per_k = (params.k + weights_per_block - 1) / weights_per_block;
     
-    TileLoader<{policy_struct}, half,
+    TileLoader<{policy_struct}, MmaTileT,
                GEMM_TRANSPOSE_B ? GEMM_BN : GEMM_BK,
                GEMM_TRANSPOSE_B ? GEMM_BK : GEMM_BN,
                GEMM_TRANSPOSE_B ? GEMM_BK + GEMM_TGP_PADDING : GEMM_BN + GEMM_TGP_PADDING,
@@ -327,7 +343,7 @@ impl TileLoadBStage {
 \"# } else { \"\" }"),
     emit = r#"
     // Initialize simdgroup MMA operator
-    SimdgroupMma<half, half, GEMM_BM, GEMM_BN, GEMM_BK, GEMM_WM, GEMM_WN,
+    SimdgroupMma<MmaTileT, OutputStorageT, GEMM_BM, GEMM_BN, GEMM_BK, GEMM_WM, GEMM_WN,
                  GEMM_TRANSPOSE_A, GEMM_TRANSPOSE_B,
                  GEMM_TRANSPOSE_A ? GEMM_BM + GEMM_TGP_PADDING : GEMM_BK + GEMM_TGP_PADDING,
                  GEMM_TRANSPOSE_B ? GEMM_BK + GEMM_TGP_PADDING : GEMM_BN + GEMM_TGP_PADDING> mma_op(
@@ -390,6 +406,7 @@ impl Default for MmaLoopStage {
 /// Stage that applies epilogue (alpha*result + beta*C) and writes output.
 #[derive(Debug, Clone, DeriveStage)]
 #[stage(
+    includes("dtypes/runtime_types.metal"),
     activation_field = "activation",
     template_bindings(
         has_alpha_beta = "if self.has_alpha_beta { \"true\" } else { \"false\" }",
@@ -399,8 +416,8 @@ impl Default for MmaLoopStage {
     emit = r#"
     if ({has_alpha_beta}) {
         // Apply alpha/beta epilogue
-        const device half* C_tile = c + batch_idx * params.batch_stride_c
-                                   + tile_m * GEMM_BM * params.ldc + tile_n * GEMM_BN;
+        const device ResidualStorageT* C_tile = c + batch_idx * params.batch_stride_c
+                                                  + tile_m * GEMM_BM * params.ldc + tile_n * GEMM_BN;
         if (tgp_bm == GEMM_BM && tgp_bn == GEMM_BN) {
             mma_op.apply_epilogue(C_tile, params.ldc, alpha, beta);
         } else {
@@ -419,8 +436,8 @@ impl Default for MmaLoopStage {
     }
 
     // Write output
-    device half* D_tile = d + batch_idx * params.batch_stride_d
-                         + tile_m * GEMM_BM * params.ldd + tile_n * GEMM_BN;
+    device OutputStorageT* D_tile = d + batch_idx * params.batch_stride_d
+                                      + tile_m * GEMM_BM * params.ldd + tile_n * GEMM_BN;
     
     // Use safe store for edge tiles
     if (tgp_bm == GEMM_BM && tgp_bn == GEMM_BN) {
@@ -432,15 +449,15 @@ impl Default for MmaLoopStage {
     out_var = "void"
 )]
 pub struct GemmEpilogueStage {
-    #[arg(buffer = 2, output)]
+    #[arg(buffer = 2, output, metal_type = "device OutputStorageT*")]
     pub d: TensorArg,
-    #[arg(buffer = 3, metal_type = "const device half*")]
+    #[arg(buffer = 3, metal_type = "const device ResidualStorageT*")]
     pub c: TensorArg,
     #[arg(buffer = 7, metal_type = "constant float&")]
     pub alpha: f32,
     #[arg(buffer = 8, metal_type = "constant float&")]
     pub beta: f32,
-    #[arg(buffer = 4, metal_type = "const device half*")]
+    #[arg(buffer = 4, metal_type = "const device BiasStorageT*")]
     pub bias: TensorArg,
     /// Whether to apply alpha/beta scaling
     #[arg(skip, stage_skip)]

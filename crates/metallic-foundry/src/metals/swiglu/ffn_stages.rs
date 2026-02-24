@@ -44,7 +44,7 @@ pub struct FfnDualProjectStage {
     #[arg(buffer = 3)]
     #[arg(metal_type = "const device uchar*")]
     s_up: TensorArg,
-    #[arg(buffer = 4)]
+    #[arg(buffer = 4, metal_type = "const device InputStorageT*")]
     input: TensorArg,
     #[arg(buffer = 6)]
     k_dim: u32,
@@ -52,7 +52,7 @@ pub struct FfnDualProjectStage {
     n_dim: u32,
     #[arg(buffer = 8)]
     weights_per_block: u32,
-    #[arg(buffer = 9)]
+    #[arg(buffer = 9, metal_type = "const device GammaStorageT*")]
     gamma: TensorArg,
     #[arg(stage_skip)]
     policy: Arc<dyn MetalPolicy>,
@@ -115,11 +115,11 @@ pub struct FfnWarpReduceStage;
 // DEBT: fields are consumed by `#[derive(Stage)]` codegen and Metal emission, not direct Rust reads.
 #[allow(dead_code)]
 pub struct FfnSwigluWriteStage {
-    #[arg(buffer = 5, output)]
+    #[arg(buffer = 5, output, metal_type = "device OutputStorageT*")]
     output: TensorArg,
-    #[arg(buffer = 10)]
+    #[arg(buffer = 10, metal_type = "const device BiasStorageT*")]
     b_gate: TensorArg,
-    #[arg(buffer = 11)]
+    #[arg(buffer = 11, metal_type = "const device BiasStorageT*")]
     b_up: TensorArg,
     #[arg(buffer = 12)]
     has_b_gate: u32,

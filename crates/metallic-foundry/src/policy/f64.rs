@@ -1,9 +1,9 @@
 use metallic_loader::LoadedModel;
 use metallic_macros::MetalPolicy;
 
-use super::{LoaderStage, MetalPolicyRuntime, WeightLayout};
+use super::{LoaderStage, MetalPolicyRuntime};
 use crate::{
-    Foundry, dtypes::F16, tensor::{Tensor, TensorInit}, types::TensorArg
+    Foundry, compound::Layout, dtypes::F16, tensor::{Tensor, TensorInit}, types::TensorArg
 };
 
 #[derive(Debug, MetalPolicy, Clone)]
@@ -30,7 +30,7 @@ impl MetalPolicyRuntime for PolicyF64 {
         model: &dyn LoadedModel,
         source_tensor_name: &str,
         logical_name: &str,
-        layout: WeightLayout,
+        layout: Layout,
     ) -> anyhow::Result<Vec<(String, TensorArg)>> {
         let tensor_info = model
             .tensor_info(source_tensor_name)
@@ -52,7 +52,7 @@ impl MetalPolicyRuntime for PolicyF64 {
             .unwrap_or(std::borrow::Cow::Borrowed("nk"));
         let is_kn = layout_hint == "kn";
 
-        if let WeightLayout::Canonical { expected_k, expected_n } = layout {
+        if let Layout::Canonical { expected_k, expected_n } = layout {
             const WEIGHTS_PER_BLOCK: usize = 32;
             if !((dims[0] == expected_k && dims[1] == expected_n) || (dims[0] == expected_n && dims[1] == expected_k)) {
                 return Err(anyhow::anyhow!("Canonical dims mismatch for '{}'", source_tensor_name));

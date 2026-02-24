@@ -33,14 +33,15 @@ pub struct KvCacheReadParams {
     source = "kv_cache_write/kv_cache_read.metal",
     function = "kv_cache_read_kernel",
     args = "KvCacheReadParamsResolved",
-    dtype = "F16",
+    include_exprs("crate::policy::resolve_policy(self.cache.dtype()).header()"),
     step = true
 )]
 pub struct KvCacheRead {
     /// Input cache [n_kv_heads, max_seq_len, head_dim].
+    #[arg(metal_type = "const device InputStorageT*")]
     pub cache: TensorArg,
     /// Output tensor [n_kv_heads, seq_len, head_dim].
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     /// Kernel parameters.
     pub params: KvCacheReadParamsResolved,

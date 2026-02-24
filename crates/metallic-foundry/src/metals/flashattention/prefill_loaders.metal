@@ -3,14 +3,25 @@
 
 using namespace metal;
 
+// Keep tile/vector aliases centralized so storage widening is localized.
+#if METALLIC_FASTPATH_INPUT_HALF
+typedef half FlashTileT;
+typedef half2 FlashVec2T;
+typedef half4 FlashVec4T;
+#else
+typedef float FlashTileT;
+typedef float2 FlashVec2T;
+typedef float4 FlashVec4T;
+#endif
+
 // Cooperative tile load for a [TileN=32, D=64] block.
 // - `src` must already point at the first element of the tile (row 0, col 0).
-// - `row_stride` is in elements (half), not bytes.
+// - `row_stride` is in elements, not bytes.
 // - `limit` is the number of valid rows in this tile (<= 32); remaining rows are zero-filled.
 // - `tid` is the linear thread index in the threadgroup [0, 255].
 inline void load_tile(
-    const device half* src,
-    threadgroup half* dst,
+    const device InputStorageT* src,
+    threadgroup FlashTileT* dst,
     uint row_stride,
     uint limit,
     uint tid
@@ -23,7 +34,8 @@ inline void load_tile(
     if (row_in_tile < 32) {
         bool active = row_in_tile < limit;
         
-        const device ulong* src_u = (const device ulong*)(src + row_in_tile * row_stride + col_in_tile);
+#if METALLIC_FASTPATH_INPUT_HALF
+        const device ulong* src_u = (const device ulong*)((const device FlashTileT*)src + row_in_tile * row_stride + col_in_tile);
         threadgroup ulong* dst_u = (threadgroup ulong*)(dst + row_in_tile * 64 + col_in_tile);
         if (active) {
             // Copy 16 bytes via 2x 64-bit loads/stores.
@@ -34,14 +46,29 @@ inline void load_tile(
             dst_u[0] = 0;
             dst_u[1] = 0;
         }
+#else
+        threadgroup FlashTileT* dst_row = dst + row_in_tile * 64 + col_in_tile;
+        if (active) {
+            const device InputStorageT* src_row = src + row_in_tile * row_stride + col_in_tile;
+            #pragma unroll
+            for (uint i = 0; i < 8; ++i) {
+                dst_row[i] = (FlashTileT)src_row[i];
+            }
+        } else {
+            #pragma unroll
+            for (uint i = 0; i < 8; ++i) {
+                dst_row[i] = (FlashTileT)0.0f;
+            }
+        }
+#endif
     }
 }
 
 // Cooperative tile load for a [TileN=32, D=128] block.
 // 256 threads * 16 half = 4096 half = 32 * 128.
 inline void load_tile_d128(
-    const device half* src,
-    threadgroup half* dst,
+    const device InputStorageT* src,
+    threadgroup FlashTileT* dst,
     uint row_stride,
     uint limit,
     uint tid
@@ -52,7 +79,8 @@ inline void load_tile_d128(
     if (row_in_tile < 32) {
         bool active = row_in_tile < limit;
 
-        const device ulong* src_u = (const device ulong*)(src + row_in_tile * row_stride + col_in_tile);
+#if METALLIC_FASTPATH_INPUT_HALF
+        const device ulong* src_u = (const device ulong*)((const device FlashTileT*)src + row_in_tile * row_stride + col_in_tile);
         threadgroup ulong* dst_u = (threadgroup ulong*)(dst + row_in_tile * 128 + col_in_tile);
         if (active) {
             // Copy 32 bytes via 4x 64-bit loads/stores.
@@ -66,5 +94,20 @@ inline void load_tile_d128(
             dst_u[2] = 0;
             dst_u[3] = 0;
         }
+#else
+        threadgroup FlashTileT* dst_row = dst + row_in_tile * 128 + col_in_tile;
+        if (active) {
+            const device InputStorageT* src_row = src + row_in_tile * row_stride + col_in_tile;
+            #pragma unroll
+            for (uint i = 0; i < 16; ++i) {
+                dst_row[i] = (FlashTileT)src_row[i];
+            }
+        } else {
+            #pragma unroll
+            for (uint i = 0; i < 16; ++i) {
+                dst_row[i] = (FlashTileT)0.0f;
+            }
+        }
+#endif
     }
 }

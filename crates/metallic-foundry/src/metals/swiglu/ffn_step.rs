@@ -1,17 +1,14 @@
-use std::sync::Once;
-
-use half::f16;
 use metallic_macros::KernelArgs;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    config::{effective_weights_per_block, resolve_rms_eps}, kernels::get_fused_ffn_kernel, runtime::{allocate_zero_bias, run_canonical_projection}
+    config::{effective_weights_per_block, resolve_rms_eps}, kernels::get_fused_ffn_kernel
 };
 use crate::{
-    Foundry, MetalError, metals::common::runtime::{require_non_empty_io, require_vector_len, resolve_batch, tail_dim}, spec::{CompiledStep, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, MetalResourceOptions, TensorArg}
+    Foundry, MetalError, metals::common::{
+        dtype_contract::require_uniform_dtypes, runtime::{require_non_empty_io, require_vector_len, resolve_batch, tail_dim}
+    }, spec::{CompiledStep, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, TensorArg}
 };
-
-static MIXED_FFN_SWIGLU_FALLBACK_WARN_ONCE: Once = Once::new();
 
 fn default_wpb() -> u32 {
     32
@@ -49,17 +46,17 @@ pub struct CompiledFusedFfnSwiGluRmsNormStep {
 
 #[derive(Debug, KernelArgs)]
 pub struct FusedFfnArgs {
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device uchar*")]
     pub w_gate: TensorArg,
-    #[arg(buffer = 1)]
+    #[arg(buffer = 1, metal_type = "const device uchar*")]
     pub s_gate: Option<TensorArg>,
-    #[arg(buffer = 2)]
+    #[arg(buffer = 2, metal_type = "const device uchar*")]
     pub w_up: TensorArg,
-    #[arg(buffer = 3)]
+    #[arg(buffer = 3, metal_type = "const device uchar*")]
     pub s_up: Option<TensorArg>,
-    #[arg(buffer = 4)]
+    #[arg(buffer = 4, metal_type = "const device InputStorageT*")]
     pub input: TensorArg,
-    #[arg(buffer = 5, output)]
+    #[arg(buffer = 5, output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     #[arg(buffer = 6)]
     pub k_dim: u32,
@@ -67,11 +64,11 @@ pub struct FusedFfnArgs {
     pub n_dim: u32,
     #[arg(buffer = 8)]
     pub weights_per_block: u32,
-    #[arg(buffer = 9)]
+    #[arg(buffer = 9, metal_type = "const device GammaStorageT*")]
     pub gamma: TensorArg,
-    #[arg(buffer = 10)]
+    #[arg(buffer = 10, metal_type = "const device BiasStorageT*")]
     pub b_gate: TensorArg,
-    #[arg(buffer = 11)]
+    #[arg(buffer = 11, metal_type = "const device BiasStorageT*")]
     pub b_up: TensorArg,
     #[arg(buffer = 12)]
     pub has_b_gate: u32,
@@ -186,105 +183,12 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
         let n_dim = tail_dim(output)?;
         let batch = resolve_batch(bindings);
 
-        if w_gate.dtype != w_up.dtype {
-            MIXED_FFN_SWIGLU_FALLBACK_WARN_ONCE.call_once(|| {
-                tracing::warn!(
-                    gate_dtype = ?w_gate.dtype,
-                    up_dtype = ?w_up.dtype,
-                    batch,
-                    k_dim,
-                    n_dim,
-                    "FusedFfnSwiGluRmsNorm mixed-policy fallback engaged; performance may regress until mixed-policy fused kernel support is added"
-                );
-            });
-            let input_elems = input.dims.iter().product::<usize>();
-            let normalized_buf = foundry
-                .device
-                .new_buffer(input_elems * std::mem::size_of::<f16>(), MetalResourceOptions::StorageModeShared)
-                .ok_or_else(|| MetalError::OperationFailed("Failed to allocate mixed-ffn normalized input".into()))?;
-            let normalized = TensorArg::from_buffer(
-                normalized_buf,
-                crate::tensor::Dtype::F16,
-                input.dims.to_vec(),
-                input.strides.to_vec(),
-            );
-            let epsilon = resolve_rms_eps(bindings, self.epsilon);
-            crate::metals::rmsnorm::step::run_rmsnorm(
-                foundry,
-                &TensorArg::from_tensor(input),
-                None,
-                &normalized,
-                &TensorArg::from_tensor(gamma),
-                crate::metals::rmsnorm::RmsNormParamsResolved {
-                    feature_dim: k_dim,
-                    total_elements: input_elems as u32,
-                    epsilon,
-                },
-            )?;
-
-            let output_elems = output.dims.iter().product::<usize>();
-            let gate_out_buf = foundry
-                .device
-                .new_buffer(output_elems * std::mem::size_of::<f16>(), MetalResourceOptions::StorageModeShared)
-                .ok_or_else(|| MetalError::OperationFailed("Failed to allocate mixed-ffn gate output".into()))?;
-            let gate_out = TensorArg::from_buffer(
-                gate_out_buf,
-                crate::tensor::Dtype::F16,
-                output.dims.to_vec(),
-                output.strides.to_vec(),
-            );
-            let up_out = TensorArg::from_tensor(output);
-
-            run_canonical_projection(
-                foundry,
-                fast_bindings,
-                policy_gate.clone(),
-                &self.w_gate_resolved,
-                &normalized,
-                gate_out.clone(),
-                k_dim,
-                n_dim,
-                batch,
-                self.weights_per_block,
-            )?;
-            run_canonical_projection(
-                foundry,
-                fast_bindings,
-                policy_up.clone(),
-                &self.w_up_resolved,
-                &normalized,
-                up_out.clone(),
-                k_dim,
-                n_dim,
-                batch,
-                self.weights_per_block,
-            )?;
-
-            let zero_bias_tensor = allocate_zero_bias(foundry, n_dim)?;
-            let gate_bias_tensor = if has_b_gate != 0 {
-                b_gate.clone()
-            } else {
-                TensorArg::from_tensor(&zero_bias_tensor)
-            };
-            let up_bias_tensor = if has_b_up != 0 {
-                b_up.clone()
-            } else {
-                TensorArg::from_tensor(&zero_bias_tensor)
-            };
-
-            let swiglu = crate::metals::swiglu::Swiglu::new_auto_vectorized(
-                &gate_out,
-                &up_out,
-                &gate_bias_tensor,
-                &up_bias_tensor,
-                output_elems as u32,
-                n_dim,
-                n_dim,
-                n_dim,
-            );
-            foundry.run(&swiglu)?;
-            return Ok(());
-        }
+        require_uniform_dtypes("FusedFfnSwiGluRmsNorm", &[("gate", w_gate.dtype), ("up", w_up.dtype)]).map_err(|_| {
+            MetalError::OperationFailed(format!(
+                "FusedFfnSwiGluRmsNorm mixed-policy is unsupported (gate={:?}, up={:?}, batch={}, k_dim={}, n_dim={}).",
+                w_gate.dtype, w_up.dtype, batch, k_dim, n_dim
+            ))
+        })?;
 
         let w_gate_arg = args_gate[0].clone();
         let s_gate = if args_gate.len() > 1 { Some(args_gate[1].clone()) } else { None };

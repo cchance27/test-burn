@@ -1,6 +1,25 @@
 #include <metal_stdlib>
 using namespace metal;
 
+typedef FastScalarT QkvFastScalarT;
+typedef FastVec4T QkvFastVec4T;
+
+ALWAYS_INLINE QkvFastVec4T qkv_load_input_half4(const device InputStorageT* input, const ulong idx) {
+#if METALLIC_FASTPATH_INPUT_HALF
+    return ((const device QkvFastVec4T*)((const device QkvFastScalarT*)input + idx))[0];
+#else
+    return QkvFastVec4T(metallic_load_input_vec4f(input, idx));
+#endif
+}
+
+ALWAYS_INLINE QkvFastVec4T qkv_load_gamma_half4(const device GammaStorageT* gamma, const ulong idx) {
+#if METALLIC_FASTPATH_GAMMA_HALF
+    return ((const device QkvFastVec4T*)((const device QkvFastScalarT*)gamma + idx))[0];
+#else
+    return QkvFastVec4T(metallic_load_gamma_vec4f(gamma, idx));
+#endif
+}
+
 template<typename Policy, uint vec_width, bool has_norm>
 ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
     const device uchar* w_q,
@@ -9,12 +28,12 @@ ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
     const device uchar* s_k,
     const device uchar* w_v,
     const device uchar* s_v,
-    const device half* input,
+    const device InputStorageT* input,
     constant uint& k_dim,
     constant uint& n_dim,
     constant uint& n_kv,
     constant uint& weights_per_block,
-    const device half* gamma,
+    const device GammaStorageT* gamma,
     float inv_rms,
     uint lane_id,
     uint row_idx,
@@ -26,24 +45,43 @@ ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
     float acc_v = 0.0f;
     uint k_base = 0;
 
-    const ulong scale_stride = (ulong)row_idx * blocks_per_k * Policy::SCALE_BYTES;
+    const ulong scale_stride = (ulong)row_idx * blocks_per_k * Policy::SCALE_BYTES; // INDEX64_OK
     const device uchar* row_s_q = s_q + scale_stride;
     const device uchar* row_s_k = s_k + scale_stride;
     const device uchar* row_s_v = s_v + scale_stride;
+#if METALLIC_FASTPATH_INPUT_HALF
+    const device QkvFastScalarT* input_half = (const device QkvFastScalarT*)input;
+#endif
+#if METALLIC_FASTPATH_GAMMA_HALF
+    const device QkvFastScalarT* gamma_half = (const device QkvFastScalarT*)gamma;
+#endif
 
     while (k_base + K_CHUNK_SIZE <= k_dim) {
         const uint k = k_base + lane_id * vec_width;
-        half4 xv_lo;
-        half4 xv_hi;
+        QkvFastVec4T xv_lo;
+        QkvFastVec4T xv_hi;
 
         if (vec_width == 4) {
-            const half4 xv_raw = *(const device half4*)(input + batch_idx * k_dim + k);
+            #if METALLIC_FASTPATH_INPUT_HALF
+            const uint x_base = batch_idx * k_dim + k;
+            const QkvFastVec4T xv_raw = *(const device QkvFastVec4T*)(input_half + x_base);
+            #else
+            const ulong x_base = (ulong)batch_idx * (ulong)k_dim + (ulong)k; // INDEX64_OK
+            const half4 xv_raw = qkv_load_input_half4(input, x_base);
+            #endif
             xv_lo = xv_raw;
-            xv_hi = half4(0.0h);
+            xv_hi = QkvFastVec4T((QkvFastScalarT)0.0f);
         } else {
-            const float4 xv_raw_f = *(const device float4*)(input + batch_idx * k_dim + k);
-            xv_lo = as_type<half4>(xv_raw_f.xy);
-            xv_hi = as_type<half4>(xv_raw_f.zw);
+            #if METALLIC_FASTPATH_INPUT_HALF
+            const uint x_base = batch_idx * k_dim + k;
+            const float4 xv_raw_f = *(const device float4*)(input_half + x_base);
+            xv_lo = as_type<QkvFastVec4T>(xv_raw_f.xy);
+            xv_hi = as_type<QkvFastVec4T>(xv_raw_f.zw);
+            #else
+            const ulong x_base = (ulong)batch_idx * (ulong)k_dim + (ulong)k; // INDEX64_OK
+            xv_lo = qkv_load_input_half4(input, x_base + 0ul);
+            xv_hi = qkv_load_input_half4(input, x_base + 4ul);
+            #endif
         }
 
         if (has_norm && gamma) {
@@ -51,7 +89,8 @@ ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
             float4 f_hi = float4(xv_hi);
             f_lo *= inv_rms;
             f_hi *= inv_rms;
-            const device half* g_ptr = gamma + k;
+#if METALLIC_FASTPATH_GAMMA_HALF
+            const device QkvFastScalarT* g_ptr = gamma_half + k;
             f_lo.x *= (float)g_ptr[0];
             f_lo.y *= (float)g_ptr[1];
             f_lo.z *= (float)g_ptr[2];
@@ -62,8 +101,14 @@ ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
                 f_hi.z *= (float)g_ptr[6];
                 f_hi.w *= (float)g_ptr[7];
             }
-            xv_lo = half4(f_lo);
-            xv_hi = half4(f_hi);
+#else
+            f_lo *= float4(qkv_load_gamma_half4(gamma, (ulong)k + 0ul)); // INDEX64_OK
+            if (vec_width == 8) {
+                f_hi *= float4(qkv_load_gamma_half4(gamma, (ulong)k + 4ul)); // INDEX64_OK
+            }
+#endif
+            xv_lo = QkvFastVec4T(f_lo);
+            xv_hi = QkvFastVec4T(f_hi);
         }
 
         const float4 xv_f32_lo = float4(xv_lo);
@@ -81,17 +126,17 @@ ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
 #if defined(IS_CANONICAL) && IS_CANONICAL
         if (weights_per_block == 32) {
             const ulong U32_MAX_U = 0xFFFFFFFFul;
-            if (((ulong)n_dim) * ((ulong)k_dim) <= U32_MAX_U) {
+            if (((ulong)n_dim) * ((ulong)k_dim) <= U32_MAX_U) { // INDEX64_OK
                 const uint w_idx_u32 = (k & 31u) + (row_idx << 5u) + (k & ~31u) * n_dim;
-                w_idx = (ulong)w_idx_u32;
+                w_idx = (ulong)w_idx_u32; // INDEX64_OK
             } else {
-                w_idx = ((ulong)(k & 31u)) + (((ulong)row_idx) << 5ul) + ((ulong)(k & ~31u)) * ((ulong)n_dim);
+                w_idx = ((ulong)(k & 31u)) + (((ulong)row_idx) << 5ul) + ((ulong)(k & ~31u)) * ((ulong)n_dim); // INDEX64_OK
             }
         } else {
-            w_idx = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
+            w_idx = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_dim); // INDEX64_OK
         }
 #else
-        w_idx = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
+        w_idx = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_dim); // INDEX64_OK
 #endif
 
         if (vec_width == 4) {
@@ -109,17 +154,17 @@ ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
 #if defined(IS_CANONICAL) && IS_CANONICAL
             if (weights_per_block == 32) {
                 const ulong U32_MAX_U = 0xFFFFFFFFul;
-                if (((ulong)n_kv) * ((ulong)k_dim) <= U32_MAX_U) {
+                if (((ulong)n_kv) * ((ulong)k_dim) <= U32_MAX_U) { // INDEX64_OK
                     const uint w_idx_kv_u32 = (k & 31u) + (row_idx << 5u) + (k & ~31u) * n_kv;
-                    w_idx_kv = (ulong)w_idx_kv_u32;
+                    w_idx_kv = (ulong)w_idx_kv_u32; // INDEX64_OK
                 } else {
-                    w_idx_kv = ((ulong)(k & 31u)) + (((ulong)row_idx) << 5ul) + ((ulong)(k & ~31u)) * ((ulong)n_kv);
+                    w_idx_kv = ((ulong)(k & 31u)) + (((ulong)row_idx) << 5ul) + ((ulong)(k & ~31u)) * ((ulong)n_kv); // INDEX64_OK
                 }
             } else {
-                w_idx_kv = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_kv);
+                w_idx_kv = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_kv); // INDEX64_OK
             }
 #else
-            w_idx_kv = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_kv);
+            w_idx_kv = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_kv); // INDEX64_OK
 #endif
 
             if (vec_width == 4) {
@@ -148,33 +193,67 @@ ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
         uint valid_count = 0;
 
         if (k + vec_width <= k_dim) {
-            xv_raw = *(const device float4*)(input + batch_idx * k_dim + k);
+#if METALLIC_FASTPATH_INPUT_HALF
+            const uint x_base = batch_idx * k_dim + k;
+            const float4 xv_raw_f = *(const device float4*)(input_half + x_base);
+            QkvFastVec4T h_lo = as_type<QkvFastVec4T>(xv_raw_f.xy);
+            QkvFastVec4T h_hi = as_type<QkvFastVec4T>(xv_raw_f.zw);
+#else
+            QkvFastVec4T h_lo = qkv_load_input_half4(input, (ulong)batch_idx * (ulong)k_dim + (ulong)k + 0ul); // INDEX64_OK
+            QkvFastVec4T h_hi = (vec_width == 8)
+                ? qkv_load_input_half4(input, (ulong)batch_idx * (ulong)k_dim + (ulong)k + 4ul) // INDEX64_OK
+                : QkvFastVec4T((QkvFastScalarT)0.0f);
+#endif
+            xv_raw = float4(as_type<float2>(h_lo), as_type<float2>(h_hi));
             valid_count = vec_width;
         } else if (k < k_dim) {
+#if METALLIC_FASTPATH_INPUT_HALF
+            const uint x_base = batch_idx * k_dim + k;
             for (uint i = 0; i < vec_width && k + i < k_dim; ++i) {
-                ((thread half*)&xv_raw)[i] = input[batch_idx * k_dim + k + i];
+                ((thread QkvFastScalarT*)&xv_raw)[i] = input_half[x_base + i];
                 valid_count++;
             }
+#else
+            for (uint i = 0; i < vec_width && k + i < k_dim; ++i) {
+                ((thread QkvFastScalarT*)&xv_raw)[i] = (QkvFastScalarT)metallic_load_input(
+                    input,
+                    (ulong)batch_idx * (ulong)k_dim + (ulong)k + (ulong)i // INDEX64_OK
+                );
+                valid_count++;
+            }
+#endif
         }
 
-        half4 xv_lo = as_type<half4>(xv_raw.xy);
-        half4 xv_hi = as_type<half4>(xv_raw.zw);
+        QkvFastVec4T xv_lo = as_type<QkvFastVec4T>(xv_raw.xy);
+        QkvFastVec4T xv_hi = as_type<QkvFastVec4T>(xv_raw.zw);
 
         if (has_norm && gamma) {
             float4 f_lo = float4(xv_lo);
             float4 f_hi = float4(xv_hi);
             f_lo *= inv_rms;
             f_hi *= inv_rms;
+#if METALLIC_FASTPATH_GAMMA_HALF
+            const device QkvFastScalarT* g_ptr = gamma_half + k;
             for (uint i = 0; i < 4 && k + i < k_dim; ++i) {
-                f_lo[i] *= (float)gamma[k + i];
+                f_lo[i] *= (float)g_ptr[i];
             }
             if (vec_width == 8) {
                 for (uint i = 0; i < 4 && k + 4 + i < k_dim; ++i) {
-                    f_hi[i] *= (float)gamma[k + 4 + i];
+                    f_hi[i] *= (float)g_ptr[4u + i];
                 }
             }
-            xv_lo = half4(f_lo);
-            xv_hi = half4(f_hi);
+#else
+            for (uint i = 0; i < 4 && k + i < k_dim; ++i) {
+                f_lo[i] *= (float)metallic_load_gamma(gamma, (ulong)k + (ulong)i); // INDEX64_OK
+            }
+            if (vec_width == 8) {
+                for (uint i = 0; i < 4 && k + 4 + i < k_dim; ++i) {
+                    f_hi[i] *= (float)metallic_load_gamma(gamma, (ulong)k + 4ul + (ulong)i); // INDEX64_OK
+                }
+            }
+#endif
+            xv_lo = QkvFastVec4T(f_lo);
+            xv_hi = QkvFastVec4T(f_hi);
         }
 
         const float4 xv_f32_lo = float4(xv_lo);
@@ -250,12 +329,12 @@ ALWAYS_INLINE float3 run_qkv_reduce_stage(float3 input_var) {
 
 ALWAYS_INLINE void run_qkv_write_stage(
     float3 input_var,
-    device half* out_q,
-    device half* out_k,
-    device half* out_v,
-    const device half* b_q,
-    const device half* b_k,
-    const device half* b_v,
+    device OutputStorageT* out_q,
+    device OutputStorageT* out_k,
+    device OutputStorageT* out_v,
+    const device BiasStorageT* b_q,
+    const device BiasStorageT* b_k,
+    const device BiasStorageT* b_v,
     constant uint& has_b,
     constant uint& n_dim,
     constant uint& n_kv,
@@ -264,10 +343,29 @@ ALWAYS_INLINE void run_qkv_write_stage(
     uint batch_idx
 ) {
     if (lane_id == 0) {
-        out_q[batch_idx * n_dim + row_idx] = half(input_var.x + (has_b ? (float)b_q[row_idx] : 0.0f));
+#if METALLIC_FASTPATH_OUTPUT_HALF && METALLIC_FASTPATH_BIAS_HALF
+        const device QkvFastScalarT* bq = (const device QkvFastScalarT*)b_q;
+        const device QkvFastScalarT* bk = (const device QkvFastScalarT*)b_k;
+        const device QkvFastScalarT* bv = (const device QkvFastScalarT*)b_v;
+        device QkvFastScalarT* oq = (device QkvFastScalarT*)out_q;
+        device QkvFastScalarT* ok = (device QkvFastScalarT*)out_k;
+        device QkvFastScalarT* ov = (device QkvFastScalarT*)out_v;
+        oq[batch_idx * n_dim + row_idx] = QkvFastScalarT(input_var.x + (has_b ? (float)bq[row_idx] : 0.0f));
         if (row_idx < n_kv) {
-            out_k[batch_idx * n_kv + row_idx] = half(input_var.y + (has_b ? (float)b_k[row_idx] : 0.0f));
-            out_v[batch_idx * n_kv + row_idx] = half(input_var.z + (has_b ? (float)b_v[row_idx] : 0.0f));
+            ok[batch_idx * n_kv + row_idx] = QkvFastScalarT(input_var.y + (has_b ? (float)bk[row_idx] : 0.0f));
+            ov[batch_idx * n_kv + row_idx] = QkvFastScalarT(input_var.z + (has_b ? (float)bv[row_idx] : 0.0f));
         }
+#else
+        const ulong q_idx = (ulong)batch_idx * (ulong)n_dim + (ulong)row_idx; // INDEX64_OK
+        const float q_bias = has_b ? metallic_load_bias(b_q, (ulong)row_idx) : 0.0f; // INDEX64_OK
+        metallic_store_output(out_q, q_idx, metallic_to_accum(input_var.x + q_bias));
+        if (row_idx < n_kv) {
+            const ulong kv_idx = (ulong)batch_idx * (ulong)n_kv + (ulong)row_idx; // INDEX64_OK
+            const float k_bias = has_b ? metallic_load_bias(b_k, (ulong)row_idx) : 0.0f; // INDEX64_OK
+            const float v_bias = has_b ? metallic_load_bias(b_v, (ulong)row_idx) : 0.0f; // INDEX64_OK
+            metallic_store_output(out_k, kv_idx, metallic_to_accum(input_var.y + k_bias));
+            metallic_store_output(out_v, kv_idx, metallic_to_accum(input_var.z + v_bias));
+        }
+#endif
     }
 }

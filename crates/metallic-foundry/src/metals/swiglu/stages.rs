@@ -11,7 +11,7 @@ use crate::{
 /// Handles both vectorized and scalar paths based on params.
 #[derive(Debug, Clone, Stage)]
 #[stage(
-    includes("swiglu/swiglu.metal"),
+    includes("dtypes/runtime_types.metal", "swiglu/swiglu.metal"),
     activation_field = "activation",
     struct_defs_method = "stage_struct_defs",
     emit = r#"
@@ -22,13 +22,13 @@ use crate::{
 // DEBT: standalone SwiGLU stage is retained for direct kernel composition and parity tests.
 #[allow(dead_code)]
 pub struct SwigluStage {
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     gate: TensorArg,
-    #[arg(buffer = 1, output)]
+    #[arg(buffer = 1, output, metal_type = "device OutputStorageT*")]
     up_inout: TensorArg,
-    #[arg(buffer = 2)]
+    #[arg(buffer = 2, metal_type = "const device BiasStorageT*")]
     gate_bias: TensorArg,
-    #[arg(buffer = 3)]
+    #[arg(buffer = 3, metal_type = "const device BiasStorageT*")]
     up_bias: TensorArg,
     #[arg(buffer = 4, metal_type = "constant SwigluParams*")]
     params: SwigluParamsResolved,

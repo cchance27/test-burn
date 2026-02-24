@@ -17,34 +17,130 @@ pub(crate) fn derive_kernel_args(input: TokenStream) -> TokenStream {
 
     let binding_code = quote! { #(#bindings)* };
 
+    let require_explicit_metal_type = |info: &ArgInfo| -> Result<String, syn::Error> {
+        if let Some(mtype) = info.metal_type.clone() {
+            return Ok(mtype);
+        }
+        if info.is_buffer {
+            let field_name = info
+                .name_ident
+                .as_ref()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| info.name.clone());
+            return Err(syn::Error::new_spanned(
+                &info.rust_type_actual,
+                format!(
+                    "KernelArgs `{}` field `{}` is missing #[arg(metal_type = \"...\")]. Explicit metal_type is required for buffer/tensor args.",
+                    name, field_name
+                ),
+            ));
+        }
+        Ok(infer_metal_type(&info.rust_type_actual, info.is_buffer, info.is_output))
+    };
+
     // Generate METAL_ARGS elements as TokenStreams (all args EXCEPT meta)
-    let metal_args_elements: Vec<_> = arg_infos
+    let mut metal_args_elements: Vec<proc_macro2::TokenStream> = Vec::new();
+    for info in arg_infos.iter().filter(|info| !info.is_meta) {
+        let arg_name = &info.name;
+        let idx = info.buffer_index;
+        let mtype = match require_explicit_metal_type(info) {
+            Ok(v) => v,
+            Err(err) => return TokenStream::from(err.to_compile_error()),
+        };
+        metal_args_elements.push(quote! { (#arg_name, #idx, #mtype) });
+    }
+
+    // Generate STAGE_METAL_ARGS elements (excluding stage_skip AND meta buffers)
+    let mut stage_metal_args_elements: Vec<proc_macro2::TokenStream> = Vec::new();
+    for info in arg_infos.iter().filter(|info| !info.stage_skip && !info.is_meta) {
+        let arg_name = &info.name;
+        let idx = info.buffer_index;
+        let mtype = match require_explicit_metal_type(info) {
+            Ok(v) => v,
+            Err(err) => return TokenStream::from(err.to_compile_error()),
+        };
+        stage_metal_args_elements.push(quote! { (#arg_name, #idx, #mtype) });
+    }
+
+    let debug_binding_elements: Vec<_> = arg_infos
         .iter()
         .filter(|info| !info.is_meta)
         .map(|info| {
-            let arg_name = &info.name;
+            let arg_name = info.name.clone();
+            let rust_type = info.rust_type.clone();
             let idx = info.buffer_index;
-            // Use explicit metal_type if specified, otherwise infer from Rust type
-            let mtype = info
-                .metal_type
-                .clone()
-                .unwrap_or_else(|| infer_metal_type(&info.rust_type_actual, info.is_buffer, info.is_output));
-            quote! { (#arg_name, #idx, #mtype) }
+            let mtype = match require_explicit_metal_type(info) {
+                Ok(v) => v,
+                Err(err) => return err.to_compile_error(),
+            };
+            let field = info.name_ident.as_ref().expect("named field");
+            if is_tensor_arg(&info.rust_type_actual) {
+                if info.is_option {
+                    quote! {
+                        __debug.push(#root::compound::BindingDebugArg {
+                            name: #arg_name.to_string(),
+                            buffer_index: #idx,
+                            metal_type: #mtype.to_string(),
+                            rust_type: #rust_type.to_string(),
+                            tensor_dtype: self.#field.as_ref().map(|v| #root::types::KernelArg::dtype(v)),
+                            max_linear_index: self.#field.as_ref().and_then(|v| #root::types::kernel_arg_max_linear_index(v)),
+                        });
+                    }
+                } else {
+                    quote! {
+                        __debug.push(#root::compound::BindingDebugArg {
+                            name: #arg_name.to_string(),
+                            buffer_index: #idx,
+                            metal_type: #mtype.to_string(),
+                            rust_type: #rust_type.to_string(),
+                            tensor_dtype: Some(#root::types::KernelArg::dtype(&self.#field)),
+                            max_linear_index: #root::types::kernel_arg_max_linear_index(&self.#field),
+                        });
+                    }
+                }
+            } else {
+                quote! {
+                    __debug.push(#root::compound::BindingDebugArg {
+                        name: #arg_name.to_string(),
+                        buffer_index: #idx,
+                        metal_type: #mtype.to_string(),
+                        rust_type: #rust_type.to_string(),
+                        tensor_dtype: None,
+                        max_linear_index: None,
+                    });
+                }
+            }
         })
         .collect();
 
-    // Generate STAGE_METAL_ARGS elements (excluding stage_skip AND meta buffers)
-    let stage_metal_args_elements: Vec<_> = arg_infos
+    let runtime_dtype_hash_elements: Vec<_> = arg_infos
         .iter()
-        .filter(|info| !info.stage_skip && !info.is_meta)
+        .filter(|info| !info.is_meta && is_tensor_arg(&info.rust_type_actual))
         .map(|info| {
-            let arg_name = &info.name;
             let idx = info.buffer_index;
-            let mtype = info
-                .metal_type
-                .clone()
-                .unwrap_or_else(|| infer_metal_type(&info.rust_type_actual, info.is_buffer, info.is_output));
-            quote! { (#arg_name, #idx, #mtype) }
+            let field = info.name_ident.as_ref().expect("named field");
+            if info.is_option {
+                quote! {
+                    #idx.hash(&mut __hasher);
+                    match &self.#field {
+                        Some(v) => {
+                            true.hash(&mut __hasher);
+                            #root::types::KernelArg::dtype(v).hash(&mut __hasher);
+                            #root::types::kernel_arg_max_linear_index(v).hash(&mut __hasher);
+                        }
+                        None => {
+                            false.hash(&mut __hasher);
+                        }
+                    }
+                }
+            } else {
+                quote! {
+                    #idx.hash(&mut __hasher);
+                    true.hash(&mut __hasher);
+                    #root::types::KernelArg::dtype(&self.#field).hash(&mut __hasher);
+                    #root::types::kernel_arg_max_linear_index(&self.#field).hash(&mut __hasher);
+                }
+            }
         })
         .collect();
 
@@ -73,6 +169,19 @@ pub(crate) fn derive_kernel_args(input: TokenStream) -> TokenStream {
             fn bind_args(&self, encoder: &#root::types::ComputeCommandEncoder) {
                 // Delegate to the inherent method
                 self.bind_args(encoder);
+            }
+
+            fn debug_bindings(&self) -> Vec<#root::compound::BindingDebugArg> {
+                let mut __debug = Vec::new();
+                #(#debug_binding_elements)*
+                __debug
+            }
+
+            fn runtime_dtype_hash(&self) -> u64 {
+                use std::hash::{Hash, Hasher};
+                let mut __hasher = rustc_hash::FxHasher::default();
+                #(#runtime_dtype_hash_elements)*
+                __hasher.finish()
             }
         }
     };

@@ -26,7 +26,7 @@ fn test_rmsnorm_stage_fused() {
     let args = kernel.collect_buffer_args();
     let gamma_arg = args.iter().find(|a| a.name == "gamma").expect("Should have gamma arg");
     assert_eq!(gamma_arg.buffer_index, 3);
-    assert_eq!(gamma_arg.metal_type, "const device half*");
+    assert_eq!(gamma_arg.metal_type, "const device GammaStorageT*");
 
     // Verify code emission
     assert!(source.contains("RMSNORM_RUN_CORE_STAGE("));

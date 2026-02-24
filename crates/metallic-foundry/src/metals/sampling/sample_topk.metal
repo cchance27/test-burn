@@ -197,9 +197,9 @@ inline void quadlane_reduce_argmax_pair(thread float &best_val, thread uint &bes
 #define simd_reduce_sum_u32(v, sw) quadlane_reduce_sum_u32((v), simd_lane, (sw))
 #define simd_reduce_argmax_pair(bv, bi, bl, sw) quadlane_reduce_argmax_pair((bv), (bi), (bl), simd_lane, (sw))
 
-// f16 logits variant (accumulated in float)
-kernel void sample_topk_fused_f16(
-    const device half*   logits             [[buffer(0)]],
+// Dense logits variant (accumulated in float)
+kernel void sample_topk_fused(
+    const device InputStorageT* logits      [[buffer(0)]],
     device uint*         out_token          [[buffer(1)]],
     constant SampleParams& params           [[buffer(2)]],
     uint tid                                 [[thread_position_in_threadgroup]],
@@ -236,33 +236,43 @@ kernel void sample_topk_fused_f16(
     }
     scalar_prefix_end = min(scalar_prefix_end, block_end);
     for (uint i = block_start + tid; i < scalar_prefix_end; i += tptg) {
-        float v = static_cast<float>(logits[i]);
+        float v = metallic_load_input(logits, i);
         v *= invT;
         heap_insert(lane_heap, &lane_heap_size, lane_target, static_cast<float>(v), i);
     }
 
     const uint vectorizable_len = (block_end > scalar_prefix_end) ? ((block_end - scalar_prefix_end) & ~3u) : 0u;
     const uint vector_count = vectorizable_len >> 2;
+#if METALLIC_FASTPATH_INPUT_HALF
     if (vector_count > 0u) {
         using Vec4 = metal::vec<half, 4>;
-        const device Vec4* logits4 = reinterpret_cast<const device Vec4*>(logits + scalar_prefix_end);
+        const device Vec4* logits4 = reinterpret_cast<const device Vec4*>((const device half*)logits + scalar_prefix_end);
         for (uint group = tid; group < vector_count; group += tptg) {
             const Vec4 raw = logits4[group];
             const uint base_idx = scalar_prefix_end + (group << 2);
+            #pragma unroll
             for (uint lane_step = 0; lane_step < 4u; ++lane_step) {
                 const uint idx = base_idx + lane_step;
-                float v = static_cast<float>(raw[lane_step]);
-                v *= invT;
-                heap_insert(lane_heap, &lane_heap_size, lane_target, static_cast<float>(v), idx);
+                float v = static_cast<float>(raw[lane_step]) * invT;
+                heap_insert(lane_heap, &lane_heap_size, lane_target, v, idx);
             }
         }
     }
+#endif
+
     const uint tail_start = scalar_prefix_end + (vector_count << 2);
+#if METALLIC_FASTPATH_INPUT_HALF
+    const device half* logits_half = (const device half*)logits;
     for (uint i = tail_start + tid; i < block_end; i += tptg) {
-        float v = static_cast<float>(logits[i]);
-        v *= invT;
-        heap_insert(lane_heap, &lane_heap_size, lane_target, static_cast<float>(v), i);
+        float v = (float)logits_half[i] * invT;
+        heap_insert(lane_heap, &lane_heap_size, lane_target, v, i);
     }
+#else
+    for (uint i = tail_start + tid; i < block_end; i += tptg) {
+        float v = (float)metallic_load_input(logits, i) * invT;
+        heap_insert(lane_heap, &lane_heap_size, lane_target, v, i);
+    }
+#endif
 
     heap_to_sorted(lane_heap, lane_heap_size);
 

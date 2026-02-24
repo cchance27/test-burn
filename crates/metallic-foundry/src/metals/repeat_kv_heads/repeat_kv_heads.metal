@@ -3,14 +3,14 @@ using namespace metal;
 
 // RepeatKvHeadsParams struct is injected by Foundry via struct_defs()
 
-/// RepeatKvHeads kernel for half precision.
+/// RepeatKvHeads kernel for runtime storage types.
 ///
 /// Repeats K/V heads for GQA (Grouped Query Attention).
 /// Input: [batch * n_kv_heads, cache_stride, head_dim]
 /// Output: [batch * n_heads, seq, head_dim]
-kernel void repeat_kv_heads_kernel_f16(
-    const device half* input [[buffer(0)]],
-    device half* output [[buffer(1)]],
+kernel void repeat_kv_heads_kernel(
+    const device InputStorageT* input [[buffer(0)]],
+    device OutputStorageT* output [[buffer(1)]],
     constant RepeatKvHeadsParamsResolved* params [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
@@ -40,5 +40,5 @@ kernel void repeat_kv_heads_kernel_f16(
     // Compute source index with cache_stride
     uint input_index = ((input_batch_head * cache_stride) + seq_idx) * head_dim + dim_idx;
     
-    output[gid] = input[input_index];
+    metallic_store_output(output, gid, metallic_to_accum(metallic_load_input(input, input_index)));
 }

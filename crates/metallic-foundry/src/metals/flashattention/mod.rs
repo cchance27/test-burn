@@ -1,3 +1,4 @@
+mod contract;
 mod dispatch;
 mod kernels;
 pub mod runtime;

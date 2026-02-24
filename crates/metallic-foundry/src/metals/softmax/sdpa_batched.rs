@@ -4,19 +4,17 @@ use crate::{
     compound::{CompiledCompoundKernel, stages::LayoutStage}, metals::common::cache::get_or_build_compound_kernel, types::TensorArg
 };
 
-const SOFTMAX_SDPA_BATCHED_METAL: &str = include_str!("softmax_sdpa_batched.metal");
-
 #[derive(Stage, Clone, Debug)]
 #[stage(
+    includes("dtypes/runtime_types.metal", "softmax/softmax_sdpa_batched.metal"),
     emit = r#"
     // Phase 1: Find local max per thread (SDPA batched)
     float local_max = find_row_max_sdpa_batched(matrix, row_idx, tid, seq_k, causal, query_offset, rows_per_batch);
 "#,
-    out_var = "local_max",
-    struct_defs_fn = "metal_defs"
+    out_var = "local_max"
 )]
 pub struct SoftmaxSdpaBatchedMaxStage {
-    #[arg(buffer = 0, metal_type = "const device uchar*")]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub matrix: TensorArg,
     #[arg(buffer = 1, metal_type = "const device uchar*")]
     pub scale_bytes: TensorArg,
@@ -41,23 +39,19 @@ impl SoftmaxSdpaBatchedMaxStage {
             rows_per_batch: 0,
         }
     }
-
-    pub fn metal_defs() -> String {
-        SOFTMAX_SDPA_BATCHED_METAL.to_string()
-    }
 }
 
 #[derive(Stage, Clone, Debug)]
 #[stage(
+    includes("dtypes/runtime_types.metal", "softmax/softmax_sdpa_batched.metal"),
     emit = r#"
     // Phase 2: Compute local exp sum per thread (SDPA batched)
     float local_sum = compute_exp_sum_sdpa_batched(matrix, row_max, row_idx, tid, seq_k, causal, query_offset, rows_per_batch);
 "#,
-    out_var = "local_sum",
-    struct_defs_fn = "metal_defs"
+    out_var = "local_sum"
 )]
 pub struct SoftmaxSdpaBatchedSumStage {
-    #[arg(buffer = 0, metal_type = "const device uchar*")]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub matrix: TensorArg,
     #[arg(buffer = 3, metal_type = "constant uint&")]
     pub seq_k: u32,
@@ -79,25 +73,21 @@ impl SoftmaxSdpaBatchedSumStage {
             rows_per_batch: 0,
         }
     }
-
-    pub fn metal_defs() -> String {
-        SOFTMAX_SDPA_BATCHED_METAL.to_string()
-    }
 }
 
 #[derive(Stage, Clone, Debug)]
 #[stage(
+    includes("dtypes/runtime_types.metal", "softmax/softmax_sdpa_batched.metal"),
     emit = r#"
     // Phase 3: Normalize and write output (SDPA batched)
     normalize_and_write_sdpa_batched(output, matrix, row_max, row_sum, row_idx, tid, seq_k, causal, query_offset, rows_per_batch);
 "#,
-    out_var = "void",
-    struct_defs_fn = "metal_defs"
+    out_var = "void"
 )]
 pub struct SoftmaxSdpaBatchedNormStage {
-    #[arg(buffer = 2, output, metal_type = "device half*")]
+    #[arg(buffer = 2, output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
-    #[arg(buffer = 0, metal_type = "const device uchar*")]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub matrix: TensorArg,
     #[arg(buffer = 3, metal_type = "constant uint&")]
     pub seq_k: u32,
@@ -120,10 +110,6 @@ impl SoftmaxSdpaBatchedNormStage {
             rows_per_batch: 0,
         }
     }
-
-    pub fn metal_defs() -> String {
-        SOFTMAX_SDPA_BATCHED_METAL.to_string()
-    }
 }
 
 pub fn get_softmax_v2_sdpa_batched_kernel() -> std::sync::Arc<CompiledCompoundKernel> {
@@ -142,11 +128,11 @@ pub fn get_softmax_v2_sdpa_batched_kernel() -> std::sync::Arc<CompiledCompoundKe
 
 #[derive(Debug, KernelArgs)]
 pub struct SoftmaxV2SdpaBatchedArgs {
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub input: TensorArg,
-    #[arg(buffer = 1)]
+    #[arg(buffer = 1, metal_type = "const device uchar*")]
     pub scale: TensorArg,
-    #[arg(buffer = 2, output)]
+    #[arg(buffer = 2, output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     #[arg(buffer = 3)]
     pub seq_k: u32,

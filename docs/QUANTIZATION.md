@@ -7,6 +7,54 @@ Foundry uses a centralized **Policy-Based Architecture** to handle mixed-precisi
 
 To achieve this, we use a Unified Policy model where a single Rust struct (e.g., `PolicyQ8`) implements two key traits: one for **Code Generation** (`MetalPolicy`) and one for **Runtime Loading / Binding** (`MetalPolicyRuntime`).
 
+## Policy Variant Groundwork (2026-02-22)
+
+Foundry now has a centralized **policy variant resolver** (`crates/metallic-foundry/src/policy/variant.rs`) that describes, per source dtype:
+
+- `source_dtype` (model tensor dtype)
+- `storage_dtype` (materialized GPU tensor dtype)
+- `compute_dtype` (target compute dtype metadata for future kernel selection)
+- `lossy_cast` (explicit precision-loss signal)
+
+This gives us one policy entrypoint for staged dtype migration.
+
+Current behavior:
+
+- Default variant is `preserve:f16`.
+- Dense `F32` materializes as true `F32` via `PolicyF32Native` (`policy_f32.metal`).
+- Quantized storage stays source-quantized; compute target metadata is tracked via `QuantComputeVariant` (`F16`/`BF16`/`F32`) for selector rollout.
+
+Runtime selection:
+
+- `METALLIC_POLICY_VARIANT` controls the active variant used by `resolve_policy(...)`.
+- Supported values:
+  - `dense=f16` (cap dense tensors to `F16`; quant tensors unchanged)
+  - `preserve`
+  - `preserve:f16` / `preserve:bf16` / `preserve:f32`
+  - key/value form: `dense=preserve,quant=bf16`
+- Invalid values fail fast during policy resolution.
+
+Important:
+
+- This is groundwork, not full end-to-end compute-dtype migration.
+- Kernels that currently hardcode `half` for non-policy tensors (for example some bias/norm paths) still need explicit variant support before preserve mode can be enabled globally.
+- Fail-fast remains required for unsupported dtype/variant combinations.
+- GEMM runtime now resolves activation/output/bias/residual storage from tensor dtypes (including preserve-dense `F32`) and fails fast only when those tensors are quantized block formats.
+
+### Kernel dtype helper layer (groundwork)
+
+To avoid per-kernel dtype branching, Foundry now has a shared Metal helper include:
+
+- `crates/metallic-foundry/src/metals/dtypes/runtime_types.metal`
+
+It defines storage/compute/accum aliases and helper APIs:
+
+- `InputStorageT`, `OutputStorageT`, `BiasStorageT`, `ResidualStorageT`, `GammaStorageT`
+- `ComputeT`, `AccumT`
+- `metallic_load_*`, `metallic_to_*`, `metallic_store_output`
+
+The first migrations use this helper in `gemv` output paths and `rmsnorm` standalone paths so kernel code can use common load/store/cast APIs instead of direct `half` casts.
+
 ## Core Concepts
 
 ### 1. The Unified Policy Struct
@@ -174,18 +222,12 @@ This prevents format-specific regressions (e.g., `Q6_K` using a different logica
 
 ## Mixed-Quant Fused Paths (Current Status)
 
-Foundry now supports mixed-quant model layers (for example, Q/K/V or FFN gate/up using different quant dtypes)
-with **correctness-first runtime fallback paths**:
+Foundry fail-fast policy for mixed-policy fused paths:
 
-- `FusedQkv`: if `w_q/w_k/w_v` policies differ, Foundry falls back to per-projection GEMV using each tensor's own policy.
-- `FusedSwiglu` / `FusedFfnSwiGluRmsNorm`: if gate/up policies differ, Foundry falls back to decomposed RMSNorm + per-policy GEMV + SwiGLU.
+- `FusedQkv`: `w_q/w_k/w_v` policies must match.
+- `FusedSwiglu` / `FusedFfnSwiGluRmsNorm`: gate/up policies must match.
 
-This avoids silent math/layout corruption from forcing a single-policy fused kernel over mixed-policy tensors.
-
-### Performance Note
-
-These fallback paths are expected to be slower than uniform-policy fused kernels due to extra dispatches and temporary buffers.
-Foundry emits a warning (once per process) when a mixed-policy fallback path is engaged so performance regressions are visible.
+Mixed-policy fused configurations are rejected explicitly to avoid silent math/layout corruption and hidden perf cliffs.
 
 ## Scales Are Opaque Bytes
 

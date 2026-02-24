@@ -43,7 +43,7 @@ struct CanonicalStrategy {
         total_blocks = (K + weights_per_block - 1u) / weights_per_block;
     }
     
-    void load_x_fast(const device half *vector_x, uint k_base) {
+    void load_x_fast(const device InputStorageT *vector_x, uint k_base) {
         // Strategy decides: we load 2 chunks of 4 elements (8 elements total) for unroll
         uint weights_per_block = quant.weights_per_block;
         uint block_in_group = quant.block_in_group;
@@ -61,7 +61,7 @@ struct CanonicalStrategy {
         block_idx_1 = block_idx_0 + 4u;
     }
     
-    void load_x_safe(const device half *vector_x, uint k_base, uint K) {
+    void load_x_safe(const device InputStorageT *vector_x, uint k_base, uint K) {
         uint weights_per_block = quant.weights_per_block;
         uint block_in_group = quant.block_in_group;
         uint sub_offset = quant.sub_offset;

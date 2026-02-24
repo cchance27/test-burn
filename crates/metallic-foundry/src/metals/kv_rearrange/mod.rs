@@ -43,16 +43,18 @@ pub struct KvRearrangeParams {
 #[derive(Kernel, KernelArgs, Clone, Default)]
 #[kernel(
     source = "kv_rearrange/kv_rearrange.metal",
-    function = "kv_rearrange_kernel_f16",
+    function = "kv_rearrange_kernel",
     args = KvRearrangeParamsResolved,
+    include_exprs("crate::policy::resolve_policy(self.input.dtype()).header()"),
     dispatch = per_element,
     step = true
 )]
 pub struct KvRearrange {
     /// Input tensor [batch*seq, kv_dim].
+    #[arg(metal_type = "const device InputStorageT*")]
     pub input: TensorArg,
     /// Output tensor [batch*n_heads, seq, head_dim].
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     /// Kernel parameters.
     pub params: KvRearrangeParamsResolved,

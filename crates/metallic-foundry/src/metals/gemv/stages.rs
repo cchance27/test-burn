@@ -45,7 +45,13 @@ impl VectorWidth {
 /// - Each lane loads 8 elements per K chunk, all lanes cover 256 elements
 #[derive(Debug, Clone, DeriveStage)]
 #[stage(
-    includes("gemv/common.metal", "gemv/dot.metal", "gemv/vectorized_stage.metal", "gemv/scalar_output.metal"),
+    includes(
+        "dtypes/runtime_types.metal",
+        "gemv/common.metal",
+        "gemv/dot.metal",
+        "gemv/vectorized_stage.metal",
+        "gemv/scalar_output.metal"
+    ),
     policy_field = "policy",
     template_bindings(
         vec_width = "self.vector_width.elements()",
@@ -87,11 +93,11 @@ pub struct VectorizedDotStage {
     weights: TensorArg,
     #[arg(buffer = 1, metal_type = "const device uchar*")]
     scale_bytes: TensorArg,
-    #[arg(buffer = 2, metal_type = "const device half*")]
+    #[arg(buffer = 2, metal_type = "const device InputStorageT*")]
     input: TensorArg,
     // Fixed ABI slot for optional fused RMS gamma.
     // In plain GEMV this aliases residual buffer and is ignored when `use_gamma=false`.
-    #[arg(buffer = 10, metal_type = "const device half*")]
+    #[arg(buffer = 10, metal_type = "const device ResidualStorageT*")]
     residual: TensorArg,
     #[arg(buffer = 4, metal_type = "constant uint&")]
     k_dim: u32,
@@ -150,7 +156,13 @@ impl VectorizedDotStage {
 /// This acts as a robust fallback or alternative to the vectorized stage.
 #[derive(Debug, Clone, DeriveStage)]
 #[stage(
-    includes("gemv/common.metal", "gemv/dot.metal", "gemv/vectorized_stage.metal", "gemv/scalar_output.metal"),
+    includes(
+        "dtypes/runtime_types.metal",
+        "gemv/common.metal",
+        "gemv/dot.metal",
+        "gemv/vectorized_stage.metal",
+        "gemv/scalar_output.metal"
+    ),
     policy_field = "policy",
     emit = r#"
     float {out_var} = run_gemv_canonical_stage<{policy_struct}>(
@@ -174,7 +186,7 @@ pub struct CanonicalDotStage {
     weights: TensorArg,
     #[arg(buffer = 1, metal_type = "const device uchar*")]
     scale_bytes: TensorArg,
-    #[arg(buffer = 2, metal_type = "const device half*")]
+    #[arg(buffer = 2, metal_type = "const device InputStorageT*")]
     input: TensorArg,
     #[arg(buffer = 4, metal_type = "constant uint&")]
     k_dim: u32,
@@ -204,38 +216,40 @@ impl CanonicalDotStage {
 /// Designed for warp-per-row dispatch where only lane 0 writes.
 #[derive(Debug, Clone, DeriveStage)]
 #[stage(
+    includes("dtypes/runtime_types.metal"),
     activation_field = "activation",
     emit = r#"
     // Write output (only lane 0 of each warp)
     if (lane_id == 0) {
         // Apply alpha scaling to the reduced sum
-        float scaled_sum = row_sum * alpha;
-        float result = scaled_sum;
+        const AccumT scaled_sum = metallic_to_accum(row_sum * alpha);
+        AccumT result = scaled_sum;
         if (has_bias != 0) {
-            result += (float)bias[row_idx];
+            result += metallic_to_accum(metallic_load_bias(bias, (ulong)row_idx));
         }
         
         // Apply activation
-        result = {activation_struct}::apply(result);
+        result = metallic_to_accum({activation_struct}::apply((float)result));
 
+        const ulong out_idx = (ulong)batch_idx * (ulong)n_dim + (ulong)row_idx;
         if (has_residual != 0) {
-            result += ((float)residual[batch_idx * n_dim + row_idx]) * beta;
+            result += metallic_to_accum(metallic_load_residual(residual, out_idx) * beta);
         }
-        output[batch_idx * n_dim + row_idx] = (half)result;
+        metallic_store_output(output, out_idx, result);
     }
 "#,
     out_var = "void"
 )]
 pub struct WarpWriteOutputStage {
-    #[arg(buffer = 3, output)]
+    #[arg(buffer = 3, output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
-    #[arg(buffer = 7, metal_type = "const device half*")]
+    #[arg(buffer = 7, metal_type = "const device BiasStorageT*")]
     pub bias: TensorArg,
     #[arg(buffer = 8, metal_type = "constant uint&")]
     pub has_bias: u32,
     #[arg(buffer = 9, metal_type = "constant float&")]
     pub alpha: f32,
-    #[arg(buffer = 10, metal_type = "const device half*")]
+    #[arg(buffer = 10, metal_type = "const device ResidualStorageT*")]
     pub residual: TensorArg,
     #[arg(buffer = 11, metal_type = "constant uint&")]
     pub has_residual: u32,
@@ -277,27 +291,27 @@ impl Default for WarpWriteOutputStage {
 /// and don't support/need residual accumulation in the write stage.
 #[derive(Debug, Clone, DeriveStage)]
 #[stage(
+    includes("dtypes/runtime_types.metal"),
     activation_field = "activation",
     emit = r#"
     // Write output (only lane 0 of each warp)
     if (lane_id == 0) {
-        float result = row_sum * alpha;
+        AccumT result = metallic_to_accum(row_sum * alpha);
         if (has_bias != 0) {
-            result += (float)bias[row_idx];
+            result += metallic_to_accum(metallic_load_bias(bias, (ulong)row_idx));
         }
 
         // Apply activation
-        result = {activation_struct}::apply(result);
-
-        output[batch_idx * n_dim + row_idx] = (half)result;
+        result = metallic_to_accum({activation_struct}::apply((float)result));
+        metallic_store_output(output, (ulong)batch_idx * (ulong)n_dim + (ulong)row_idx, result);
     }
 "#,
     out_var = "void"
 )]
 pub struct WarpWriteOutputNoResidualStage {
-    #[arg(buffer = 3, output)]
+    #[arg(buffer = 3, output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
-    #[arg(buffer = 7, metal_type = "const device half*")]
+    #[arg(buffer = 7, metal_type = "const device BiasStorageT*")]
     pub bias: TensorArg,
     #[arg(buffer = 8, metal_type = "constant uint&")]
     pub has_bias: u32,
@@ -341,7 +355,13 @@ impl Default for WarpWriteOutputNoResidualStage {
 /// full memory coalescing without implicit vector loads.
 #[derive(Debug, Clone, DeriveStage)]
 #[stage(
-    includes("gemv/common.metal", "gemv/dot.metal", "gemv/vectorized_stage.metal", "gemv/scalar_output.metal"),
+    includes(
+        "dtypes/runtime_types.metal",
+        "gemv/common.metal",
+        "gemv/dot.metal",
+        "gemv/vectorized_stage.metal",
+        "gemv/scalar_output.metal"
+    ),
     policy_field = "policy",
     template_bindings(unroll = "self.unroll.max(1)"),
     emit = r#"
@@ -365,7 +385,7 @@ pub struct ScalarDotStage {
     weights: TensorArg,
     #[arg(buffer = 1, metal_type = "const device uchar*")]
     scale_bytes: TensorArg,
-    #[arg(buffer = 2, metal_type = "const device half*")]
+    #[arg(buffer = 2, metal_type = "const device InputStorageT*")]
     input: TensorArg,
     #[arg(buffer = 4, metal_type = "constant uint&")]
     k_dim: u32,

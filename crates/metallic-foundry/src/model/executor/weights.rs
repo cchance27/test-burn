@@ -124,7 +124,7 @@ impl CompiledModel {
         source_name: &str,
         logical_name: &str,
     ) -> Result<(), MetalError> {
-        self.bind_model_tensor_with_layout(bindings, fast_bindings, foundry, source_name, logical_name, WeightLayout::RowMajor)
+        self.bind_model_tensor_with_layout(bindings, fast_bindings, foundry, source_name, logical_name, Layout::RowMajor)
     }
 
     /// Bind a model tensor to bindings in canonical k-block-major layout.
@@ -146,7 +146,7 @@ impl CompiledModel {
             foundry,
             source_name,
             logical_name,
-            WeightLayout::Canonical { expected_k, expected_n },
+            Layout::Canonical { expected_k, expected_n },
         )
     }
 
@@ -158,7 +158,7 @@ impl CompiledModel {
         foundry: &mut Foundry,
         source_name: &str,
         logical_name: &str,
-        layout: WeightLayout,
+        layout: Layout,
     ) -> Result<(), MetalError> {
         let model = self.weights.model();
         let tensor_info = model

@@ -7,6 +7,16 @@
 
 using namespace metal;
 
+// Threadgroup tile storage type used by MMA path.
+// Keep half fast path when input storage is half, otherwise widen to float.
+#if METALLIC_FASTPATH_INPUT_HALF
+typedef half MmaTileT;
+#else
+typedef float MmaTileT;
+#endif
+typedef ComputeT MmaComputeT;
+typedef AccumT MmaAccumT;
+
 // =============================================================================
 // SimdgroupMma - Hardware-accelerated matrix multiply-accumulate
 // =============================================================================
@@ -16,7 +26,7 @@ using namespace metal;
 // This is POLICY-AGNOSTIC - operates on already-dequantized threadgroup memory.
 //
 // Usage:
-//   SimdgroupMma<half, half, 32, 32, 16, 2, 2, false, false, 20, 36> mma(sgid, slid);
+//   SimdgroupMma<MmaTileT, MmaTileT, 32, 32, 16, 2, 2, false, false, 20, 36> mma(sgid, slid);
 //   for (int k = 0; k < K_iters; k++) {
 //       mma.mma(As, Bs);
 //   }
@@ -29,7 +39,7 @@ using namespace metal;
 /// Simdgroup matrix multiply-accumulate for tiled GEMM.
 /// Follows MLX's BlockMMA pattern exactly.
 template<
-    typename T,          // Element type in threadgroup memory (half)
+    typename T,          // Element type in threadgroup memory (MmaTileT)
     typename U,          // Output element type (half)
     int BM,              // Block tile M dimension
     int BN,              // Block tile N dimension
@@ -40,7 +50,7 @@ template<
     bool transpose_b,    // Whether B is transposed
     short lda_tgp,       // Leading dimension of A in threadgroup memory
     short ldb_tgp,       // Leading dimension of B in threadgroup memory
-    typename AccumType = float
+    typename AccumType = MmaAccumT
 >
 struct SimdgroupMma {
     // Warp tile strides
@@ -221,8 +231,9 @@ struct SimdgroupMma {
     }
     
     /// Apply alpha*result + beta*C epilogue.
+    template<typename CType>
     METAL_FUNC void apply_epilogue(
-        const device U* C,
+        const device CType* C,
         const int ldc,
         float alpha,
         float beta
@@ -253,8 +264,9 @@ struct SimdgroupMma {
     }
 
     /// Apply epilogue with bounds checking for C load.
+    template<typename CType>
     METAL_FUNC void apply_epilogue_safe(
-        const device U* C,
+        const device CType* C,
         const int ldc,
         float alpha,
         float beta,
@@ -307,7 +319,8 @@ struct SimdgroupMma {
     }
     
     /// Apply row-wise bias.
-    METAL_FUNC void apply_bias(const device T* bias, const int col_offset) {
+    template<typename BiasT>
+    METAL_FUNC void apply_bias(const device BiasT* bias, const int col_offset) {
         STEEL_PRAGMA_UNROLL
         for (short i = 0; i < TM; ++i) {
             STEEL_PRAGMA_UNROLL

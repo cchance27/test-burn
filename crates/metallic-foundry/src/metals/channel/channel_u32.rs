@@ -17,9 +17,9 @@ pub struct ChannelU32Params {
     dtype = U32
 )]
 pub struct ChannelU32Init {
-    #[arg(buffer = 0, output)]
+    #[arg(buffer = 0, output, metal_type = "device uint*")]
     pub header: TensorArg,
-    #[arg(buffer = 1, output)]
+    #[arg(buffer = 1, output, metal_type = "device uint*")]
     pub data: TensorArg,
     pub params: ChannelU32Params,
     #[arg(skip)]
@@ -53,11 +53,11 @@ impl ChannelU32Init {
     dtype = U32
 )]
 pub struct ChannelU32Push {
-    #[arg(buffer = 0, output)]
+    #[arg(buffer = 0, output, metal_type = "device uint*")]
     pub header: TensorArg,
-    #[arg(buffer = 1, output)]
+    #[arg(buffer = 1, output, metal_type = "device uint*")]
     pub data: TensorArg,
-    #[arg(buffer = 2)]
+    #[arg(buffer = 2, metal_type = "const device uint*")]
     pub value: TensorArg,
     pub params: ChannelU32Params,
     #[arg(skip)]
@@ -92,9 +92,9 @@ impl ChannelU32Push {
     dtype = U32
 )]
 pub struct ChannelU32PushScalar {
-    #[arg(buffer = 0, output)]
+    #[arg(buffer = 0, output, metal_type = "device uint*")]
     pub header: TensorArg,
-    #[arg(buffer = 1, output)]
+    #[arg(buffer = 1, output, metal_type = "device uint*")]
     pub data: TensorArg,
     #[arg(buffer = 2)]
     pub value: u32,

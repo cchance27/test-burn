@@ -49,6 +49,8 @@ pub(super) fn get_fused_qkv_kernel(strategy: GemvStrategy, policy: Arc<dyn Metal
         let vw = match vec_width {
             4 => VectorWidth::Vec4,
             8 => VectorWidth::Vec8,
+            // F32-native policies report 16-byte vector loads (float4). Reuse Vec4 lane math.
+            16 => VectorWidth::Vec4,
             _ => panic!("Unsupported vector width: {}", vec_width),
         };
 

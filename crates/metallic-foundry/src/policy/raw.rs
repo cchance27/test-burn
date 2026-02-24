@@ -2,8 +2,8 @@ use metallic_loader::LoadedModel;
 use metallic_macros::MetalPolicy;
 use objc2_metal::MTLResourceOptions;
 
-use super::{LoaderStage, MetalPolicyRuntime, WeightLayout};
-use crate::{Foundry, types::TensorArg};
+use super::{LoaderStage, MetalPolicyRuntime};
+use crate::{Foundry, compound::Layout, types::TensorArg};
 
 #[derive(Debug, MetalPolicy, Clone, Default)]
 #[policy(
@@ -32,7 +32,7 @@ impl MetalPolicyRuntime for PolicyU32 {
         model: &dyn LoadedModel,
         source_tensor_name: &str,
         logical_name: &str,
-        _layout: WeightLayout,
+        _layout: Layout,
     ) -> anyhow::Result<Vec<(String, TensorArg)>> {
         let tensor_info = model
             .tensor_info(source_tensor_name)

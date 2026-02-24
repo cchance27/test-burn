@@ -1,7 +1,7 @@
 use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
 use crate::{
-    Foundry, MetalError, spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings}, types::TensorArg
+    Foundry, MetalError, metals::common::dtype_contract::require_uniform_dtypes, spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings}, types::TensorArg
 };
 
 /// A simple, compiled element-wise add step: Out = A + B.
@@ -12,16 +12,19 @@ use crate::{
 #[derive(Kernel, KernelArgs, Clone, Default)]
 #[kernel(
     source = "elemwise/add.metal",
-    function = "broadcast_add_kernel_f16",
+    function = "broadcast_add_kernel",
     args = SimpleElemwiseAddParams,
+    include_exprs("crate::policy::resolve_policy(self.a.dtype()).header()"),
     dispatch = per_element,
     step = true,
     execute = false
 )]
 pub struct SimpleElemwiseAdd {
+    #[arg(metal_type = "const device InputStorageT*")]
     pub a: TensorArg,
+    #[arg(metal_type = "const device InputStorageT*")]
     pub b: TensorArg,
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub out: TensorArg,
     #[arg(skip)]
     pub params: SimpleElemwiseAddParams,
@@ -45,6 +48,13 @@ impl CompiledStep for CompiledSimpleElemwiseAddStep {
         let a = fast_bindings.get(self.a).ok_or(MetalError::InputNotFound("Add: a".into()))?;
         let b = fast_bindings.get(self.b).ok_or(MetalError::InputNotFound("Add: b".into()))?;
         let out = fast_bindings.get(self.out).ok_or(MetalError::InputNotFound("Add: out".into()))?;
+
+        require_uniform_dtypes("SimpleElemwiseAdd", &[("a", a.dtype), ("b", b.dtype), ("out", out.dtype)]).map_err(|_| {
+            MetalError::OperationFailed(format!(
+                "SimpleElemwiseAdd mixed-policy is unsupported (a={:?}, b={:?}, out={:?}).",
+                a.dtype, b.dtype, out.dtype
+            ))
+        })?;
 
         let total = a.dims.iter().product::<usize>() as u32;
         let b_len = b.dims.iter().product::<usize>() as u32;

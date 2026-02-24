@@ -4,8 +4,8 @@ using namespace metal;
 /// Copies input K/V [n_kv_heads * head_dim] into cache at specified position.
 /// Cache layout: [n_kv_heads, max_seq_len, head_dim]
 kernel void kv_cache_write_kernel(
-    const device half* input [[buffer(0)]],
-    device half* cache [[buffer(1)]],
+    const device InputStorageT* input [[buffer(0)]],
+    device OutputStorageT* cache [[buffer(1)]],
     const constant KvCacheWriteParamsResolved* params [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
@@ -26,5 +26,5 @@ kernel void kv_cache_write_kernel(
                    + (params->position_offset + input_seq_pos) * params->head_dim 
                    + dim_idx;
     
-    cache[cache_idx] = input[gid];
+    metallic_store_output(cache, cache_idx, metallic_to_accum(metallic_load_input(input, gid)));
 }

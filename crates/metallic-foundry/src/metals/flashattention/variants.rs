@@ -83,19 +83,23 @@ impl FlashDecodeVariant {
             )));
         }
 
-        match (head_dim, self.scalar) {
-            (64, FlashDecodeScalar::Half2) => Ok(()),
-            (64, FlashDecodeScalar::Half4) => Ok(()),
-            (128, FlashDecodeScalar::Half4) => Ok(()),
-            (128, FlashDecodeScalar::Half2) => Err(MetalError::OperationNotSupported(
-                "FlashDecodeVariant Half2 is not supported for head_dim=128".into(),
-            )),
-            _ => Err(MetalError::OperationNotSupported(format!(
-                "FlashDecodeVariant unsupported head_dim={}, scalar={}",
-                head_dim,
-                self.scalar.as_str()
-            ))),
+        if head_dim == 64 && matches!(self.scalar, FlashDecodeScalar::Half2 | FlashDecodeScalar::Half4) {
+            return Ok(());
         }
+
+        if matches!(self.scalar, FlashDecodeScalar::Half2) {
+            return Err(MetalError::OperationNotSupported(format!(
+                "FlashDecodeVariant Half2 is only supported for head_dim=64 (got head_dim={head_dim})"
+            )));
+        }
+
+        if head_dim == 0 || head_dim > 128 || !head_dim.is_multiple_of(4) {
+            return Err(MetalError::OperationNotSupported(format!(
+                "FlashDecodeVariant Half4 requires head_dim to be a non-zero multiple of 4 and <= 128 (got head_dim={head_dim})"
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -156,28 +160,15 @@ pub fn flash_decode_variant_from_env(head_dim: u32) -> Result<Option<FlashDecode
     }
 
     // Default scalar selection if only warps/keys were provided.
-    let default_scalar = match head_dim {
-        64 => FlashDecodeScalar::Half2,
-        128 => FlashDecodeScalar::Half4,
-        _ => {
-            return Err(MetalError::OperationNotSupported(format!(
-                "Flash decode env override unsupported head_dim={}",
-                head_dim
-            )));
-        }
+    let default_scalar = if head_dim == 64 {
+        FlashDecodeScalar::Half2
+    } else {
+        FlashDecodeScalar::Half4
     };
 
     let variant = FlashDecodeVariant {
-        warps: ov.warps.unwrap_or(match head_dim {
-            64 => 16,
-            128 => 8,
-            _ => 8,
-        }),
-        keys_per_warp: ov.keys_per_warp.unwrap_or(match head_dim {
-            64 => 32,
-            128 => 16,
-            _ => 16,
-        }),
+        warps: ov.warps.unwrap_or(if head_dim == 64 { 16 } else { 8 }),
+        keys_per_warp: ov.keys_per_warp.unwrap_or(if head_dim == 64 { 32 } else { 16 }),
         scalar: ov.scalar.unwrap_or(default_scalar),
         tg_out: ov.tg_out.unwrap_or(FlashDecodeTgOut::Float),
     };
@@ -189,8 +180,7 @@ pub fn flash_decode_variant_from_env(head_dim: u32) -> Result<Option<FlashDecode
 /// Default decode variant selector tuned for Apple M2/M3.
 ///
 /// This is intentionally conservative and only selects from a small table of known-good
-/// configurations. New head dims should be added by introducing new specializations and
-/// benchmarking, not by widening dynamic behavior in the kernel.
+/// configurations used by supported decode head dims.
 pub fn select_flash_decode_variant_m2m3(head_dim: u32, kv_len: u32) -> FlashDecodeVariant {
     match head_dim {
         64 => {
@@ -242,5 +232,32 @@ pub fn select_flash_decode_variant_m2m3(head_dim: u32, kv_len: u32) -> FlashDeco
             scalar: FlashDecodeScalar::Half4,
             tg_out: FlashDecodeTgOut::Float,
         },
+    }
+}
+
+/// Storage-byte aware selector entrypoint.
+///
+/// Current FA kernels are F16-only and this still routes to the tuned M2/M3 table.
+/// The storage-byte input is intentionally kept for future fp32/bf16 FA expansion.
+pub fn select_flash_decode_variant(head_dim: u32, kv_len: u32, _storage_bytes: usize) -> FlashDecodeVariant {
+    select_flash_decode_variant_m2m3(head_dim, kv_len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{select_flash_decode_variant, select_flash_decode_variant_m2m3};
+
+    #[test]
+    fn storage_aware_selector_matches_tuned_table_for_current_paths() {
+        let tuned = select_flash_decode_variant_m2m3(64, 1024);
+        let aware = select_flash_decode_variant(64, 1024, 2);
+        assert_eq!(aware, tuned);
+    }
+
+    #[test]
+    fn storage_aware_selector_accepts_wider_storage_for_future_paths() {
+        let a = select_flash_decode_variant(128, 4096, 4);
+        let b = select_flash_decode_variant_m2m3(128, 4096);
+        assert_eq!(a, b);
     }
 }

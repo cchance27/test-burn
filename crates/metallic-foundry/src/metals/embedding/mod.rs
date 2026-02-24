@@ -32,11 +32,14 @@ pub struct EmbeddingParams {
     execute = false
 )]
 pub struct Embedding {
+    #[arg(metal_type = "const device uchar*")]
     pub table: TensorArg,
     #[arg(scale_for = "table")]
+    #[arg(metal_type = "const device uchar*")]
     pub scale_bytes: TensorArg, // Derived from table name ("{table}_scales"), populated as index in CompiledStep
+    #[arg(metal_type = "const device uint*")]
     pub indices: TensorArg,
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     pub params: EmbeddingParamsResolved,
 }

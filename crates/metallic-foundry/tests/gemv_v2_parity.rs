@@ -12,8 +12,9 @@
 use std::sync::Arc;
 
 use half::f16;
+use metallic_env::POLICY_VARIANT;
 use metallic_foundry::{
-    Foundry, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel}, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::{DispatchConfig, TensorArg}
+    Foundry, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel}, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, storage::Pooled, tensor::{F16, F32, Tensor as FoundryTensor, TensorInit}, types::{DispatchConfig, TensorArg}
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -529,4 +530,135 @@ fn test_gemv_v2_nk_q8_128x128() {
         layout: TestLayout::NK,
         ..Default::default()
     });
+}
+
+#[test]
+#[serial]
+fn test_gemv_v2_f32_dense_preserve_parity_128x128() {
+    let _variant_guard = POLICY_VARIANT
+        .set_guard("preserve:f32".to_string())
+        .expect("set METALLIC_POLICY_VARIANT");
+
+    let mut foundry = Foundry::new().unwrap();
+    let mut rng = rng();
+
+    let k = 128usize;
+    let n = 128usize;
+
+    let weights_data: Vec<f32> = (0..k * n).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+    let input_data: Vec<f32> = (0..k).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+    let bias_data: Vec<f32> = (0..n).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+
+    let weights = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![k * n], TensorInit::CopyFrom(&weights_data)).unwrap();
+    let input = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![k], TensorInit::CopyFrom(&input_data)).unwrap();
+    let output = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![n], TensorInit::Uninitialized).unwrap();
+    let bias = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![n], TensorInit::CopyFrom(&bias_data)).unwrap();
+
+    let args = GemvV2Args {
+        weights: TensorArg::from_tensor(&weights),
+        scale_bytes: TensorArg::from_tensor(&weights), // dummy for dense policy
+        input: TensorArg::from_tensor(&input),
+        output: TensorArg::from_tensor(&output),
+        bias: TensorArg::from_tensor(&bias),
+        has_bias: 1,
+        k_dim: k as u32,
+        n_dim: n as u32,
+        weights_per_block: 32,
+        alpha: 1.0,
+        residual: TensorArg::from_tensor(&output),
+        has_residual: 0,
+        beta: 0.0,
+    };
+
+    let policy = metallic_foundry::policy::resolve_policy(metallic_foundry::Dtype::F32);
+    let kernel = get_gemv_v2_kernel(policy, Layout::RowMajor, GemvStrategy::Canonical, Activation::None);
+    let dispatch = DispatchConfig::warp_per_row(n as u32, 1);
+    foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
+    foundry.synchronize().unwrap();
+
+    let gpu_out: Vec<f32> = output.to_vec(&foundry);
+    let mut cpu_out = vec![0.0f32; n];
+    for row in 0..n {
+        let mut acc = 0.0f32;
+        for kk in 0..k {
+            acc += weights_data[row * k + kk] * input_data[kk];
+        }
+        cpu_out[row] = acc + bias_data[row];
+    }
+
+    let mut max_diff = 0.0f32;
+    for i in 0..n {
+        max_diff = max_diff.max((gpu_out[i] - cpu_out[i]).abs());
+    }
+    assert!(max_diff < 0.2, "F32 dense GEMV max diff too high: {}", max_diff);
+}
+
+#[test]
+#[serial]
+fn test_gemv_v2_f32_input_q8_weights_preserve_parity_128x128() {
+    let _variant_guard = POLICY_VARIANT
+        .set_guard("preserve:f32".to_string())
+        .expect("set METALLIC_POLICY_VARIANT");
+
+    let mut foundry = Foundry::new().unwrap();
+    let mut rng = rng();
+
+    let k = 128usize;
+    let n = 128usize;
+    let block_size = 32usize;
+    let n_blocks = (k * n) / block_size;
+    let blocks_per_k = k.div_ceil(block_size);
+
+    let weights_u8: Vec<u8> = (0..k * n).map(|_| rng.random_range(0u8..=255u8)).collect();
+    let scales: Vec<f16> = (0..n_blocks).map(|_| f16::from_f32(rng.random_range(0.1f32..2.0f32))).collect();
+    let input_data: Vec<f32> = (0..k).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+    let bias_data: Vec<f32> = (0..n).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+
+    use metallic_foundry::tensor::Q8_0;
+    let weights = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![k * n], TensorInit::CopyFrom(&weights_u8)).unwrap();
+    let scales_t = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_blocks], TensorInit::CopyFrom(&scales)).unwrap();
+    let input = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![k], TensorInit::CopyFrom(&input_data)).unwrap();
+    let output = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![n], TensorInit::Uninitialized).unwrap();
+    let bias = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![n], TensorInit::CopyFrom(&bias_data)).unwrap();
+
+    let args = GemvV2Args {
+        weights: TensorArg::from_tensor(&weights),
+        scale_bytes: TensorArg::from_tensor(&scales_t),
+        input: TensorArg::from_tensor(&input),
+        output: TensorArg::from_tensor(&output),
+        bias: TensorArg::from_tensor(&bias),
+        has_bias: 1,
+        k_dim: k as u32,
+        n_dim: n as u32,
+        weights_per_block: block_size as u32,
+        alpha: 1.0,
+        residual: TensorArg::from_tensor(&output),
+        has_residual: 0,
+        beta: 0.0,
+    };
+
+    let kernel = get_gemv_v2_kernel(Arc::new(PolicyQ8), Layout::RowMajor, GemvStrategy::Canonical, Activation::None);
+    let dispatch = DispatchConfig::warp_per_row(n as u32, 1);
+    foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
+    foundry.synchronize().unwrap();
+
+    let gpu_out: Vec<f32> = output.to_vec(&foundry);
+    let weights_i8: Vec<i8> = weights_u8.iter().map(|&x| x as i8).collect();
+    let mut cpu_out = vec![0.0f32; n];
+    for row in 0..n {
+        let mut acc = 0.0f32;
+        for kk in 0..k {
+            let w_idx = row * k + kk;
+            let block_idx = kk / block_size;
+            let scale = scales[row * blocks_per_k + block_idx].to_f32();
+            acc += (weights_i8[w_idx] as f32) * scale * input_data[kk];
+        }
+        cpu_out[row] = acc + bias_data[row];
+    }
+
+    let mut max_diff = 0.0f32;
+    for i in 0..n {
+        max_diff = max_diff.max((gpu_out[i] - cpu_out[i]).abs());
+    }
+    assert!(max_diff < 1.0, "F32+Q8 GEMV max diff too high: {}", max_diff);
 }

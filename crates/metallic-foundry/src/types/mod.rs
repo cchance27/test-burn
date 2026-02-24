@@ -435,6 +435,30 @@ impl KernelArg for TensorArg {
     }
 }
 
+/// Compute the maximum linear element index reachable by an argument's shape/strides.
+///
+/// Returns `None` when dims/strides metadata is unavailable or inconsistent.
+#[inline]
+pub fn kernel_arg_max_linear_index<K: KernelArg + ?Sized>(arg: &K) -> Option<u64> {
+    let dims = arg.dims();
+    let strides = arg.strides();
+    if dims.is_empty() || dims.len() != strides.len() {
+        return None;
+    }
+
+    let mut max_index: u64 = 0;
+    for (dim, stride) in dims.iter().zip(strides.iter()) {
+        let dim = u64::try_from(*dim).ok()?;
+        let stride = u64::try_from(*stride).ok()?;
+        if dim == 0 {
+            return Some(0);
+        }
+        let term = (dim - 1).checked_mul(stride)?;
+        max_index = max_index.checked_add(term)?;
+    }
+    Some(max_index)
+}
+
 /// A compiled Compute Pipeline State.
 #[derive(Clone, Debug)]
 pub struct MetalPipeline(pub(crate) Retained<ProtocolObject<dyn MTLComputePipelineState>>);

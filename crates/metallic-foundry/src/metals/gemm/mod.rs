@@ -17,17 +17,17 @@ pub use step::*; // Re-export Step (which will implement CompiledStep for genera
     execute = false
 )]
 pub struct GemmV2 {
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub a: TensorArg,
-    #[arg(buffer = 1)]
+    #[arg(buffer = 1, metal_type = "const device uchar*")]
     pub b: TensorArg,
-    #[arg(buffer = 2, output)]
+    #[arg(buffer = 2, output, metal_type = "device OutputStorageT*")]
     pub d: TensorArg, // Output
-    #[arg(buffer = 3)]
+    #[arg(buffer = 3, metal_type = "const device ResidualStorageT*")]
     pub c: Option<TensorArg>, // Residual
-    #[arg(buffer = 4)]
+    #[arg(buffer = 4, metal_type = "const device BiasStorageT*")]
     pub bias: Option<TensorArg>,
-    #[arg(buffer = 5)]
+    #[arg(buffer = 5, metal_type = "const device uchar*")]
     pub b_scales: Option<TensorArg>, // Explicit scales
 
     #[arg(meta, scale_for = "b")]

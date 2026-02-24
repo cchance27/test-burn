@@ -1,17 +1,36 @@
 #include <metal_stdlib>
 using namespace metal;
 
+typedef FastScalarT FfnFastScalarT;
+typedef FastVec4T FfnFastVec4T;
+
+ALWAYS_INLINE FfnFastVec4T ffn_load_input_half4(const device InputStorageT* input, const ulong idx) {
+#if METALLIC_FASTPATH_INPUT_HALF
+    return ((const device FfnFastVec4T*)((const device FfnFastScalarT*)input + idx))[0];
+#else
+    return FfnFastVec4T(metallic_load_input_vec4f(input, idx));
+#endif
+}
+
+ALWAYS_INLINE FfnFastVec4T ffn_load_gamma_half4(const device GammaStorageT* gamma, const ulong idx) {
+#if METALLIC_FASTPATH_GAMMA_HALF
+    return ((const device FfnFastVec4T*)((const device FfnFastScalarT*)gamma + idx))[0];
+#else
+    return FfnFastVec4T(metallic_load_gamma_vec4f(gamma, idx));
+#endif
+}
+
 template<typename Policy, uint vec_width, bool has_norm>
 ALWAYS_INLINE float2 run_ffn_dual_project_stage(
     const device uchar* w_gate,
     const device uchar* s_gate,
     const device uchar* w_up,
     const device uchar* s_up,
-    const device half* input,
+    const device InputStorageT* input,
     constant uint& k_dim,
     constant uint& n_dim,
     constant uint& weights_per_block,
-    const device half* gamma,
+    const device GammaStorageT* gamma,
     float inv_rms,
     uint lane_id,
     uint row_idx,
@@ -22,28 +41,58 @@ ALWAYS_INLINE float2 run_ffn_dual_project_stage(
     float acc_up = 0.0f;
     uint k_base = 0;
 
-    ulong scale_stride = (ulong)row_idx * blocks_per_k * Policy::SCALE_BYTES;
+    ulong scale_stride = (ulong)row_idx * blocks_per_k * Policy::SCALE_BYTES; // INDEX64_OK
     const device uchar* row_s_gate = s_gate + scale_stride;
     const device uchar* row_s_up = s_up + scale_stride;
+#if METALLIC_FASTPATH_INPUT_HALF
+    const device FfnFastScalarT* input_half = (const device FfnFastScalarT*)input;
+#endif
+#if METALLIC_FASTPATH_GAMMA_HALF
+    const device FfnFastScalarT* gamma_half = (const device FfnFastScalarT*)gamma;
+#endif
 
     while (k_base + K_CHUNK_SIZE <= k_dim) {
         uint k = k_base + lane_id * vec_width;
-        float4 xv_raw = *(const device float4*)(input + batch_idx * k_dim + k);
-        half4 xv_lo = as_type<half4>(xv_raw.xy);
-        half4 xv_hi = as_type<half4>(xv_raw.zw);
+        FfnFastVec4T xv_lo;
+        FfnFastVec4T xv_hi;
+#if METALLIC_FASTPATH_INPUT_HALF
+        const uint x_base = batch_idx * k_dim + k;
+        const float4 xv_raw = *(const device float4*)(input_half + x_base);
+        xv_lo = as_type<FfnFastVec4T>(xv_raw.xy);
+        xv_hi = (vec_width == 8) ? as_type<FfnFastVec4T>(xv_raw.zw) : FfnFastVec4T((FfnFastScalarT)0.0f);
+#else
+        const ulong x_base = (ulong)batch_idx * (ulong)k_dim + (ulong)k; // INDEX64_OK
+        xv_lo = ffn_load_input_half4(input, x_base + 0ul);
+        xv_hi = (vec_width == 8) ? ffn_load_input_half4(input, x_base + 4ul) : FfnFastVec4T((FfnFastScalarT)0.0f);
+#endif
 
         if (has_norm && gamma) {
             float4 f_lo = float4(xv_lo);
             float4 f_hi = float4(xv_hi);
             f_lo *= inv_rms;
             f_hi *= inv_rms;
-            const device half* g_ptr = gamma + k;
-            f_lo.x *= (float)g_ptr[0]; f_lo.y *= (float)g_ptr[1];
-            f_lo.z *= (float)g_ptr[2]; f_lo.w *= (float)g_ptr[3];
-            f_hi.x *= (float)g_ptr[4]; f_hi.y *= (float)g_ptr[5];
-            f_hi.z *= (float)g_ptr[6]; f_hi.w *= (float)g_ptr[7];
-            xv_lo = half4(f_lo);
-            xv_hi = half4(f_hi);
+#if METALLIC_FASTPATH_GAMMA_HALF
+            const device FfnFastScalarT* g_ptr = gamma_half + k;
+            f_lo.x *= (float)g_ptr[0];
+            f_lo.y *= (float)g_ptr[1];
+            f_lo.z *= (float)g_ptr[2];
+            f_lo.w *= (float)g_ptr[3];
+            if (vec_width == 8) {
+                f_hi.x *= (float)g_ptr[4];
+                f_hi.y *= (float)g_ptr[5];
+                f_hi.z *= (float)g_ptr[6];
+                f_hi.w *= (float)g_ptr[7];
+            }
+#else
+            FfnFastVec4T g_lo_h = ffn_load_gamma_half4(gamma, (ulong)k + 0ul); // INDEX64_OK
+            f_lo *= float4(g_lo_h);
+            if (vec_width == 8) {
+                FfnFastVec4T g_hi_h = ffn_load_gamma_half4(gamma, (ulong)k + 4ul); // INDEX64_OK
+                f_hi *= float4(g_hi_h);
+            }
+#endif
+            xv_lo = FfnFastVec4T(f_lo);
+            xv_hi = FfnFastVec4T(f_hi);
         }
 
         float4 xv_f32_lo = float4(xv_lo);
@@ -78,28 +127,60 @@ ALWAYS_INLINE float2 run_ffn_dual_project_stage(
         float4 xv_raw = float4(0.0f);
 
         if (k + vec_width <= k_dim) {
-            xv_raw = *(const device float4*)(input + batch_idx * k_dim + k);
+            const uint x_base = batch_idx * k_dim + k;
+#if METALLIC_FASTPATH_INPUT_HALF
+            xv_raw = *(const device float4*)(input_half + x_base);
+#else
+            const FfnFastVec4T xv_lo_h = ffn_load_input_half4(input, (ulong)x_base + 0ul); // INDEX64_OK
+            const FfnFastVec4T xv_hi_h = (vec_width == 8) ? ffn_load_input_half4(input, (ulong)x_base + 4ul) : FfnFastVec4T((FfnFastScalarT)0.0f); // INDEX64_OK
+            xv_raw = float4(as_type<float2>(xv_lo_h), as_type<float2>(xv_hi_h));
+#endif
         } else if (k < k_dim) {
+#if METALLIC_FASTPATH_INPUT_HALF
+            const uint x_base = batch_idx * k_dim + k;
             for (uint i = 0; i < vec_width && k + i < k_dim; ++i) {
-                ((thread half*)&xv_raw)[i] = input[batch_idx * k_dim + k + i];
+                ((thread FfnFastScalarT*)&xv_raw)[i] = input_half[x_base + i];
             }
+#else
+            for (uint i = 0; i < vec_width && k + i < k_dim; ++i) {
+                ((thread FfnFastScalarT*)&xv_raw)[i] = (FfnFastScalarT)metallic_load_input(
+                    input,
+                    (ulong)batch_idx * (ulong)k_dim + (ulong)k + (ulong)i // INDEX64_OK
+                );
+            }
+#endif
         }
 
-        half4 xv_lo = as_type<half4>(xv_raw.xy);
-        half4 xv_hi = as_type<half4>(xv_raw.zw);
+        FfnFastVec4T xv_lo = as_type<FfnFastVec4T>(xv_raw.xy);
+        FfnFastVec4T xv_hi = as_type<FfnFastVec4T>(xv_raw.zw);
 
         if (has_norm && gamma) {
             float4 f_lo = float4(xv_lo);
             float4 f_hi = float4(xv_hi);
             f_lo *= inv_rms;
             f_hi *= inv_rms;
-            const device half* g_ptr = gamma + k;
-            f_lo.x *= (float)g_ptr[0]; f_lo.y *= (float)g_ptr[1];
-            f_lo.z *= (float)g_ptr[2]; f_lo.w *= (float)g_ptr[3];
-            f_hi.x *= (float)g_ptr[4]; f_hi.y *= (float)g_ptr[5];
-            f_hi.z *= (float)g_ptr[6]; f_hi.w *= (float)g_ptr[7];
-            xv_lo = half4(f_lo);
-            xv_hi = half4(f_hi);
+#if METALLIC_FASTPATH_GAMMA_HALF
+            const device FfnFastScalarT* g_ptr = gamma_half + k;
+            f_lo.x *= (float)g_ptr[0];
+            f_lo.y *= (float)g_ptr[1];
+            f_lo.z *= (float)g_ptr[2];
+            f_lo.w *= (float)g_ptr[3];
+            if (vec_width == 8) {
+                f_hi.x *= (float)g_ptr[4];
+                f_hi.y *= (float)g_ptr[5];
+                f_hi.z *= (float)g_ptr[6];
+                f_hi.w *= (float)g_ptr[7];
+            }
+#else
+            FfnFastVec4T g_lo_h = ffn_load_gamma_half4(gamma, (ulong)k + 0ul); // INDEX64_OK
+            f_lo *= float4(g_lo_h);
+            if (vec_width == 8) {
+                FfnFastVec4T g_hi_h = ffn_load_gamma_half4(gamma, (ulong)k + 4ul); // INDEX64_OK
+                f_hi *= float4(g_hi_h);
+            }
+#endif
+            xv_lo = FfnFastVec4T(f_lo);
+            xv_hi = FfnFastVec4T(f_hi);
         }
 
         float4 xv_f32_lo = float4(xv_lo);

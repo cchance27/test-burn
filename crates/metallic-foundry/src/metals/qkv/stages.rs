@@ -52,7 +52,7 @@ pub struct ParallelProjectStage {
     w_v: TensorArg,
     #[arg(buffer = 5, metal_type = "const device uchar*")]
     s_v: TensorArg,
-    #[arg(buffer = 6)]
+    #[arg(buffer = 6, metal_type = "const device InputStorageT*")]
     input: TensorArg,
     #[arg(buffer = 7)]
     k_dim: u32,
@@ -62,7 +62,7 @@ pub struct ParallelProjectStage {
     n_kv: u32,
     #[arg(buffer = 10)]
     weights_per_block: u32,
-    #[arg(buffer = 18)]
+    #[arg(buffer = 18, metal_type = "const device GammaStorageT*")]
     gamma: TensorArg,
     #[arg(stage_skip)]
     /// Policy for quantization (F16, Q8)
@@ -130,17 +130,17 @@ pub struct MultiWarpReduceStage;
 // DEBT: fields are consumed by `#[derive(Stage)]` codegen and Metal emission, not direct Rust reads.
 #[allow(dead_code)]
 pub struct MultiWriteOutputStage {
-    #[arg(buffer = 11, output)]
+    #[arg(buffer = 11, output, metal_type = "device OutputStorageT*")]
     out_q: TensorArg,
-    #[arg(buffer = 12, output)]
+    #[arg(buffer = 12, output, metal_type = "device OutputStorageT*")]
     out_k: TensorArg,
-    #[arg(buffer = 13, output)]
+    #[arg(buffer = 13, output, metal_type = "device OutputStorageT*")]
     out_v: TensorArg,
-    #[arg(buffer = 14)]
+    #[arg(buffer = 14, metal_type = "const device BiasStorageT*")]
     b_q: TensorArg,
-    #[arg(buffer = 15)]
+    #[arg(buffer = 15, metal_type = "const device BiasStorageT*")]
     b_k: TensorArg,
-    #[arg(buffer = 16)]
+    #[arg(buffer = 16, metal_type = "const device BiasStorageT*")]
     b_v: TensorArg,
     #[arg(buffer = 17)]
     has_b: u32,

@@ -19,14 +19,14 @@ pub struct RepetitionPenaltyParams {
 #[derive(Kernel, KernelArgs, Clone)]
 #[kernel(
     source = "sampling/repetition_penalty.metal",
-    function = "apply_repetition_penalty_f16",
+    function = "apply_repetition_penalty",
     args = RepetitionPenaltyParams,
     dispatch = true,
-    dtype = F16
+    include_exprs("crate::policy::resolve_policy(self.logits.dtype()).header()")
 )]
 pub struct ApplyRepetitionPenalty {
     /// Logits [vocab_size] (in-place).
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub logits: TensorArg,
     /// Packed pairs [recent_len * 2]: (token_id, count).
     #[arg(metal_type = "const device uint*")]

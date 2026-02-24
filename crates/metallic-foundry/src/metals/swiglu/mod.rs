@@ -14,20 +14,19 @@ mod config;
 pub mod ffn_stages;
 pub mod ffn_step;
 mod kernels;
-mod runtime;
 pub mod stages;
 pub mod step;
 
 /// Arguments for SwiGLU fused activation kernel (Stage variant).
 #[derive(Debug, KernelArgs)]
 pub struct SwigluArgs {
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub gate: TensorArg,
-    #[arg(buffer = 1, output)]
+    #[arg(buffer = 1, output, metal_type = "device OutputStorageT*")]
     pub up_inout: TensorArg,
-    #[arg(buffer = 2)]
+    #[arg(buffer = 2, metal_type = "const device BiasStorageT*")]
     pub gate_bias: TensorArg,
-    #[arg(buffer = 3)]
+    #[arg(buffer = 3, metal_type = "const device BiasStorageT*")]
     pub up_bias: TensorArg,
     #[arg(buffer = 4)]
     pub params: SwigluParamsResolved,
@@ -59,22 +58,27 @@ pub struct SwigluParams {
 #[derive(Kernel, KernelArgs, Clone, Default)]
 #[kernel(
     source = "swiglu/swiglu.metal",
-    function = "swiglu_fused_activation_f16",
+    function = "swiglu_fused_activation",
     args = "SwigluParams",
-    include = ["policies/activations.metal"],
+    include = ["dtypes/runtime_types.metal", "policies/activations.metal"],
+    include_exprs("crate::policy::resolve_policy(self.gate.dtype()).header()"),
     dispatch = per_element_vec,
     step = true,
     execute = false
 )]
 pub struct Swiglu {
     /// Gate projection output.
+    #[arg(metal_type = "const device InputStorageT*")]
     pub gate: TensorArg,
     /// Up projection output (modified in-place).
     #[arg(output)]
+    #[arg(metal_type = "device OutputStorageT*")]
     pub up_inout: TensorArg,
     /// Gate bias.
+    #[arg(metal_type = "const device BiasStorageT*")]
     pub gate_bias: TensorArg,
     /// Up bias.
+    #[arg(metal_type = "const device BiasStorageT*")]
     pub up_bias: TensorArg,
     /// Kernel parameters.
     pub params: SwigluParamsResolved,

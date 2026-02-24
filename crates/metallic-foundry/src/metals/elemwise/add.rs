@@ -24,19 +24,21 @@ pub struct ElemwiseAddParams {
 #[derive(Kernel, KernelArgs, Clone, Default)]
 #[kernel(
     source = "elemwise/add.metal",
-    function = "broadcast_add_kernel_f16",
+    function = "broadcast_add_kernel",
     args = ElemwiseAddParamsResolved,
     dispatch = per_element,
-    dtype = F16,
+    include_exprs("crate::policy::resolve_policy(self.a.dtype()).header()"),
     step = true
 )]
 pub struct ElemwiseAdd {
     /// Input tensor a.
+    #[arg(metal_type = "const device InputStorageT*")]
     pub a: TensorArg,
     /// Bias tensor b (1D).
+    #[arg(metal_type = "const device InputStorageT*")]
     pub b: TensorArg,
     /// Output tensor.
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub out: TensorArg,
     /// Kernel parameters.
     pub params: ElemwiseAddParamsResolved,
@@ -78,6 +80,7 @@ impl ElemwiseAdd {
 
 #[derive(Clone, Debug, Default, DeriveStage)]
 #[stage(
+    include_exprs("crate::policy::resolve_policy(self.a.dtype()).header()"),
     emit = r#"
     const uint idx = gid.x * tptg.x + lid.x;
     if (idx >= total_elements) return;
@@ -86,11 +89,11 @@ impl ElemwiseAdd {
     out_var = "void"
 )]
 pub struct ElemwiseAddStage {
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub a: TensorArg,
-    #[arg(buffer = 1)]
+    #[arg(buffer = 1, metal_type = "const device InputStorageT*")]
     pub b: TensorArg,
-    #[arg(buffer = 2, output)]
+    #[arg(buffer = 2, output, metal_type = "device OutputStorageT*")]
     pub out: TensorArg,
     #[arg(buffer = 3, metal_type = "constant uint&")]
     pub total_elements: u32,
@@ -103,11 +106,11 @@ pub struct ElemwiseAddStage {
 // DEBT: retained as an explicit ABI args container for future direct-dispatch call sites.
 #[allow(dead_code)]
 pub struct ElemwiseAddArgs {
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub a: TensorArg,
-    #[arg(buffer = 1)]
+    #[arg(buffer = 1, metal_type = "const device InputStorageT*")]
     pub b: TensorArg,
-    #[arg(buffer = 2)]
+    #[arg(buffer = 2, metal_type = "device OutputStorageT*")]
     pub out: TensorArg,
     #[arg(buffer = 3)]
     pub total_elements: u32,

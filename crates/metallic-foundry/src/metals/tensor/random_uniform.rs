@@ -26,7 +26,7 @@ pub struct RandomUniformParams {
 #[derive(KernelArgs, Clone)]
 pub struct RandomUniform {
     /// Output tensor.
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     /// Kernel parameters.
     pub params: RandomUniformParams,
@@ -57,7 +57,7 @@ impl Kernel for RandomUniform {
     }
 
     fn function_name(&self) -> &str {
-        "random_uniform_kernel_f16"
+        "random_uniform_kernel"
     }
 
     fn includes(&self) -> Includes {
@@ -65,7 +65,7 @@ impl Kernel for RandomUniform {
     }
 
     fn dtype(&self) -> Option<Dtype> {
-        Some(Dtype::F16)
+        Some(self.output.dtype())
     }
 
     fn struct_defs(&self) -> String {

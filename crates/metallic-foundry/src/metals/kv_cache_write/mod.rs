@@ -43,15 +43,16 @@ pub struct KvCacheWriteRepeatKvHeadsParams {
     source = "kv_cache_write/kv_cache_write_repeat.metal",
     function = "kv_cache_write_repeat_kv_heads_kernel",
     args = "KvCacheWriteRepeatKvHeadsParamsResolved",
-    dtype = "F16",
+    include_exprs("crate::policy::resolve_policy(self.input.dtype()).header()"),
     dispatch = per_element,
     step = true
 )]
 pub struct KvCacheWriteRepeatKvHeads {
     /// Input K or V tensor [n_kv_heads, input_seq_len, head_dim].
+    #[arg(metal_type = "const device InputStorageT*")]
     pub input: TensorArg,
     /// Output cache [n_heads, max_seq_len, head_dim].
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub cache: TensorArg,
     /// Kernel parameters.
     pub params: KvCacheWriteRepeatKvHeadsParamsResolved,
@@ -85,15 +86,16 @@ pub struct KvCacheWriteParams {
     source = "kv_cache_write/kv_cache_write.metal",
     function = "kv_cache_write_kernel",
     args = "KvCacheWriteParamsResolved",
-    dtype = "F16",
+    include_exprs("crate::policy::resolve_policy(self.input.dtype()).header()"),
     dispatch = per_element,
     step = true
 )]
 pub struct KvCacheWrite {
     /// Input K or V tensor [1, n_kv_heads, head_dim].
+    #[arg(metal_type = "const device InputStorageT*")]
     pub input: TensorArg,
     /// Output cache [n_kv_heads, max_seq_len, head_dim].
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub cache: TensorArg,
     /// Kernel parameters.
     pub params: KvCacheWriteParamsResolved,

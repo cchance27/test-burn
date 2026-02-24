@@ -9,12 +9,13 @@
 //! - Transpose modes (NN, NT)
 
 use half::f16;
+use metallic_env::POLICY_VARIANT;
 use metallic_foundry::{
     Foundry, metals::{
         gemm::{
             GemmV2Step, step::{GemmParams, GemmV2Args, gemm_dispatch_config, get_gemm_kernel}
         }, mma::stages::TileConfig
-    }, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, spec::{DynamicValue, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    }, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, spec::{DynamicValue, Ref, Step, TensorBindings}, storage::Pooled, tensor::{F32, Q8_0, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -1269,4 +1270,234 @@ fn test_gemm_v2_q4_0_gemv() {
         quant_b: TestQuantization::Q4,
         ..Default::default()
     });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_f32_dense_preserve_parity_32x32x32() {
+    let _variant_guard = POLICY_VARIANT
+        .set_guard("preserve:f32".to_string())
+        .expect("set METALLIC_POLICY_VARIANT");
+
+    let mut foundry = Foundry::new().unwrap();
+    let mut rng = rng();
+
+    let m: usize = 32;
+    let n: usize = 32;
+    let k: usize = 32;
+
+    let a_data: Vec<f32> = (0..m * k).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+    let b_data: Vec<f32> = (0..k * n).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+
+    let a = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![m, k], TensorInit::CopyFrom(&a_data)).unwrap();
+    let b = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![k, n], TensorInit::CopyFrom(&b_data)).unwrap();
+    let d = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![m, n], TensorInit::Uninitialized).unwrap();
+
+    let mut bindings = TensorBindings::new();
+    bindings.insert("A", TensorArg::from_tensor(&a));
+    bindings.insert("B", TensorArg::from_tensor(&b));
+    bindings.insert("D", TensorArg::from_tensor(&d));
+
+    let step = GemmV2Step {
+        a: Ref("A".to_string()),
+        b: Ref("B".to_string()),
+        d: Ref("D".to_string()),
+        c: None,
+        bias: None,
+        b_scales: None,
+        weights_per_block: 32,
+        alpha: 1.0,
+        beta: 0.0,
+        b_is_canonical: 0,
+        params: GemmParams::default(),
+        m_dim: DynamicValue::Literal(m as u32),
+        n_dim: DynamicValue::Literal(n as u32),
+        k_dim: DynamicValue::Literal(k as u32),
+        transpose_a: false,
+        transpose_b: false,
+        tile_config: Some(TileConfig::Default),
+        activation: Activation::None,
+    };
+
+    step.execute(&mut foundry, &mut bindings).expect("GemmV2 F32 execute");
+    foundry.synchronize().expect("synchronize");
+
+    let gpu_output: Vec<f32> = FoundryTensor::to_vec(&d, &foundry);
+    let mut cpu_output = vec![0.0f32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                acc += a_data[i * k + kk] * b_data[kk * n + j];
+            }
+            cpu_output[i * n + j] = acc;
+        }
+    }
+
+    let mut max_diff = 0.0f32;
+    for idx in 0..gpu_output.len() {
+        max_diff = max_diff.max((gpu_output[idx] - cpu_output[idx]).abs());
+    }
+
+    assert!(max_diff < 0.2, "F32 dense GEMM max diff too high: {}", max_diff);
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_rejects_quantized_activation_tensor() {
+    let mut foundry = Foundry::new().unwrap();
+
+    let m: usize = 1;
+    let n: usize = 32;
+    let k: usize = 32;
+
+    let a_q = vec![0u8; m * k];
+    let b_f32 = vec![0.0f32; k * n];
+
+    let a = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![m, k], TensorInit::CopyFrom(&a_q)).unwrap();
+    let b = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![k, n], TensorInit::CopyFrom(&b_f32)).unwrap();
+    let d = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![m, n], TensorInit::Uninitialized).unwrap();
+
+    let mut bindings = TensorBindings::new();
+    bindings.insert("A", TensorArg::from_tensor(&a));
+    bindings.insert("B", TensorArg::from_tensor(&b));
+    bindings.insert("D", TensorArg::from_tensor(&d));
+
+    let step = GemmV2Step {
+        a: Ref("A".to_string()),
+        b: Ref("B".to_string()),
+        d: Ref("D".to_string()),
+        c: None,
+        bias: None,
+        b_scales: None,
+        weights_per_block: 32,
+        alpha: 1.0,
+        beta: 0.0,
+        b_is_canonical: 0,
+        params: GemmParams::default(),
+        m_dim: DynamicValue::Literal(m as u32),
+        n_dim: DynamicValue::Literal(n as u32),
+        k_dim: DynamicValue::Literal(k as u32),
+        transpose_a: false,
+        transpose_b: false,
+        tile_config: Some(TileConfig::Default),
+        activation: Activation::None,
+    };
+
+    let err = step
+        .execute(&mut foundry, &mut bindings)
+        .expect_err("quantized activations should fail fast in GemmV2");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("does not support quantized activation tensor"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_f32_input_q8_weights_f32_output_preserve_parity() {
+    let _variant_guard = POLICY_VARIANT
+        .set_guard("preserve:f32".to_string())
+        .expect("set METALLIC_POLICY_VARIANT");
+
+    let mut foundry = Foundry::new().unwrap();
+    let mut rng = rng();
+
+    let m: usize = 1;
+    let n: usize = 32;
+    let k: usize = 32;
+    let transpose_b = true;
+
+    let a_data: Vec<f32> = (0..m * k).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+    let b_f16: Vec<f16> = (0..n * k).map(|_| f16::from_f32(rng.random_range(-1.0f32..1.0f32))).collect();
+    let (w_q8, s_q8) = quantize_q8(&b_f16, n, k, transpose_b);
+
+    let a = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![m, k], TensorInit::CopyFrom(&a_data)).unwrap();
+    let d = FoundryTensor::<F32, Pooled>::new(&mut foundry, vec![m, n], TensorInit::Uninitialized).unwrap();
+
+    let w_buf = foundry
+        .device
+        .new_buffer_with_bytes(
+            metallic_foundry::types::nonnull_void_ptr_from_slice(&w_q8, "Q8_W").unwrap(),
+            w_q8.len(),
+            metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+        )
+        .unwrap();
+    let s_buf = foundry
+        .device
+        .new_buffer_with_bytes(
+            metallic_foundry::types::nonnull_void_ptr_from_slice(&s_q8, "Q8_S").unwrap(),
+            s_q8.len(),
+            metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+        )
+        .unwrap();
+
+    let b_dims = vec![n, k.div_ceil(32) * 32];
+    let s_dims = vec![n, k.div_ceil(32)];
+
+    let b_arg = TensorArg::from_buffer(
+        w_buf,
+        metallic_foundry::Dtype::Q8_0,
+        b_dims.clone(),
+        metallic_foundry::tensor::compute_strides(&b_dims),
+    );
+    let s_arg = TensorArg::from_buffer(
+        s_buf,
+        metallic_foundry::Dtype::F16,
+        s_dims.clone(),
+        metallic_foundry::tensor::compute_strides(&s_dims),
+    );
+
+    let mut bindings = TensorBindings::new();
+    bindings.insert("A".to_string(), TensorArg::from_tensor(&a));
+    bindings.insert("B".to_string(), b_arg);
+    bindings.insert("B_scales".to_string(), s_arg);
+    bindings.insert("D".to_string(), TensorArg::from_tensor(&d));
+
+    let step = GemmV2Step {
+        a: Ref("A".to_string()),
+        b: Ref("B".to_string()),
+        d: Ref("D".to_string()),
+        c: None,
+        bias: None,
+        b_scales: Some(Ref("B_scales".to_string())),
+        weights_per_block: 32,
+        alpha: 1.0,
+        beta: 0.0,
+        b_is_canonical: 0,
+        params: GemmParams::default(),
+        m_dim: DynamicValue::Literal(m as u32),
+        n_dim: DynamicValue::Literal(n as u32),
+        k_dim: DynamicValue::Literal(k as u32),
+        transpose_a: false,
+        transpose_b,
+        tile_config: Some(TileConfig::Default),
+        activation: Activation::None,
+    };
+
+    step.execute(&mut foundry, &mut bindings).expect("GemmV2 F32xQ8 execute");
+    foundry.synchronize().expect("synchronize");
+
+    let gpu_output: Vec<f32> = FoundryTensor::to_vec(&d, &foundry);
+
+    let mut cpu_output = vec![0.0f32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                let a_val = a_data[i * k + kk];
+                let b_val = b_f16[j * k + kk].to_f32();
+                acc += a_val * b_val;
+            }
+            cpu_output[i * n + j] = acc;
+        }
+    }
+
+    let mut max_diff = 0.0f32;
+    for idx in 0..gpu_output.len() {
+        max_diff = max_diff.max((gpu_output[idx] - cpu_output[idx]).abs());
+    }
+
+    assert!(max_diff < 1.0, "F32xQ8 GEMM max diff too high: {}", max_diff);
 }

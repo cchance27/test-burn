@@ -112,12 +112,12 @@ struct TileLoader {
                     
                     // Load scale indexing
                     ulong block_idx = N_idx * blocks_per_k + (K_idx / weights_per_block);
-                    half scale = Policy::load_scale(scales, block_idx);
+                    ComputeT scale = (ComputeT)Policy::load_scale(scales, block_idx);
 #if defined(METALLIC_POLICY_HAS_AFFINE) && METALLIC_POLICY_HAS_AFFINE
-                    half affine = Policy::load_affine(scales, block_idx);
-                    dst[i * dst_ld + j] = (T)(w_val[0] * (float)scale + (float)affine);
+                    ComputeT affine = (ComputeT)Policy::load_affine(scales, block_idx);
+                    dst[i * dst_ld + j] = (T)(w_val[0] * (ComputeT)scale + (ComputeT)affine);
 #else
-                    dst[i * dst_ld + j] = (T)(w_val[0] * (float)scale);
+                    dst[i * dst_ld + j] = (T)(w_val[0] * (ComputeT)scale);
 #endif
                 }
             }
@@ -157,12 +157,12 @@ struct TileLoader {
                     Policy::template load_weights<1>(src_base, offset, w_val);
                     
                     ulong block_idx = N_idx * blocks_per_k + (K_idx / weights_per_block);
-                    half scale = Policy::load_scale(scales, block_idx);
+                    ComputeT scale = (ComputeT)Policy::load_scale(scales, block_idx);
 #if defined(METALLIC_POLICY_HAS_AFFINE) && METALLIC_POLICY_HAS_AFFINE
-                    half affine = Policy::load_affine(scales, block_idx);
-                    dst[i * dst_ld + j] = (T)(w_val[0] * (float)scale + (float)affine);
+                    ComputeT affine = (ComputeT)Policy::load_affine(scales, block_idx);
+                    dst[i * dst_ld + j] = (T)(w_val[0] * (ComputeT)scale + (ComputeT)affine);
 #else
-                    dst[i * dst_ld + j] = (T)(w_val[0] * (float)scale);
+                    dst[i * dst_ld + j] = (T)(w_val[0] * (ComputeT)scale);
 #endif
                 } else {
                     dst[i * dst_ld + j] = T(0);
@@ -181,7 +181,8 @@ struct TileLoader {
 // SimpleTileLoader - Optimized for F16 activations (no dequant)
 // =============================================================================
 template<
-    typename T,
+    typename SrcT,
+    typename DstT,
     short BROWS,
     short BCOLS,
     short dst_ld,
@@ -197,15 +198,15 @@ struct SimpleTileLoader {
     const int src_ld;
     const int tile_stride;
     
-    const device T* src;
-    threadgroup T* dst;
+    const device SrcT* src;
+    threadgroup DstT* dst;
     
     const short bi, bj;
     
     METAL_FUNC SimpleTileLoader(
-        const device T* src_,
+        const device SrcT* src_,
         const int src_ld_,
-        threadgroup T* dst_,
+        threadgroup DstT* dst_,
         ushort simd_group_id,
         ushort simd_lane_id
     ) : src_ld(src_ld_),
@@ -226,7 +227,7 @@ struct SimpleTileLoader {
             if (bi + i < BROWS) {
                 #pragma unroll
                 for (short j = 0; j < n_reads; j++) {
-                    dst[i * dst_ld + j] = src[i * src_ld + j];
+                    dst[i * dst_ld + j] = static_cast<DstT>(src[i * src_ld + j]);
                 }
             }
         }
@@ -239,7 +240,7 @@ struct SimpleTileLoader {
             #pragma unroll
             for (short j = 0; j < n_reads; j++) {
                 bool valid = (i < src_tile_dim.y) && (j < src_tile_dim.x);
-                dst[i * dst_ld + j] = valid ? src[i * src_ld + j] : T(0);
+                dst[i * dst_ld + j] = valid ? static_cast<DstT>(src[i * src_ld + j]) : DstT(0);
             }
         }
     }

@@ -11,23 +11,19 @@ use metallic_macros::Stage;
 
 use crate::types::TensorArg;
 
-/// Softmax Metal definitions (find_row_max, compute_exp_sum, normalize_and_write).
-/// Included via `struct_defs_fn` to contribute to kernel's struct_defs.
-const SOFTMAX_METAL: &str = include_str!("softmax.metal");
-
 /// Stage that computes per-thread local maximum.
 /// Must be followed by SimdStage::reduce_max() to get row_max.
 #[derive(Stage, Clone, Debug)]
 #[stage(
+    includes("dtypes/runtime_types.metal", "softmax/softmax.metal"),
     emit = r#"
     // Phase 1: Find local max per thread
     float local_max = find_row_max(matrix, row_idx, tid, seq_k, causal, mask_idx);
 "#,
-    out_var = "local_max",
-    struct_defs_fn = "metal_defs"
+    out_var = "local_max"
 )]
 pub struct SoftmaxMaxStage {
-    #[arg(buffer = 0, metal_type = "const device uchar*")]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub matrix: TensorArg,
     #[arg(buffer = 1, metal_type = "const device uchar*")]
     pub scale_bytes: TensorArg,
@@ -49,25 +45,21 @@ impl SoftmaxMaxStage {
             mask_idx: 0,
         }
     }
-
-    pub fn metal_defs() -> String {
-        SOFTMAX_METAL.to_string()
-    }
 }
 
 /// Stage that computes per-thread exp sum.
 /// Must be followed by SimdStage::reduce_sum() to get row_sum.
 #[derive(Stage, Clone, Debug)]
 #[stage(
+    includes("dtypes/runtime_types.metal", "softmax/softmax.metal"),
     emit = r#"
     // Phase 2: Compute local exp sum per thread
     float local_sum = compute_exp_sum(matrix, row_max, row_idx, tid, seq_k, causal, mask_idx);
 "#,
-    out_var = "local_sum",
-    struct_defs_fn = "metal_defs"
+    out_var = "local_sum"
 )]
 pub struct SoftmaxSumStage {
-    #[arg(buffer = 0, metal_type = "const device uchar*")]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub matrix: TensorArg,
     #[arg(buffer = 3, metal_type = "constant uint&")]
     pub seq_k: u32,
@@ -86,26 +78,22 @@ impl SoftmaxSumStage {
             mask_idx: 0,
         }
     }
-
-    pub fn metal_defs() -> String {
-        SOFTMAX_METAL.to_string()
-    }
 }
 
 /// Stage that normalizes values and writes to output.
 #[derive(Stage, Clone, Debug)]
 #[stage(
+    includes("dtypes/runtime_types.metal", "softmax/softmax.metal"),
     emit = r#"
     // Phase 3: Normalize and write output
     normalize_and_write(output, matrix, row_max, row_sum, row_idx, tid, seq_k, causal, mask_idx);
 "#,
-    out_var = "void",
-    struct_defs_fn = "metal_defs"
+    out_var = "void"
 )]
 pub struct SoftmaxNormStage {
-    #[arg(buffer = 2, output, metal_type = "device half*")]
+    #[arg(buffer = 2, output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
-    #[arg(buffer = 0, metal_type = "const device uchar*")]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub matrix: TensorArg,
     #[arg(buffer = 3, metal_type = "constant uint&")]
     pub seq_k: u32,
@@ -124,9 +112,5 @@ impl SoftmaxNormStage {
             causal: 0,
             mask_idx: 0,
         }
-    }
-
-    pub fn metal_defs() -> String {
-        SOFTMAX_METAL.to_string()
     }
 }

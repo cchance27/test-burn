@@ -2,10 +2,10 @@ use std::{
     path::PathBuf, sync::{Arc, Once}
 };
 
+use metallic_env::{EnvVarGuard, FoundryEnvVar};
 use metallic_foundry::{
     BPETokenizer, Foundry, MetalError, generation::default_text_generation_workflow, model::{CompiledModel, ModelBuilder}, workflow::{Value, WorkflowRunner}
 };
-use metallic_env::{EnvVarGuard, FoundryEnvVar};
 use metallic_loader::ModelLoader;
 use rustc_hash::FxHashMap;
 

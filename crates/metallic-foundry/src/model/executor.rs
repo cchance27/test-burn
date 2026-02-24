@@ -22,7 +22,7 @@ mod session;
 mod weights;
 
 use crate::{
-    Foundry, MetalError, model::ContextConfig, policy::{WeightLayout, resolve_policy}, spec::{
+    Foundry, MetalError, compound::Layout, model::ContextConfig, policy::resolve_policy, spec::{
         ArchValue, IntExpr, ModelSpec, StorageClass, TensorBindings, WeightBindingSpec, WeightLayoutSpec, compiled::{CompiledStep, FastBindings, SymbolTable}
     }, types::{MetalResourceOptions, TensorArg}
 };

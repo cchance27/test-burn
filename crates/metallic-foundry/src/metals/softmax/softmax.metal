@@ -6,7 +6,7 @@ using namespace metal;
 
 /// Helper to find the maximum value in a row partition.
 inline float find_row_max(
-    const device uchar* matrix,
+    const device InputStorageT* matrix,
     uint row_idx,
     uint tid,
     uint seq_k,
@@ -19,9 +19,7 @@ inline float find_row_max(
     float local_max = -INFINITY;
     for (uint i = tid; i < seq_k; i += 256) {
         uint input_idx = row_idx * seq_k + i;
-        
-        const device half* h = reinterpret_cast<const device half*>(matrix + input_idx * sizeof(half));
-        float val = float(h[0]);
+        float val = metallic_load_input(matrix, input_idx);
         
         if (causal != 0 && i > mask_pos) {
              val = -INFINITY;
@@ -35,7 +33,7 @@ inline float find_row_max(
 
 /// Helper to compute the sum of exponentials (val - max).
 inline float compute_exp_sum(
-    const device uchar* matrix,
+    const device InputStorageT* matrix,
     float row_max,
     uint row_idx,
     uint tid,
@@ -49,8 +47,7 @@ inline float compute_exp_sum(
     float local_sum = 0.0f;
     for (uint i = tid; i < seq_k; i += 256) {
         uint input_idx = row_idx * seq_k + i;
-        const device half* h = reinterpret_cast<const device half*>(matrix + input_idx * sizeof(half));
-        float val = float(h[0]);
+        float val = metallic_load_input(matrix, input_idx);
         
         if (causal == 0 || i <= mask_pos) {
             float diff = val - row_max;
@@ -62,8 +59,8 @@ inline float compute_exp_sum(
 
 /// Helper to normalize and write results.
 inline void normalize_and_write(
-    device half* output,
-    const device uchar* matrix,
+    device OutputStorageT* output,
+    const device InputStorageT* matrix,
     float row_max,
     float row_sum,
     uint row_idx,
@@ -77,16 +74,14 @@ inline void normalize_and_write(
     
     for (uint i = tid; i < seq_k; i += 256) {
         uint input_idx = row_idx * seq_k + i;
-        
-        const device half* h = reinterpret_cast<const device half*>(matrix + input_idx * sizeof(half));
-        float val = float(h[0]);
+        float val = metallic_load_input(matrix, input_idx);
         
         if (causal != 0 && i > mask_pos) {
-            output[input_idx] = 0.0h;
+            metallic_store_output(output, input_idx, metallic_to_accum(0.0f));
         } else {
             float diff = val - row_max;
             float prob = metal::fast::exp(diff) / row_sum;
-            output[input_idx] = half(prob);
+            metallic_store_output(output, input_idx, metallic_to_accum(prob));
         }
     }
 }

@@ -79,7 +79,7 @@ Quant prefill is harder because:
 The SDPA dispatcher would select between:
 - `FlashAttention` (FP16, FA1/FA2)
 - `QuantAttention` (Sage-like)
-- materialized SDPA fallback
+- materialized SDPA via explicit `SdpaReferenceStep` routing (no implicit fallback)
 
 Selection inputs:
 - Policy availability (quant KV present? format supported?).
@@ -139,4 +139,3 @@ Goal: get bandwidth wins with minimal algorithm risk.
 - **Decode:** measurable latency/tok/s wins at large KV (where bandwidth dominates), without quality regressions.
 - **Prefill:** improved prefill latency for large KV and medium/large M, or enable longer contexts by reducing KV memory.
 - Clear selector thresholds so the quant path is only used where it wins.
-

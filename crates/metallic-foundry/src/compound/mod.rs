@@ -23,7 +23,7 @@ pub use layout::Layout;
 pub use stages::*;
 
 use crate::{
-    Includes, Kernel, KernelSource, fusion::THREAD_ARGS, types::{ComputeCommandEncoder, DispatchConfig, GridSize, ThreadgroupSize}
+    Includes, Kernel, KernelSource, fusion::THREAD_ARGS, tensor::Dtype, types::{ComputeCommandEncoder, DispatchConfig, GridSize, ThreadgroupSize}
 };
 
 /// A buffer argument contributed by a stage.
@@ -37,10 +37,31 @@ pub struct BufferArg {
     pub buffer_index: u32,
 }
 
+/// Runtime debug metadata for a bound kernel buffer argument.
+#[derive(Clone, Debug)]
+pub struct BindingDebugArg {
+    pub name: String,
+    pub buffer_index: u64,
+    pub metal_type: String,
+    pub rust_type: String,
+    pub tensor_dtype: Option<Dtype>,
+    pub max_linear_index: Option<u64>,
+}
+
 /// Trait for types that can bind themselves to a Metal encoder.
 /// This is implemented by `#[derive(KernelArgs)]` types.
 pub trait BindArgs {
     fn bind_args(&self, encoder: &ComputeCommandEncoder);
+
+    fn debug_bindings(&self) -> Vec<BindingDebugArg> {
+        Vec::new()
+    }
+
+    /// Fast runtime specialization hash for pipeline cache keys.
+    /// Should include bound tensor dtypes that affect generated preprocessor defines.
+    fn runtime_dtype_hash(&self) -> u64 {
+        0
+    }
 }
 
 /// A stage in a compound kernel.
@@ -201,6 +222,7 @@ impl CompiledCompoundKernel {
 pub struct BoundCompiledCompoundKernel<'a, A: BindArgs> {
     template: &'a CompiledCompoundKernel,
     args: A,
+    runtime_dtype_hash: u64,
     dispatch: DispatchConfig,
     metric_data: Option<rustc_hash::FxHashMap<String, String>>,
 }
@@ -212,6 +234,7 @@ pub struct BoundCompiledCompoundKernel<'a, A: BindArgs> {
 pub struct ArcBoundCompiledCompoundKernel<A: BindArgs> {
     template: std::sync::Arc<CompiledCompoundKernel>,
     args: A,
+    runtime_dtype_hash: u64,
     dispatch: DispatchConfig,
     metric_data: Option<rustc_hash::FxHashMap<String, String>>,
 }
@@ -507,9 +530,11 @@ impl<S> CompoundKernel<S> {
 impl CompiledCompoundKernel {
     /// Bind this kernel with runtime arguments for dispatch.
     pub fn bind<A: BindArgs>(&self, args: A, dispatch: DispatchConfig) -> BoundCompiledCompoundKernel<'_, A> {
+        let runtime_dtype_hash = args.runtime_dtype_hash();
         BoundCompiledCompoundKernel {
             template: self,
             args,
+            runtime_dtype_hash,
             dispatch,
             metric_data: None,
         }
@@ -522,9 +547,11 @@ impl CompiledCompoundKernel {
         dispatch: DispatchConfig,
         metric_data: rustc_hash::FxHashMap<String, String>,
     ) -> BoundCompiledCompoundKernel<'_, A> {
+        let runtime_dtype_hash = args.runtime_dtype_hash();
         BoundCompiledCompoundKernel {
             template: self,
             args,
+            runtime_dtype_hash,
             dispatch,
             metric_data: Some(metric_data),
         }
@@ -537,9 +564,11 @@ impl CompiledCompoundKernel {
     /// This is the preferred method for registry-cached kernels, as it doesn't
     /// require `&'static` and enables bounded eviction.
     pub fn bind_arc<A: BindArgs>(self: std::sync::Arc<Self>, args: A, dispatch: DispatchConfig) -> ArcBoundCompiledCompoundKernel<A> {
+        let runtime_dtype_hash = args.runtime_dtype_hash();
         ArcBoundCompiledCompoundKernel {
             template: self,
             args,
+            runtime_dtype_hash,
             dispatch,
             metric_data: None,
         }
@@ -553,9 +582,11 @@ impl CompiledCompoundKernel {
         dispatch: DispatchConfig,
         metric_data: rustc_hash::FxHashMap<String, String>,
     ) -> ArcBoundCompiledCompoundKernel<A> {
+        let runtime_dtype_hash = args.runtime_dtype_hash();
         ArcBoundCompiledCompoundKernel {
             template: self,
             args,
+            runtime_dtype_hash,
             dispatch,
             metric_data: Some(metric_data),
         }
@@ -611,6 +642,14 @@ impl<'a, A: BindArgs> Kernel for BoundCompiledCompoundKernel<'a, A> {
         self.args.bind_args(encoder);
     }
 
+    fn debug_bindings(&self) -> Vec<BindingDebugArg> {
+        self.args.debug_bindings()
+    }
+
+    fn runtime_dtype_hash(&self) -> u64 {
+        self.runtime_dtype_hash
+    }
+
     fn dispatch_config(&self) -> DispatchConfig {
         self.dispatch
     }
@@ -645,6 +684,14 @@ impl<A: BindArgs> Kernel for ArcBoundCompiledCompoundKernel<A> {
 
     fn bind(&self, encoder: &ComputeCommandEncoder) {
         self.args.bind_args(encoder);
+    }
+
+    fn debug_bindings(&self) -> Vec<BindingDebugArg> {
+        self.args.debug_bindings()
+    }
+
+    fn runtime_dtype_hash(&self) -> u64 {
+        self.runtime_dtype_hash
     }
 
     fn dispatch_config(&self) -> DispatchConfig {
@@ -724,6 +771,14 @@ impl<A: BindArgs + 'static> Kernel for CompoundKernel<Bound<A>> {
 
     fn bind(&self, encoder: &ComputeCommandEncoder) {
         self.state.args.bind_args(encoder);
+    }
+
+    fn debug_bindings(&self) -> Vec<BindingDebugArg> {
+        self.state.args.debug_bindings()
+    }
+
+    fn runtime_dtype_hash(&self) -> u64 {
+        self.state.args.runtime_dtype_hash()
     }
 
     fn dispatch_config(&self) -> DispatchConfig {

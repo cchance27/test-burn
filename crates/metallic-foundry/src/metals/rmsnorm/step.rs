@@ -138,7 +138,7 @@ impl CompiledStep for CompiledRmsNormStep {
 
 #[derive(Debug, Clone, KernelArgs, DeriveStage)]
 #[stage(
-    includes("rmsnorm/rmsnorm.metal"),
+    includes("dtypes/runtime_types.metal", "rmsnorm/rmsnorm.metal"),
     struct_defs = "RmsNormParams",
     policy_field = "policy",
     template_bindings(policy_struct = "self.policy.struct_name()"),
@@ -152,9 +152,9 @@ pub struct RmsNormStandaloneStage {
     pub input: TensorArg,
     #[arg(buffer = 1, metal_type = "const device uchar*")]
     pub scale_bytes: TensorArg,
-    #[arg(buffer = 2, output)]
+    #[arg(buffer = 2, output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
-    #[arg(buffer = 3, metal_type = "const device half*")]
+    #[arg(buffer = 3, metal_type = "const device GammaStorageT*")]
     pub gamma: TensorArg,
     #[arg(buffer = 4, metal_type = "constant RmsNormParams*")]
     pub params: RmsNormParamsResolved,
@@ -181,7 +181,7 @@ fn get_rmsnorm_kernel(policy: Arc<dyn MetalPolicy>) -> Arc<CompiledCompoundKerne
             policy: policy.clone(),
             ..Default::default()
         };
-        crate::metals::common::composition::manual_output(&format!("rmsnorm_standalone_{}", policy.short_name()))
+        crate::metals::common::composition::manual_output(&format!("rmsnorm_standalone_policy_{}", policy.short_name()))
             .main(stage)
             .compile()
     })

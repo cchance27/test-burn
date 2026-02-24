@@ -1,9 +1,9 @@
 template<uint WARPS, uint KEYS_PER_WARP, bool TG_OUT_HALF>
 inline void flash_decode_warp_tiled_m1_half2(
-    const threadgroup half2* q2_shared,
-    const device half* k_base,
-    const device half* v_base,
-    device half* output,
+    const threadgroup FlashDecodeVec2T* q2_shared,
+    const device InputStorageT* k_base,
+    const device InputStorageT* v_base,
+    device OutputStorageT* output,
     uint warp,
     uint lane,
     constant SdpaParams& params,
@@ -57,9 +57,8 @@ inline void flash_decode_warp_tiled_m1_half2(
             float score = -1e30f;
 
             if (kv_idx < kv_len) {
-                const device half2* k2 = (const device half2*)(k_base + kv_idx * stride_k_s);
-                half2 qh = q2_shared[lane];
-                half2 kh = k2[lane];
+                FlashDecodeVec2T qh = q2_shared[lane];
+                FlashDecodeVec2T kh = flash_load_as_half2(k_base, (ulong)kv_idx * (ulong)stride_k_s + ((ulong)lane << 1)); // INDEX64_OK
                 float2 qf = half2_to_float2(qh);
                 float2 kf = half2_to_float2(kh);
                 partial = qf[0] * kf[0] + qf[1] * kf[1];
@@ -99,8 +98,8 @@ inline void flash_decode_warp_tiled_m1_half2(
                 w_local = metal::fast::exp(score - block_max);
             }
             float w = simd_broadcast(w_local, 0);
-            const device half2* v2 = (const device half2*)(v_base + kv_idx * stride_v_s);
-            warp_out += half2_to_float2(v2[lane]) * w;
+            FlashDecodeVec2T vh = flash_load_as_half2(v_base, (ulong)kv_idx * (ulong)stride_v_s + ((ulong)lane << 1)); // INDEX64_OK
+            warp_out += half2_to_float2(vh) * w;
             if (lane == 0) {
                 warp_sum += w;
             }
@@ -166,22 +165,20 @@ inline void flash_decode_warp_tiled_m1_half2(
         // Defensive: avoid propagating NaNs/Infs into downstream layers.
         out[0] = isfinite(out[0]) ? out[0] : 0.0f;
         out[1] = isfinite(out[1]) ? out[1] : 0.0f;
-        // Store as half2; output is contiguous [head_dim] for this head.
-        device half2* out2 = (device half2*)output;
-        out2[lane] = half2((half)out[0], (half)out[1]);
+        flash_store_from_float2(output, ((ulong)lane << 1), out); // INDEX64_OK
     }
 }
 
 // -----------------------------------------------------------------------------
-// half4 path (supports head_dim==64 and head_dim==128).
-// Intended for fused RoPE -> SDPA compound kernels where Q is naturally stored as half4.
+// FlashDecodeVec4T path (supports head_dim==64 and head_dim==128).
+// Intended for fused RoPE -> SDPA compound kernels where Q is naturally stored as FlashDecodeVec4T.
 // -----------------------------------------------------------------------------
 template<uint WARPS, uint KEYS_PER_WARP, bool TG_OUT_HALF>
 inline void flash_decode_warp_tiled_m1_half4(
-    const threadgroup half4* q4_shared,
-    const device half* k_base,
-    const device half* v_base,
-    device half* output,
+    const threadgroup FlashDecodeVec4T* q4_shared,
+    const device InputStorageT* k_base,
+    const device InputStorageT* v_base,
+    device OutputStorageT* output,
     uint warp,
     uint lane,
     constant SdpaParams& params,
@@ -205,7 +202,7 @@ inline void flash_decode_warp_tiled_m1_half4(
         return;
     }
 
-    const uint vec4 = head_dim >> 2; // number of half4 per head
+    const uint vec4 = head_dim >> 2; // number of FlashDecodeVec4T per head
 
     // Running stats (maintained in warp 0 lane 0; alpha/beta broadcast each block).
     float m = -1e30f;
@@ -234,9 +231,8 @@ inline void flash_decode_warp_tiled_m1_half4(
             float partial = 0.0f;
             float score = -1e30f;
             if (kv_idx < kv_len && lane < vec4) {
-                const device half4* k4 = (const device half4*)(k_base + kv_idx * stride_k_s);
-                half4 qh = q4_shared[lane];
-                half4 kh = k4[lane];
+                FlashDecodeVec4T qh = q4_shared[lane];
+                FlashDecodeVec4T kh = flash_load_as_half4(k_base, (ulong)kv_idx * (ulong)stride_k_s + ((ulong)lane << 2)); // INDEX64_OK
                 float4 qf = half4_to_float4(qh);
                 float4 kf = half4_to_float4(kh);
                 partial = qf[0] * kf[0] + qf[1] * kf[1] + qf[2] * kf[2] + qf[3] * kf[3];
@@ -257,7 +253,7 @@ inline void flash_decode_warp_tiled_m1_half4(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // Compute the block max in each warp (see half2 path above).
+        // Compute the block max in each warp (see FlashDecodeVec2T path above).
         float val = (lane < WARPS) ? shared_warp_max[lane] : -1e30f;
         float block_max = simd_max(val);
 
@@ -276,8 +272,8 @@ inline void flash_decode_warp_tiled_m1_half4(
             }
             float w = simd_broadcast(w_local, 0);
             if (lane < vec4) {
-                const device half4* v4 = (const device half4*)(v_base + kv_idx * stride_v_s);
-                warp_out += half4_to_float4(v4[lane]) * w;
+                FlashDecodeVec4T vh = flash_load_as_half4(v_base, (ulong)kv_idx * (ulong)stride_v_s + ((ulong)lane << 2)); // INDEX64_OK
+                warp_out += half4_to_float4(vh) * w;
             }
             if (lane == 0) {
                 warp_sum += w;
@@ -339,17 +335,16 @@ inline void flash_decode_warp_tiled_m1_half4(
         out[2] = isfinite(out[2]) ? out[2] : 0.0f;
         out[3] = isfinite(out[3]) ? out[3] : 0.0f;
 
-        device half4* out4 = (device half4*)output;
-        out4[lane] = half4((half)out[0], (half)out[1], (half)out[2], (half)out[3]);
+        flash_store_from_float4(output, ((ulong)lane << 2), out); // INDEX64_OK
     }
 }
 
 template<uint WARPS, uint KEYS_PER_WARP, bool TG_OUT_HALF>
 ALWAYS_INLINE void run_flash_decode_fused_half2_stage(
-    const threadgroup half2* q_vec,
-    const device half* k_ptr,
-    const device half* v_ptr,
-    device half* output_ptr,
+    const threadgroup FlashDecodeVec2T* q_vec,
+    const device InputStorageT* k_ptr,
+    const device InputStorageT* v_ptr,
+    device OutputStorageT* output_ptr,
     constant SdpaParams& params,
     uint warp,
     uint lane,
@@ -373,10 +368,10 @@ ALWAYS_INLINE void run_flash_decode_fused_half2_stage(
 
 template<uint WARPS, uint KEYS_PER_WARP, bool TG_OUT_HALF>
 ALWAYS_INLINE void run_flash_decode_fused_half4_stage(
-    const threadgroup half4* q_vec,
-    const device half* k_ptr,
-    const device half* v_ptr,
-    device half* output_ptr,
+    const threadgroup FlashDecodeVec4T* q_vec,
+    const device InputStorageT* k_ptr,
+    const device InputStorageT* v_ptr,
+    device OutputStorageT* output_ptr,
     constant SdpaParams& params,
     uint warp,
     uint lane,
@@ -400,20 +395,20 @@ ALWAYS_INLINE void run_flash_decode_fused_half4_stage(
 
 template<uint WARPS, uint KEYS_PER_WARP, bool TG_OUT_HALF>
 ALWAYS_INLINE void run_flash_decode_standalone_half2_stage(
-    const device half* q_ptr,
-    const device half* k_ptr,
-    const device half* v_ptr,
-    device half* output_ptr,
+    const device InputStorageT* q_ptr,
+    const device InputStorageT* k_ptr,
+    const device InputStorageT* v_ptr,
+    device OutputStorageT* output_ptr,
     constant SdpaParams& params,
     uint warp,
     uint lane,
-    threadgroup half2* q_shared,
+    threadgroup FlashDecodeVec2T* q_shared,
     threadgroup float* shared_warp_max,
     threadgroup float* shared_warp_sums,
     threadgroup typename FlashTgOut2<TG_OUT_HALF>::type* shared_warp_out
 ) {
     if (warp == 0) {
-        q_shared[lane] = ((const device half2*)q_ptr)[lane];
+        q_shared[lane] = flash_load_as_half2(q_ptr, ((ulong)lane << 1)); // INDEX64_OK
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     run_flash_decode_fused_half2_stage<WARPS, KEYS_PER_WARP, TG_OUT_HALF>(
@@ -432,20 +427,20 @@ ALWAYS_INLINE void run_flash_decode_standalone_half2_stage(
 
 template<uint WARPS, uint KEYS_PER_WARP, bool TG_OUT_HALF, uint Q_VEC4>
 ALWAYS_INLINE void run_flash_decode_standalone_half4_stage(
-    const device half* q_ptr,
-    const device half* k_ptr,
-    const device half* v_ptr,
-    device half* output_ptr,
+    const device InputStorageT* q_ptr,
+    const device InputStorageT* k_ptr,
+    const device InputStorageT* v_ptr,
+    device OutputStorageT* output_ptr,
     constant SdpaParams& params,
     uint warp,
     uint lane,
-    threadgroup half4* q_shared,
+    threadgroup FlashDecodeVec4T* q_shared,
     threadgroup float* shared_warp_max,
     threadgroup float* shared_warp_sums,
     threadgroup typename FlashTgOut4<TG_OUT_HALF>::type* shared_warp_out
 ) {
     if (warp == 0 && lane < Q_VEC4) {
-        q_shared[lane] = ((const device half4*)q_ptr)[lane];
+        q_shared[lane] = flash_load_as_half4(q_ptr, ((ulong)lane << 2)); // INDEX64_OK
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     run_flash_decode_fused_half4_stage<WARPS, KEYS_PER_WARP, TG_OUT_HALF>(
@@ -472,6 +467,5 @@ ALWAYS_INLINE void run_flash_decode_standalone_half4_stage(
     threadgroup float SUMS_NAME[WARPS];                                                                 \
     threadgroup typename FlashTgOut4<TG_OUT_HALF>::type OUT_NAME[WARPS * 32]
 
-#define FLASH_DECODE_DECLARE_Q_SHARED_HALF2(NAME) threadgroup half2 NAME[32]
-#define FLASH_DECODE_DECLARE_Q_SHARED_HALF4(NAME) threadgroup half4 NAME[32]
-
+#define FLASH_DECODE_DECLARE_Q_SHARED_HALF2(NAME) threadgroup FlashDecodeVec2T NAME[32]
+#define FLASH_DECODE_DECLARE_Q_SHARED_HALF4(NAME) threadgroup FlashDecodeVec4T NAME[32]

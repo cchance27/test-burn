@@ -518,6 +518,14 @@ pub(crate) fn derive_kernel(input: TokenStream) -> TokenStream {
                 self.bind_args(encoder);
             }
 
+            fn debug_bindings(&self) -> Vec<#root::compound::BindingDebugArg> {
+                <Self as #root::compound::BindArgs>::debug_bindings(self)
+            }
+
+            fn runtime_dtype_hash(&self) -> u64 {
+                <Self as #root::compound::BindArgs>::runtime_dtype_hash(self)
+            }
+
             fn dispatch_config(&self) -> #root::types::DispatchConfig {
                 #dispatch_code
             }

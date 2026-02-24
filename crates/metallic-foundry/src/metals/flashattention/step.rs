@@ -1,10 +1,11 @@
+use metallic_env::{FoundryEnvVar, is_set};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    kernels::{RopeFlashDecodeArgs, get_rope_flash_decode_kernel}, variants::{FlashDecodeVariant, flash_decode_variant_from_env, select_flash_decode_variant_m2m3}
+    contract::require_dense_tensor_contract, kernels::{RopeFlashDecodeArgs, get_rope_flash_decode_kernel}, variants::{FlashDecodeVariant, flash_decode_variant_from_env, select_flash_decode_variant}
 };
 use crate::{
-    Foundry, MetalError, metals::{flashattention::stages::SdpaParams, rope::RopeParamsResolved}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{
+    Foundry, MetalError, metals::{common::dtype_contract::KernelDtypeDescriptor, flashattention::stages::SdpaParams, rope::RopeParamsResolved}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{
         TensorArg, dispatch::{DispatchConfig, GridSize, ThreadgroupSize}
     }
 };
@@ -24,7 +25,7 @@ impl RopeFlashDecodeStep {
         let variant = flash_decode_variant_from_env(head_dim)
             .ok()
             .flatten()
-            .unwrap_or_else(|| select_flash_decode_variant_m2m3(head_dim, kv_len));
+            .unwrap_or_else(|| select_flash_decode_variant(head_dim, kv_len, 2));
         let kernel = get_rope_flash_decode_kernel(head_dim, variant);
         match crate::Kernel::source(&*kernel) {
             crate::KernelSource::String(s) => s,
@@ -51,8 +52,8 @@ impl RopeFlashDecodeStep {
         v_strides: (u32, u32),
         out_strides: (u32, u32),
     ) -> Result<CompiledRopeFlashDecodeStep, MetalError> {
-        let variant =
-            flash_decode_variant_from_env(head_dim)?.unwrap_or_else(|| select_flash_decode_variant_m2m3(head_dim, sdpa_params.kv_len));
+        let variant = flash_decode_variant_from_env(head_dim)?
+            .unwrap_or_else(|| select_flash_decode_variant(head_dim, sdpa_params.kv_len, q.dtype.size_bytes()));
         Self::compile_with_variant(
             foundry,
             q,
@@ -95,6 +96,23 @@ impl RopeFlashDecodeStep {
         out_strides: (u32, u32),
     ) -> Result<CompiledRopeFlashDecodeStep, MetalError> {
         variant.validate_for_head_dim(head_dim)?;
+        if is_set(FoundryEnvVar::DebugSdpaVerbose) {
+            let desc = KernelDtypeDescriptor::from_source_dtype(q.dtype)?;
+            tracing::debug!(
+                head_dim,
+                kv_len = sdpa_params.kv_len,
+                variant_warps = variant.warps,
+                variant_keys_per_warp = variant.keys_per_warp,
+                variant_scalar = variant.scalar.as_str(),
+                variant_tg_out = variant.tg_out.as_str(),
+                storage_dtype = ?desc.storage,
+                storage_bytes = desc.storage_size_bytes,
+                compute_dtype = ?desc.compute,
+                accum_dtype = ?desc.accum,
+                lanes_per_16b = desc.simd_lanes_for_bytes(16),
+                "RopeFlashDecode selector result"
+            );
+        }
 
         // Ensure kernel is initialized
         let kernel = get_rope_flash_decode_kernel(head_dim, variant);
@@ -150,6 +168,16 @@ pub struct CompiledRopeFlashDecodeStep {
     head_dim: u32,
 }
 
+fn validate_rope_flash_decode_dtypes(
+    q: &TensorArg,
+    k: &TensorArg,
+    v: &TensorArg,
+    cos: &TensorArg,
+    sin: &TensorArg,
+) -> Result<(), MetalError> {
+    require_dense_tensor_contract("RopeFlashDecode", &[("q", q), ("k", k), ("v", v), ("cos", cos), ("sin", sin)])
+}
+
 impl CompiledRopeFlashDecodeStep {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -201,6 +229,8 @@ impl CompiledStep for CompiledRopeFlashDecodeStep {
         _globals: &TensorBindings,
         _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
+        validate_rope_flash_decode_dtypes(&self.q, &self.k, &self.v, &self.cos, &self.sin)?;
+
         // Construct Args
         let args = RopeFlashDecodeArgs {
             q: self.q.clone(),
@@ -235,6 +265,56 @@ impl CompiledStep for CompiledRopeFlashDecodeStep {
 
     fn name(&self) -> &'static str {
         "RopeFlashDecode"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_rope_flash_decode_dtypes;
+    use crate::{tensor::Dtype, types::TensorArg};
+
+    #[test]
+    fn rope_flash_decode_dtype_validation_accepts_f16() {
+        let t = TensorArg {
+            dtype: Dtype::F16,
+            ..TensorArg::default()
+        };
+        assert!(validate_rope_flash_decode_dtypes(&t, &t, &t, &t, &t).is_ok());
+    }
+
+    #[test]
+    fn rope_flash_decode_dtype_validation_accepts_f32() {
+        let t = TensorArg {
+            dtype: Dtype::F32,
+            ..TensorArg::default()
+        };
+        assert!(validate_rope_flash_decode_dtypes(&t, &t, &t, &t, &t).is_ok());
+    }
+
+    #[test]
+    fn rope_flash_decode_dtype_validation_rejects_mixed_or_non_dense() {
+        let q = TensorArg {
+            dtype: Dtype::F32,
+            ..TensorArg::default()
+        };
+        let t = TensorArg {
+            dtype: Dtype::F16,
+            ..TensorArg::default()
+        };
+        let err = validate_rope_flash_decode_dtypes(&q, &t, &t, &t, &t).expect_err("expected fail-fast");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("RopeFlashDecode mixed-policy is unsupported") || msg.contains("supports only dense F16/F32"),
+            "unexpected error: {msg}"
+        );
+
+        let q8 = TensorArg {
+            dtype: Dtype::Q8_0,
+            ..TensorArg::default()
+        };
+        let err = validate_rope_flash_decode_dtypes(&q8, &q8, &q8, &q8, &q8).expect_err("expected fail-fast");
+        let msg = format!("{err}");
+        assert!(msg.contains("supports only dense F16/F32"), "unexpected error: {msg}");
     }
 }
 

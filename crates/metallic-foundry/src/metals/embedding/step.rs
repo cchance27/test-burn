@@ -74,9 +74,13 @@ impl CompiledStep for super::CompiledEmbeddingStep {
 
 #[derive(Debug, Clone, KernelArgs)]
 pub struct EmbeddingGenericArgs {
+    #[arg(metal_type = "const device uchar*")]
     pub table: TensorArg,
+    #[arg(metal_type = "const device uchar*")]
     pub scale_bytes: TensorArg,
+    #[arg(metal_type = "const device uint*")]
     pub indices: TensorArg,
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     pub params: EmbeddingParamsResolved,
 }
@@ -99,7 +103,7 @@ pub struct EmbeddingStage {
     pub scale_bytes: TensorArg,
     #[arg(buffer = 2, metal_type = "const device uint*")]
     pub indices: TensorArg,
-    #[arg(buffer = 3, output)]
+    #[arg(buffer = 3, output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     #[arg(buffer = 4, metal_type = "constant EmbeddingParams*")]
     pub params: EmbeddingParamsResolved,

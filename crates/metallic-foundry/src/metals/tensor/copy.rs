@@ -17,9 +17,9 @@ pub struct CopyParams {
     dtype = U32
 )]
 pub struct CopyU32 {
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device uint*")]
     pub src: TensorArg,
-    #[arg(buffer = 1, output)]
+    #[arg(buffer = 1, output, metal_type = "device uint*")]
     pub dst: TensorArg,
     pub params: CopyParams,
 }

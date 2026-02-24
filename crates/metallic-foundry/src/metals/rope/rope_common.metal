@@ -23,12 +23,35 @@ ALWAYS_INLINE void rope_rotate_half(
 }
 
 constant uint ROPE_MAX_HEAD_DIM_VEC = 64; // 256 / 4
+#if METALLIC_FASTPATH_INPUT_HALF
+typedef half RopeSharedScalarT;
+typedef half4 RopeSharedVec4T;
+#else
+typedef float RopeSharedScalarT;
+typedef float4 RopeSharedVec4T;
+#endif
+
+ALWAYS_INLINE RopeSharedVec4T rope_load_input_half4(const device InputStorageT* ptr, uint vec_idx) {
+#if METALLIC_FASTPATH_INPUT_HALF
+    return ((const device RopeSharedVec4T*)((const device RopeSharedScalarT*)ptr))[vec_idx];
+#else
+    return RopeSharedVec4T(metallic_load_input_vec4f(ptr, vec_idx * 4u));
+#endif
+}
+
+ALWAYS_INLINE RopeSharedVec4T rope_load_tensor_half4(const device TensorStorageT* ptr, uint vec_idx) {
+#if METALLIC_FASTPATH_TENSOR_HALF && METALLIC_FASTPATH_INPUT_HALF
+    return ((const device RopeSharedVec4T*)((const device RopeSharedScalarT*)ptr))[vec_idx];
+#else
+    return RopeSharedVec4T(metallic_load_tensor_vec4f(ptr, vec_idx * 4u));
+#endif
+}
 
 ALWAYS_INLINE void run_rope_decode_stage(
-    threadgroup half4* q_shared,
-    const device half* q_ptr,
-    const device half* cos_buf,
-    const device half* sin_buf,
+    threadgroup RopeSharedVec4T* q_shared,
+    const device InputStorageT* q_ptr,
+    const device TensorStorageT* cos_buf,
+    const device TensorStorageT* sin_buf,
     constant RopeParams& params_rope,
     uint lane_id
 ) {
@@ -36,26 +59,23 @@ ALWAYS_INLINE void run_rope_decode_stage(
     const uint rope_vec_dim = head_dim / 4u;
 
     if (lane_id < rope_vec_dim) {
-        const uint half_vec = rope_vec_dim / 2u;
-        if (lane_id < half_vec) {
-            const uint pos = params_rope.position_offset;
+            const uint half_vec = rope_vec_dim / 2u;
+            if (lane_id < half_vec) {
+                const uint pos = params_rope.position_offset;
+            const uint trig_vec_idx = pos * half_vec + lane_id;
 
-            const device half4* q_ptr_vec = (const device half4*)q_ptr;
-            const device half4* cos_buf_vec = (const device half4*)cos_buf;
-            const device half4* sin_buf_vec = (const device half4*)sin_buf;
-
-            half4 x_low = q_ptr_vec[lane_id];
-            half4 x_high = q_ptr_vec[lane_id + half_vec];
-            half4 cos_v = cos_buf_vec[pos * half_vec + lane_id];
-            half4 sin_v = sin_buf_vec[pos * half_vec + lane_id];
+            RopeSharedVec4T x_low = rope_load_input_half4(q_ptr, lane_id);
+            RopeSharedVec4T x_high = rope_load_input_half4(q_ptr, lane_id + half_vec);
+            RopeSharedVec4T cos_v = rope_load_tensor_half4(cos_buf, trig_vec_idx);
+            RopeSharedVec4T sin_v = rope_load_tensor_half4(sin_buf, trig_vec_idx);
 
             float4 x_l = (float4)x_low;
             float4 x_h = (float4)x_high;
             float4 c_v = (float4)cos_v;
             float4 s_v = (float4)sin_v;
 
-            q_shared[lane_id] = (half4)(x_l * c_v - x_h * s_v);
-            q_shared[lane_id + half_vec] = (half4)(x_l * s_v + x_h * c_v);
+            q_shared[lane_id] = (RopeSharedVec4T)(x_l * c_v - x_h * s_v);
+            q_shared[lane_id + half_vec] = (RopeSharedVec4T)(x_l * s_v + x_h * c_v);
         }
     }
 

@@ -1,17 +1,21 @@
 use metallic_env::{FoundryEnvVar, is_set};
 
 use super::{
-    dispatch::{infer_n_kv_heads, prefill_split_k_env, prefill_warps_env}, kernels::{
+    contract::require_dense_tensor_contract, dispatch::{infer_n_kv_heads, prefill_split_k_env, prefill_warps_env, select_prefill_split_k, select_prefill_warps}, kernels::{
         FlashDecodeArgs, SdpaPrefillArgs, SdpaPrefillSplitKPartArgs, SdpaPrefillSplitKReduceArgs, get_flash_decode_kernel, get_sdpa_prefill_kernel, get_sdpa_prefill_splitk_part_kernel, get_sdpa_prefill_splitk_reduce_kernel
-    }, variants::{FlashDecodeVariant, flash_decode_variant_from_env, select_flash_decode_variant_m2m3}
+    }, variants::{FlashDecodeVariant, flash_decode_variant_from_env, select_flash_decode_variant}
 };
 use crate::{
     Foundry, MetalError, metals::{
-        common::runtime::require_contiguous_last_dim, flashattention::stages::{SdpaParams, SdpaPrefillSplitKParams}
+        common::{dtype_contract::KernelDtypeDescriptor, runtime::require_contiguous_last_dim}, flashattention::stages::{SdpaParams, SdpaPrefillSplitKParams}
     }, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F32}, types::{
         TensorArg, dispatch::{DispatchConfig, GridSize, ThreadgroupSize}
     }
 };
+
+fn validate_flash_attention_qkv_dtypes(q: &TensorArg, k: &TensorArg, v: &TensorArg) -> Result<(), MetalError> {
+    require_dense_tensor_contract("FlashAttention", &[("q", q), ("k", k), ("v", v)])
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_flash_decode_with_variant(
@@ -96,6 +100,8 @@ fn run_flash_decode_impl(
         v_dims = ?v.dims(),
         "FlashAttention dispatcher entering"
     );
+    validate_flash_attention_qkv_dtypes(q, k, v)?;
+
     if q_seq_len > 1 {
         if variant_override.is_some() {
             return Err(MetalError::OperationNotSupported(
@@ -272,7 +278,7 @@ fn run_flash_decode_impl(
             }
         };
 
-        let prefill_warps = prefill_warps_env().unwrap_or(8);
+        let prefill_warps = prefill_warps_env().unwrap_or_else(|| select_prefill_warps(q.dtype.size_bytes()));
         if !matches!(prefill_warps, 4 | 8) {
             return Err(MetalError::OperationNotSupported(format!(
                 "METALLIC_FA_PREFILL_WARPS must be 4 or 8, got {}",
@@ -287,15 +293,21 @@ fn run_flash_decode_impl(
             1u32
         } else if let Some(v) = prefill_split_k_env() {
             v.max(1)
-        } else if kv_seq_len >= 4096 && q_seq_len >= 16 {
-            8
-        } else if kv_seq_len >= 2048 && q_seq_len >= 16 {
-            4
         } else {
-            1
+            select_prefill_split_k(kv_seq_len, q_seq_len, q.dtype.size_bytes())
         };
         let kv_tiles = (kv_seq_len + 31) / 32;
         split_k = split_k.min(kv_tiles.max(1));
+        if is_set(FoundryEnvVar::DebugSdpaVerbose) {
+            tracing::debug!(
+                q_seq_len,
+                kv_seq_len,
+                prefill_warps,
+                split_k,
+                storage_bytes = q.dtype.size_bytes(),
+                "FlashAttention prefill selector result"
+            );
+        }
 
         let group = ThreadgroupSize::d1((prefill_warps * 32) as usize);
         let scale = 1.0 / (head_dim as f32).sqrt();
@@ -404,7 +416,7 @@ fn run_flash_decode_impl(
         return foundry.run(&reduce_bound);
     }
 
-    if head_dim != 64 && head_dim != 128 {
+    if !(head_dim == 64 || head_dim == 128) {
         return Err(MetalError::OperationNotSupported(format!(
             "Flash Decode only supports head_dim=64 or 128, got {}",
             head_dim
@@ -479,9 +491,26 @@ fn run_flash_decode_impl(
     } else if let Some(v) = flash_decode_variant_from_env(head_dim)? {
         v
     } else {
-        select_flash_decode_variant_m2m3(head_dim, kv_seq_len)
+        select_flash_decode_variant(head_dim, kv_seq_len, q.dtype.size_bytes())
     };
     variant.validate_for_head_dim(head_dim)?;
+    if is_set(FoundryEnvVar::DebugSdpaVerbose) {
+        let desc = KernelDtypeDescriptor::from_source_dtype(q.dtype)?;
+        tracing::debug!(
+            head_dim,
+            kv_seq_len,
+            variant_warps = variant.warps,
+            variant_keys_per_warp = variant.keys_per_warp,
+            variant_scalar = variant.scalar.as_str(),
+            variant_tg_out = variant.tg_out.as_str(),
+            storage_dtype = ?desc.storage,
+            storage_bytes = desc.storage_size_bytes,
+            compute_dtype = ?desc.compute,
+            accum_dtype = ?desc.accum,
+            lanes_per_16b = desc.simd_lanes_for_bytes(16),
+            "FlashAttention selector result"
+        );
+    }
 
     let grid = GridSize::new(1, n_heads as usize, batch as usize);
     let group = ThreadgroupSize::d1(variant.threads_per_tg() as usize);
@@ -490,4 +519,74 @@ fn run_flash_decode_impl(
     let kernel = get_flash_decode_kernel(head_dim, variant);
     let bound = kernel.clone().bind_arc(args, config);
     foundry.run(&bound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_flash_attention_qkv_dtypes;
+    use crate::{tensor::Dtype, types::TensorArg};
+
+    #[test]
+    fn flash_attention_qkv_dtype_validation_accepts_f16() {
+        let q = TensorArg {
+            dtype: Dtype::F16,
+            ..TensorArg::default()
+        };
+        let k = TensorArg {
+            dtype: Dtype::F16,
+            ..TensorArg::default()
+        };
+        let v = TensorArg {
+            dtype: Dtype::F16,
+            ..TensorArg::default()
+        };
+        assert!(validate_flash_attention_qkv_dtypes(&q, &k, &v).is_ok());
+    }
+
+    #[test]
+    fn flash_attention_qkv_dtype_validation_accepts_f32() {
+        let q = TensorArg {
+            dtype: Dtype::F32,
+            ..TensorArg::default()
+        };
+        let k = TensorArg {
+            dtype: Dtype::F32,
+            ..TensorArg::default()
+        };
+        let v = TensorArg {
+            dtype: Dtype::F32,
+            ..TensorArg::default()
+        };
+        assert!(validate_flash_attention_qkv_dtypes(&q, &k, &v).is_ok());
+    }
+
+    #[test]
+    fn flash_attention_qkv_dtype_validation_rejects_mixed_or_non_dense() {
+        let q = TensorArg {
+            dtype: Dtype::F32,
+            ..TensorArg::default()
+        };
+        let k = TensorArg {
+            dtype: Dtype::F16,
+            ..TensorArg::default()
+        };
+        let v = TensorArg {
+            dtype: Dtype::F16,
+            ..TensorArg::default()
+        };
+        let err = validate_flash_attention_qkv_dtypes(&q, &k, &v).expect_err("expected fail-fast");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("FlashAttention mixed-policy is unsupported") || msg.contains("supports only dense F16/F32"),
+            "unexpected error: {msg}"
+        );
+
+        let q8 = TensorArg {
+            dtype: Dtype::Q8_0,
+            ..TensorArg::default()
+        };
+        let err = validate_flash_attention_qkv_dtypes(&q8, &q8, &q8).expect_err("expected fail-fast");
+        let msg = format!("{err}");
+        assert!(msg.contains("supports only dense F16/F32"), "unexpected error: {msg}");
+    }
 }

@@ -119,6 +119,7 @@ macro_rules! kernel_cache_key {
 pub struct PipelineCacheKey {
     pub kernel_id_hash: u64,
     pub source_hash: u64,
+    pub runtime_dtype_hash: u64,
     pub device_id: u64,
 }
 
@@ -132,6 +133,7 @@ impl PipelineCacheKey {
         Self {
             kernel_id_hash,
             source_hash: kernel.source_hash(),
+            runtime_dtype_hash: kernel.runtime_dtype_hash(),
             device_id: device.registry_id(),
         }
     }

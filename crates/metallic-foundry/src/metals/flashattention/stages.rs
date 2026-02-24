@@ -12,11 +12,11 @@ use crate::types::TensorArg;
 #[stage(
     includes("flashattention/decode_common.metal", "flashattention/decode_layout.metal"),
     emit = r#"
-    auto layout = run_flash_head_layout_stage<half, half, half, half>(
-        (const device half*)q,
-        (const device half*)k,
-        (const device half*)v,
-        (device half*)output,
+    auto layout = run_flash_head_layout_stage<InputStorageT, InputStorageT, InputStorageT, OutputStorageT>(
+        q,
+        k,
+        v,
+        output,
         q_stride_b,
         q_stride_h,
         k_stride_b,
@@ -27,21 +27,21 @@ use crate::types::TensorArg;
         out_stride_h,
         gid
     );
-    const device half* q_ptr = layout.q_ptr;
-    const device half* k_ptr = layout.k_ptr;
-    const device half* v_ptr = layout.v_ptr;
-    device half* output_ptr = layout.output_ptr;
+    const device InputStorageT* q_ptr = layout.q_ptr;
+    const device InputStorageT* k_ptr = layout.k_ptr;
+    const device InputStorageT* v_ptr = layout.v_ptr;
+    device OutputStorageT* output_ptr = layout.output_ptr;
 "#,
     out_var = "output_ptr"
 )]
 pub struct HeadLayoutStage {
-    #[arg(metal_type = "const device half*")]
+    #[arg(metal_type = "const device InputStorageT*")]
     pub q: TensorArg,
-    #[arg(metal_type = "const device half*")]
+    #[arg(metal_type = "const device InputStorageT*")]
     pub k: TensorArg,
-    #[arg(metal_type = "const device half*")]
+    #[arg(metal_type = "const device InputStorageT*")]
     pub v: TensorArg,
-    #[arg(output, metal_type = "device half*")]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
 
     pub q_stride_b: u32,
@@ -132,7 +132,7 @@ impl<const HEAD_DIM: usize> FlashDecodeFusedStage<HEAD_DIM> {
     uint warp = (uint)__simd_group_id;
     uint lane = (uint)__simd_lane_id;
     FLASH_DECODE_DECLARE_REDUCE_SHARED_HALF2({warps}, {tg_out_half}, shared_warp_max, shared_warp_sums, shared_warp_out);
-    const threadgroup half2* q_vec = (const threadgroup half2*)q_shared;
+    const threadgroup FlashDecodeVec2T* q_vec = (const threadgroup FlashDecodeVec2T*)q_shared;
     run_flash_decode_fused_half2_stage<{warps}, {keys_per_warp}, {tg_out_half}>(
         q_vec, k_ptr, v_ptr, output_ptr, sdpa_params, warp, lane, shared_warp_max, shared_warp_sums, shared_warp_out
     );
@@ -146,7 +146,7 @@ impl<const HEAD_DIM: usize> FlashDecodeFusedStage<HEAD_DIM> {
     uint warp = (uint)__simd_group_id;
     uint lane = (uint)__simd_lane_id;
     FLASH_DECODE_DECLARE_REDUCE_SHARED_HALF4({warps}, {tg_out_half}, shared_warp_max, shared_warp_sums, shared_warp_out);
-    const threadgroup half4* q_vec = (const threadgroup half4*)q_shared;
+    const threadgroup FlashDecodeVec4T* q_vec = (const threadgroup FlashDecodeVec4T*)q_shared;
     run_flash_decode_fused_half4_stage<{warps}, {keys_per_warp}, {tg_out_half}>(
         q_vec, k_ptr, v_ptr, output_ptr, sdpa_params, warp, lane, shared_warp_max, shared_warp_sums, shared_warp_out
     );
@@ -228,14 +228,6 @@ impl<const HEAD_DIM: usize> FlashDecodeStage<HEAD_DIM> {
         }
     }
 }
-
-// Backward compatibility alias (mostly for tests/imports)
-pub type SdpaStandaloneStageD64 = FlashDecodeStage<64>;
-pub type SdpaStandaloneStageD128 = FlashDecodeStage<128>;
-pub type SdpaStandaloneStage = FlashDecodeStage<64>;
-
-pub type SdpaOnlineStageD64 = FlashDecodeFusedStage<64>;
-pub type SdpaOnlineStageD128 = FlashDecodeFusedStage<128>;
 
 #[derive(MetalStruct, Clone, Copy, Debug, Default)]
 #[repr(C)]
@@ -338,13 +330,13 @@ impl SdpaPrefillVariant {
     out_var = "output"
 )]
 pub struct SdpaPrefillStage {
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub q: TensorArg,
-    #[arg(buffer = 1)]
+    #[arg(buffer = 1, metal_type = "const device InputStorageT*")]
     pub k: TensorArg,
-    #[arg(buffer = 2)]
+    #[arg(buffer = 2, metal_type = "const device InputStorageT*")]
     pub v: TensorArg,
-    #[arg(buffer = 3, output)]
+    #[arg(buffer = 3, output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     #[arg(buffer = 4, metal_type = "constant SdpaPrefillParams&")]
     pub sdpa_prefill_params: SdpaPrefillParams,
@@ -387,11 +379,11 @@ impl SdpaPrefillStage {
     out_var = "partial_acc"
 )]
 pub struct SdpaPrefillSplitKPartStage {
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub q: TensorArg,
-    #[arg(buffer = 1)]
+    #[arg(buffer = 1, metal_type = "const device InputStorageT*")]
     pub k: TensorArg,
-    #[arg(buffer = 2)]
+    #[arg(buffer = 2, metal_type = "const device InputStorageT*")]
     pub v: TensorArg,
     // Outputs: partial accumulators / stats for each split.
     #[arg(buffer = 3, metal_type = "device float*")]
@@ -441,7 +433,7 @@ impl SdpaPrefillSplitKPartStage {
     out_var = "output"
 )]
 pub struct SdpaPrefillSplitKReduceStage {
-    #[arg(buffer = 0, output)]
+    #[arg(buffer = 0, output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     #[arg(buffer = 1, metal_type = "const device float*")]
     pub partial_acc: TensorArg,

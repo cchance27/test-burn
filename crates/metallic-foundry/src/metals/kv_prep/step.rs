@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Foundry, MetalError, spec::{CompiledStep, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::TensorArg
+    Foundry, MetalError, metals::common::dtype_contract::require_uniform_dtypes, spec::{CompiledStep, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::TensorArg
 };
 
 /// DSL Step for the fused KV-prep kernel.
@@ -111,6 +111,26 @@ impl CompiledStep for CompiledKvPrepFusedStep {
 
         let cos = fast_bindings.get(self.cos_idx).ok_or(MetalError::InputNotFound("cos".into()))?;
         let sin = fast_bindings.get(self.sin_idx).ok_or(MetalError::InputNotFound("sin".into()))?;
+
+        require_uniform_dtypes(
+            "KvPrepFused",
+            &[
+                ("q", q.dtype),
+                ("k", k.dtype),
+                ("v", v.dtype),
+                ("q_rot", q_rot.dtype),
+                ("k_cache", k_cache.dtype),
+                ("v_cache", v_cache.dtype),
+                ("cos", cos.dtype),
+                ("sin", sin.dtype),
+            ],
+        )
+        .map_err(|_| {
+            MetalError::OperationFailed(format!(
+                "KvPrepFused mixed-policy is unsupported (q={:?}, k={:?}, v={:?}, q_rot={:?}, k_cache={:?}, v_cache={:?}, cos={:?}, sin={:?}).",
+                q.dtype, k.dtype, v.dtype, q_rot.dtype, k_cache.dtype, v_cache.dtype, cos.dtype, sin.dtype
+            ))
+        })?;
 
         let params = self.step.params.resolve(bindings);
 

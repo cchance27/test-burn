@@ -18,13 +18,13 @@
 // - Each simdgroup processes 4 query rows; each lane holds 2 columns (lane and lane+32).
 template<uint WARPS>
 inline void flash_prefill_tiled_d64(
-    const device half* q_base,
-    const device half* k_base,
-    const device half* v_base,
-    device half* output,
+    const device InputStorageT* q_base,
+    const device InputStorageT* k_base,
+    const device InputStorageT* v_base,
+    device OutputStorageT* output,
     constant SdpaPrefillParams& params,
-    threadgroup half* k_shared,
-    threadgroup half* v_shared,
+    threadgroup FlashTileT* k_shared,
+    threadgroup FlashTileT* v_shared,
     uint3 gid, // threadgroup_position_in_grid
     uint3 tid, // thread_position_in_threadgroup
     uint3 tptg, // threads_per_threadgroup
@@ -57,7 +57,7 @@ inline void flash_prefill_tiled_d64(
     for (int r=0; r<4; ++r) { m[r] = -1e30f; l[r] = 0.0f; }
     
     // Cache Q in registers for this lane for each row.
-    half2 q_reg[4]; 
+    FlashVec2T q_reg[4]; 
     
     bool row_valid[4];
     
@@ -68,14 +68,15 @@ inline void flash_prefill_tiled_d64(
         row_valid[r] = q_idx < params.q_len;
         
         if (row_valid[r]) {
-            const device half* q_ptr = q_base + q_idx * params.q_stride_m; 
-            
+            const device InputStorageT* q_ptr = q_base + q_idx * params.q_stride_m;
+
             // Each lane loads its two columns: `lane` and `lane+32`.
-            half v0 = q_ptr[lane];
-            half v1 = q_ptr[lane+32];
-            q_reg[r] = half2(v0, v1);
+            q_reg[r] = FlashVec2T(
+                (FlashTileT)q_ptr[lane],
+                (FlashTileT)q_ptr[lane + 32u]
+            );
         } else {
-            q_reg[r] = half2(0.0h, 0.0h);
+            q_reg[r] = FlashVec2T((FlashTileT)0.0f, (FlashTileT)0.0f);
         }
     }
     
@@ -117,8 +118,8 @@ inline void flash_prefill_tiled_d64(
                 if (k_global >= kv_len) break;
 
                 bool masked = (k_global > causal_limit);
-                half k_val0 = masked ? half(0.0h) : k_shared[k*64 + lane];
-                half k_val1 = masked ? half(0.0h) : k_shared[k*64 + lane + 32];
+                FlashTileT k_val0 = masked ? (FlashTileT)0.0f : k_shared[k*64 + lane];
+                FlashTileT k_val1 = masked ? (FlashTileT)0.0f : k_shared[k*64 + lane + 32];
                 float partial = (float)q_reg[r][0] * (float)k_val0 + (float)q_reg[r][1] * (float)k_val1;
                 float score = simd_sum(partial) * params.scale;
                 score = masked ? -1e30f : score;
@@ -133,8 +134,8 @@ inline void flash_prefill_tiled_d64(
                 if (k_global >= kv_len) break;
                 if (k_global > causal_limit) continue;
 
-                half k_val0 = k_shared[k*64 + lane];
-                half k_val1 = k_shared[k*64 + lane + 32];
+                FlashTileT k_val0 = k_shared[k*64 + lane];
+                FlashTileT k_val1 = k_shared[k*64 + lane + 32];
                 float partial = (float)q_reg[r][0] * (float)k_val0 + (float)q_reg[r][1] * (float)k_val1;
                 float score = simd_sum(partial) * params.scale;
 
@@ -146,8 +147,8 @@ inline void flash_prefill_tiled_d64(
                 }
                 float p = simd_broadcast(p_local, 0);
 
-                half v_val0 = v_shared[k*64 + lane];
-                half v_val1 = v_shared[k*64 + lane + 32];
+                FlashTileT v_val0 = v_shared[k*64 + lane];
+                FlashTileT v_val1 = v_shared[k*64 + lane + 32];
                 block_out[0] += p * (float)v_val0;
                 block_out[1] += p * (float)v_val1;
             }
@@ -189,22 +190,21 @@ inline void flash_prefill_tiled_d64(
         uint q_global = q_row_start + my_row_local_base + r;
         
         // Store this lane's two columns.
-        device half* out_ptr = output + q_global * params.out_stride_m;
-        out_ptr[lane] = (half)res[0];
-        out_ptr[lane+32] = (half)res[1];
+        device OutputStorageT* out_ptr = output + q_global * params.out_stride_m;
+        metallic_store_output2(out_ptr, lane, lane + 32u, res);
     }
 }
 
 // Tiled prefill SDPA kernel for head_dim=128.
 template<uint WARPS>
 inline void flash_prefill_tiled_d128(
-    const device half* q_base,
-    const device half* k_base,
-    const device half* v_base,
-    device half* output,
+    const device InputStorageT* q_base,
+    const device InputStorageT* k_base,
+    const device InputStorageT* v_base,
+    device OutputStorageT* output,
     constant SdpaPrefillParams& params,
-    threadgroup half* k_shared,
-    threadgroup half* v_shared,
+    threadgroup FlashTileT* k_shared,
+    threadgroup FlashTileT* v_shared,
     uint3 gid,
     uint3 tid,
     uint3 tptg,
@@ -235,20 +235,21 @@ inline void flash_prefill_tiled_d128(
         l[r] = 0.0f;
     }
 
-    half4 q_reg[4];
+    FlashVec4T q_reg[4];
     bool row_valid[4];
     for (int r = 0; r < 4; ++r) {
         uint q_idx = q_row_start + my_row_local_base + r;
         row_valid[r] = q_idx < params.q_len;
         if (row_valid[r]) {
-            const device half* q_ptr = q_base + q_idx * params.q_stride_m;
-            half v0 = q_ptr[lane];
-            half v1 = q_ptr[lane + 32];
-            half v2 = q_ptr[lane + 64];
-            half v3 = q_ptr[lane + 96];
-            q_reg[r] = half4(v0, v1, v2, v3);
+            const device InputStorageT* q_ptr = q_base + q_idx * params.q_stride_m;
+            q_reg[r] = FlashVec4T(
+                (FlashTileT)q_ptr[lane],
+                (FlashTileT)q_ptr[lane + 32u],
+                (FlashTileT)q_ptr[lane + 64u],
+                (FlashTileT)q_ptr[lane + 96u]
+            );
         } else {
-            q_reg[r] = half4(0.0h);
+            q_reg[r] = FlashVec4T((FlashTileT)0.0f);
         }
     }
 
@@ -279,10 +280,10 @@ inline void flash_prefill_tiled_d128(
                 if (k_global >= kv_len) break;
 
                 bool masked = (k_global > causal_limit);
-                half k0 = masked ? half(0.0h) : k_shared[k * 128 + lane];
-                half k1 = masked ? half(0.0h) : k_shared[k * 128 + lane + 32];
-                half k2 = masked ? half(0.0h) : k_shared[k * 128 + lane + 64];
-                half k3 = masked ? half(0.0h) : k_shared[k * 128 + lane + 96];
+                FlashTileT k0 = masked ? (FlashTileT)0.0f : k_shared[k * 128 + lane];
+                FlashTileT k1 = masked ? (FlashTileT)0.0f : k_shared[k * 128 + lane + 32];
+                FlashTileT k2 = masked ? (FlashTileT)0.0f : k_shared[k * 128 + lane + 64];
+                FlashTileT k3 = masked ? (FlashTileT)0.0f : k_shared[k * 128 + lane + 96];
 
                 float partial =
                     (float)q_reg[r][0] * (float)k0 +
@@ -301,10 +302,10 @@ inline void flash_prefill_tiled_d128(
                 if (k_global >= kv_len) break;
                 if (k_global > causal_limit) continue;
 
-                half k0 = k_shared[k * 128 + lane];
-                half k1 = k_shared[k * 128 + lane + 32];
-                half k2 = k_shared[k * 128 + lane + 64];
-                half k3 = k_shared[k * 128 + lane + 96];
+                FlashTileT k0 = k_shared[k * 128 + lane];
+                FlashTileT k1 = k_shared[k * 128 + lane + 32];
+                FlashTileT k2 = k_shared[k * 128 + lane + 64];
+                FlashTileT k3 = k_shared[k * 128 + lane + 96];
 
                 float partial =
                     (float)q_reg[r][0] * (float)k0 +
@@ -320,10 +321,10 @@ inline void flash_prefill_tiled_d128(
                 }
                 float p = simd_broadcast(p_local, 0);
 
-                half v0 = v_shared[k * 128 + lane];
-                half v1 = v_shared[k * 128 + lane + 32];
-                half v2 = v_shared[k * 128 + lane + 64];
-                half v3 = v_shared[k * 128 + lane + 96];
+                FlashTileT v0 = v_shared[k * 128 + lane];
+                FlashTileT v1 = v_shared[k * 128 + lane + 32];
+                FlashTileT v2 = v_shared[k * 128 + lane + 64];
+                FlashTileT v3 = v_shared[k * 128 + lane + 96];
                 block_out[0] += p * (float)v0;
                 block_out[1] += p * (float)v1;
                 block_out[2] += p * (float)v2;
@@ -363,44 +364,48 @@ inline void flash_prefill_tiled_d128(
         float4 res = acc[r] * inv_l;
 
         uint q_global = q_row_start + my_row_local_base + r;
-        device half* out_ptr = output + q_global * params.out_stride_m;
-        out_ptr[lane] = (half)res[0];
-        out_ptr[lane + 32] = (half)res[1];
-        out_ptr[lane + 64] = (half)res[2];
-        out_ptr[lane + 96] = (half)res[3];
+        device OutputStorageT* out_ptr = output + q_global * params.out_stride_m;
+        metallic_store_output4(
+            out_ptr,
+            lane,
+            lane + 32u,
+            lane + 64u,
+            lane + 96u,
+            res
+        );
     }
 }
 
 template<uint WARPS>
 ALWAYS_INLINE void run_sdpa_prefill_stage(
-    const device half* q,
-    const device half* k,
-    const device half* v,
-    device half* output,
+    const device InputStorageT* q,
+    const device InputStorageT* k,
+    const device InputStorageT* v,
+    device OutputStorageT* output,
     constant SdpaPrefillParams& params,
     uint3 gid,
     uint3 lid,
     uint3 tptg,
     uint simd_lane_id,
     uint simd_group_id,
-    threadgroup half* k_shared,
-    threadgroup half* v_shared
+    threadgroup FlashTileT* k_shared,
+    threadgroup FlashTileT* v_shared
 ) {
     uint head_idx = gid.y;
     uint batch_idx = gid.z;
     uint kv_head_idx = head_idx / params.group_size;
 
     ulong q_offset = batch_idx * params.q_stride_b + head_idx * params.q_stride_h;
-    const device half* q_ptr = q + q_offset;
+    const device InputStorageT* q_ptr = q + q_offset;
 
     ulong k_offset = batch_idx * params.k_stride_b + kv_head_idx * params.k_stride_h;
-    const device half* k_ptr = k + k_offset;
+    const device InputStorageT* k_ptr = k + k_offset;
 
     ulong v_offset = batch_idx * params.v_stride_b + kv_head_idx * params.v_stride_h;
-    const device half* v_ptr = v + v_offset;
+    const device InputStorageT* v_ptr = v + v_offset;
 
     ulong out_offset = batch_idx * params.out_stride_b + head_idx * params.out_stride_h;
-    device half* output_ptr = output + out_offset;
+    device OutputStorageT* output_ptr = output + out_offset;
 
     if (params.head_dim == 64) {
         flash_prefill_tiled_d64<WARPS>(q_ptr, k_ptr, v_ptr, output_ptr, params, k_shared, v_shared, gid, lid, tptg, simd_lane_id, simd_group_id);
@@ -410,5 +415,5 @@ ALWAYS_INLINE void run_sdpa_prefill_stage(
 }
 
 #define SDPA_PREFILL_DECLARE_SHARED(NAME_K, NAME_V) \
-    threadgroup half NAME_K[32 * 128];              \
-    threadgroup half NAME_V[32 * 128]
+    threadgroup FlashTileT NAME_K[32 * 128];              \
+    threadgroup FlashTileT NAME_V[32 * 128]

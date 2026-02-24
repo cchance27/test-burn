@@ -51,11 +51,11 @@ pub struct CompiledSoftmaxV2Step {
 /// Uses `#[derive(KernelArgs)]` to auto-generate safe binding code.
 #[derive(Debug, KernelArgs)]
 pub struct SoftmaxV2Args {
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device InputStorageT*")]
     pub input: TensorArg,
-    #[arg(buffer = 1)]
+    #[arg(buffer = 1, metal_type = "const device uchar*")]
     pub scale: TensorArg,
-    #[arg(buffer = 2, output)]
+    #[arg(buffer = 2, output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     #[arg(buffer = 3)]
     pub seq_k: u32,

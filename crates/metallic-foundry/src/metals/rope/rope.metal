@@ -19,17 +19,17 @@ using namespace metal;
 
 // RopeParams struct is injected by Foundry via struct_defs()
 
-/// RoPE (Rotary Position Embedding) kernel for half precision.
+/// RoPE (Rotary Position Embedding) kernel for runtime storage types.
 ///
 /// Each thread processes one element, applying rotation based on cos/sin caches.
 /// The rotation pairs feature i with feature (i + half_dim):
 ///   out_i = x_i * cos - x_j * sin
 ///   out_j = x_j * cos + x_i * sin
-kernel void rope_kernel_f16(
-    const device half* input [[buffer(0)]],
-    device half* output [[buffer(1)]],
-    const device half* cos_buf [[buffer(2)]],
-    const device half* sin_buf [[buffer(3)]],
+kernel void rope_kernel(
+    const device InputStorageT* input [[buffer(0)]],
+    device OutputStorageT* output [[buffer(1)]],
+    const device TensorStorageT* cos_buf [[buffer(2)]],
+    const device TensorStorageT* sin_buf [[buffer(3)]],
     constant RopeParamsResolved* params [[buffer(4)]],
     uint gid [[thread_position_in_grid]]
 ) {
@@ -50,26 +50,26 @@ kernel void rope_kernel_f16(
     // Pair index is always feature_idx if < half_dim, or feature_idx - half_dim
     uint pair = (feature_idx < half_dim) ? feature_idx : (feature_idx - half_dim);
     
-    float cosv = (float)cos_buf[pos * half_dim + pair];
-    float sinv = (float)sin_buf[pos * half_dim + pair];
+    float cosv = metallic_load_tensor(cos_buf, pos * half_dim + pair);
+    float sinv = metallic_load_tensor(sin_buf, pos * half_dim + pair);
     
     if (feature_idx < half_dim) {
         // First half: out_i
-        float x_i = (float)input[gid];
-        float x_j = (float)input[row_idx * dim + feature_idx + half_dim];
+        float x_i = metallic_load_input(input, gid);
+        float x_j = metallic_load_input(input, row_idx * dim + feature_idx + half_dim);
         
         float out_i, out_j;
         rope_rotate_half(out_i, out_j, x_i, x_j, cosv, sinv);
         
-        output[gid] = (half)out_i;
+        metallic_store_output(output, gid, metallic_to_accum(out_i));
     } else {
         // Second half: out_j
-        float x_j = (float)input[gid];
-        float x_i = (float)input[row_idx * dim + (feature_idx - half_dim)];
+        float x_j = metallic_load_input(input, gid);
+        float x_i = metallic_load_input(input, row_idx * dim + (feature_idx - half_dim));
         
         float out_i, out_j;
         rope_rotate_half(out_i, out_j, x_i, x_j, cosv, sinv);
         
-        output[gid] = (half)out_j;
+        metallic_store_output(output, gid, metallic_to_accum(out_j));
     }
 }

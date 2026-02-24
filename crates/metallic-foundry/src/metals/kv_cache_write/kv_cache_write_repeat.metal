@@ -7,8 +7,8 @@ using namespace metal;
 /// This matches the Context engine behavior where KV caches are stored already repeated
 /// (so decode does not need a separate RepeatKvHeads dispatch).
 kernel void kv_cache_write_repeat_kv_heads_kernel(
-    const device half* input [[buffer(0)]],
-    device half* cache [[buffer(1)]],
+    const device InputStorageT* input [[buffer(0)]],
+    device OutputStorageT* cache [[buffer(1)]],
     const constant KvCacheWriteRepeatKvHeadsParamsResolved* params [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
@@ -30,12 +30,11 @@ kernel void kv_cache_write_repeat_kv_heads_kernel(
     uint cache_pos = params->position_offset + input_seq_pos;
     uint cache_row_base = cache_pos * params->head_dim + dim_idx;
 
-    half v = input[gid];
+    float v = metallic_load_input(input, gid);
     for (uint r = 0; r < params->group_size; ++r) {
         uint out_head = base_head + r;
         if (out_head >= max_heads) break;
         uint cache_idx = out_head * cache_head_stride + cache_row_base;
-        cache[cache_idx] = v;
+        metallic_store_output(cache, cache_idx, metallic_to_accum(v));
     }
 }
-

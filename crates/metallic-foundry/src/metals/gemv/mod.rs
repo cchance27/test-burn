@@ -13,6 +13,24 @@ use crate::{
     Foundry, MetalError, compound::Layout, policy::activation::Activation, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::TensorArg
 };
 
+fn resolve_gemv_strategy_for_input(
+    requested_strategy: GemvStrategy,
+    input_dtype: crate::tensor::Dtype,
+) -> Result<GemvStrategy, MetalError> {
+    if matches!(requested_strategy, GemvStrategy::Vectorized) && !matches!(input_dtype, crate::tensor::Dtype::F16) {
+        return Err(MetalError::OperationNotSupported(format!(
+            "GemvV2 Vectorized strategy requires F16 input dtype, got {:?}. Use Auto/Canonical for non-F16 inputs.",
+            input_dtype
+        )));
+    }
+
+    Ok(match (requested_strategy, input_dtype) {
+        (GemvStrategy::Auto, crate::tensor::Dtype::F16) => GemvStrategy::Auto,
+        (GemvStrategy::Auto, _) => GemvStrategy::Canonical,
+        (other, _) => other,
+    })
+}
+
 #[derive(MetalStruct, Clone, Debug, Default, Serialize, Deserialize)]
 #[repr(C)]
 pub struct GemvV2Params {
@@ -46,19 +64,19 @@ fn default_batch() -> DynamicValue<u32> {
     execute = false
 )]
 pub struct GemvV2 {
-    #[arg(buffer = 0)]
+    #[arg(buffer = 0, metal_type = "const device uchar*")]
     pub weights: TensorArg,
-    #[arg(buffer = 1)]
+    #[arg(buffer = 1, metal_type = "const device uchar*")]
     pub scale_bytes: Option<TensorArg>,
     #[arg(meta, scale_for = "weights")]
     pub derived_scales: TensorArg,
-    #[arg(buffer = 2)]
+    #[arg(buffer = 2, metal_type = "const device InputStorageT*")]
     pub input: TensorArg,
-    #[arg(buffer = 3, output)]
+    #[arg(buffer = 3, output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
-    #[arg(buffer = 7)]
+    #[arg(buffer = 7, metal_type = "const device BiasStorageT*")]
     pub bias: Option<TensorArg>,
-    #[arg(buffer = 10)]
+    #[arg(buffer = 10, metal_type = "const device ResidualStorageT*")]
     pub residual: Option<TensorArg>,
     #[arg(meta)]
     pub layout: Layout,
@@ -193,10 +211,22 @@ impl CompiledStep for CompiledGemvV2UnifiedExecutionStep {
             self.params.weights_per_block
         };
 
+        let requested_strategy = self.strategy.unwrap_or(GemvStrategy::Auto);
+        let selected_strategy = resolve_gemv_strategy_for_input(requested_strategy, input.dtype)?;
+        if matches!(requested_strategy, GemvStrategy::Auto) && matches!(selected_strategy, GemvStrategy::Canonical) {
+            tracing::debug!(
+                target: "metallic_foundry::metals::gemv",
+                input_dtype = ?input.dtype,
+                requested_strategy = ?requested_strategy,
+                selected_strategy = ?selected_strategy,
+                "GemvV2 Auto strategy downgraded to Canonical for non-F16 input"
+            );
+        }
+
         let kernel = get_gemv_v2_kernel(
             policy.clone() as std::sync::Arc<dyn crate::fusion::MetalPolicy>,
             self.layout,
-            self.strategy.unwrap_or(GemvStrategy::Auto),
+            selected_strategy,
             self.activation,
         );
 
@@ -252,3 +282,6 @@ impl CompiledStep for CompiledGemvV2UnifiedExecutionStep {
         Ok(())
     }
 }
+
+#[path = "mod.test.rs"]
+mod tests;

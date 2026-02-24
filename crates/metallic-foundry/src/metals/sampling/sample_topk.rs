@@ -29,16 +29,17 @@ pub struct SampleParams {
 #[derive(Kernel, KernelArgs, Clone)]
 #[kernel(
     source = "sampling/sample_topk.metal",
-    function = "sample_topk_fused_f16",
+    function = "sample_topk_fused",
     args = SampleParams,
     dispatch = true,
-    dtype = F16
+    include_exprs("crate::policy::resolve_policy(self.logits.dtype()).header()")
 )]
 pub struct SampleTopK {
     /// Input logits [vocab_size].
+    #[arg(metal_type = "const device InputStorageT*")]
     pub logits: TensorArg,
     /// Output token index [1].
-    #[arg(output)]
+    #[arg(output, metal_type = "device uint*")]
     pub output: TensorArg,
     /// Kernel parameters.
     pub params: SampleParams,

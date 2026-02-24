@@ -14,7 +14,7 @@ use crate::{
 #[derive(KernelArgs, Clone)]
 pub struct Arange {
     /// Output tensor.
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     /// Length of the output.
     pub length: usize,
@@ -38,7 +38,7 @@ impl Kernel for Arange {
     }
 
     fn function_name(&self) -> &str {
-        "arange_kernel_f16"
+        "arange_kernel"
     }
 
     fn includes(&self) -> Includes {
@@ -46,7 +46,7 @@ impl Kernel for Arange {
     }
 
     fn dtype(&self) -> Option<Dtype> {
-        Some(Dtype::F16)
+        Some(self.output.dtype())
     }
 
     fn struct_defs(&self) -> String {

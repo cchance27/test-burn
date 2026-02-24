@@ -1,6 +1,7 @@
 use std::{fmt::Debug, sync::Arc};
 
 use anyhow::Result;
+use metallic_env::POLICY_VARIANT;
 use metallic_loader::LoadedModel;
 
 use crate::{
@@ -30,9 +31,6 @@ impl Default for OptimizationMetadata {
         }
     }
 }
-
-/// Compatibility alias for the unified Layout enum.
-pub type WeightLayout = Layout;
 
 use crate::compound::Stage;
 
@@ -81,6 +79,7 @@ pub mod activation;
 mod block_quant;
 pub mod f16;
 pub mod f32;
+pub mod f32_native;
 pub mod f64;
 pub mod q4_0;
 pub mod q4_1;
@@ -88,29 +87,37 @@ pub mod q5_k;
 pub mod q6_k;
 pub mod q8;
 pub mod raw;
+pub mod variant;
+
+pub use variant::{DenseStorageVariant, PolicyResolution, PolicyVariant, QuantComputeVariant, ResolvedPolicy};
 
 use crate::tensor::Dtype;
 
 /// Registry to retrieve policies by name or stringified dtype.
 // DEBT: This is very fragile! we should clean this up having fragile string matches?
 pub fn resolve_policy(dtype: Dtype) -> Arc<dyn MetalPolicyRuntime> {
-    match dtype {
-        Dtype::F16 => Arc::new(f16::PolicyF16),
-        Dtype::F32 => Arc::new(f32::PolicyF32),
-        Dtype::Q4_0 => Arc::new(q4_0::PolicyQ4_0),
-        Dtype::Q4_1 => Arc::new(q4_1::PolicyQ4_1),
-        Dtype::Q5_K => Arc::new(q5_k::PolicyQ5K),
-        Dtype::Q6_K => Arc::new(q6_k::PolicyQ6K),
-        Dtype::Q8_0 => Arc::new(q8::PolicyQ8),
-        Dtype::U32 => Arc::new(raw::PolicyU32),
-        // Map everything else to F32 or panic?
-        // Legacy string match panicked on unsupported.
-        // Assuming F64 -> F32 as before?
-        _ => panic!(
-            "Unsupported tensor dtype {:?} for Foundry (add a policy or convert the model).",
-            dtype
-        ),
+    resolve_policy_detailed(dtype, active_policy_variant())
+        .unwrap_or_else(|err| panic!("{err:#}"))
+        .policy
+}
+
+#[must_use]
+pub fn active_policy_variant() -> PolicyVariant {
+    match POLICY_VARIANT.get() {
+        Ok(Some(raw)) => raw
+            .parse::<PolicyVariant>()
+            .unwrap_or_else(|err| panic!("Invalid {}='{}': {err:#}", POLICY_VARIANT.key(), raw)),
+        Ok(None) => PolicyVariant::preserve_dense(QuantComputeVariant::F16),
+        Err(err) => panic!("Failed to read {}: {err:#}", POLICY_VARIANT.key()),
     }
+}
+
+pub fn resolve_policy_with_variant(dtype: Dtype, variant: PolicyVariant) -> Result<Arc<dyn MetalPolicyRuntime>> {
+    Ok(resolve_policy_detailed(dtype, variant)?.policy)
+}
+
+pub fn resolve_policy_detailed(dtype: Dtype, variant: PolicyVariant) -> Result<ResolvedPolicy> {
+    variant::resolve_policy_for_dtype(dtype, variant)
 }
 
 /// Resolve a policy by its short name (e.g. "f16", "q8").
@@ -119,6 +126,7 @@ pub fn resolve_policy_by_name(name: &str) -> Option<Arc<dyn MetalPolicyRuntime>>
     match name {
         "f16" => Some(Arc::new(f16::PolicyF16)),
         "f32" => Some(Arc::new(f32::PolicyF32)),
+        "f32_native" => Some(Arc::new(f32_native::PolicyF32Native)),
         "f64" => Some(Arc::new(f64::PolicyF64)),
         "u32" => Some(Arc::new(raw::PolicyU32)),
         "q4_0" => Some(Arc::new(q4_0::PolicyQ4_0)),

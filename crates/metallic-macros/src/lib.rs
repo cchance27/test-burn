@@ -339,9 +339,9 @@ fn infer_metal_type(ty: &syn::Type, is_buffer: bool, is_output: bool) -> String 
     // TensorArg, &Tensor, Tensor<...> → device pointer
     if is_tensor_arg(ty) {
         return if is_output {
-            "device half*".to_string()
+            "device OutputStorageT*".to_string()
         } else {
-            "const device half*".to_string()
+            "const device InputStorageT*".to_string()
         };
     }
 
@@ -365,9 +365,9 @@ fn infer_metal_type(ty: &syn::Type, is_buffer: bool, is_output: bool) -> String 
     // Fallback for buffer types
     if is_buffer {
         if is_output {
-            "device half*".to_string()
+            "device OutputStorageT*".to_string()
         } else {
-            "const device half*".to_string()
+            "const device InputStorageT*".to_string()
         }
     } else {
         "constant uint&".to_string()

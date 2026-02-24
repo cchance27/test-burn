@@ -47,11 +47,15 @@ This document tracks the state of the Foundry backend transition, highlighting i
 ### 5. Quantization Policy Architecture (Refactor)
 - **Unified Policy System:** Replaced fragmented `Quantization` enum logic with a unified `Arc<dyn MetalPolicy>` trait object system across all kernel stages (`VectorizedDotStage`, `TileLoad`, etc.).
 - **Runtime-Driven Selection:** Kernel policies are now strictly derived from runtime `TensorArg` dtypes, eliminating incorrect fallbacks caused by missing model hints.
+- **Variant Groundwork (NEW):** Added a centralized policy-variant resolver (`policy/variant.rs`) that records `source/storage/compute` dtype decisions and lossy-cast metadata in one place.
+- **Native F32 Path (Gated):** Added `PolicyF32Native` + `policy_f32.metal` so dense F32 can be preserved under a non-legacy variant path, while default behavior remains legacy downcast-to-F16.
+- **Future Compute Dtype Hook:** Quant policies now carry explicit compute-target metadata (`F16`/`BF16`/`F32`) for upcoming selector rollout; execution remains legacy until kernel coverage is expanded.
+- **Kernel DType Helper Layer (NEW):** Added `metals/dtypes/runtime_types.metal` and migrated `gemv`/`rmsnorm` hot paths to helper-based load/store/cast APIs to reduce per-kernel type boilerplate and prepare compute/storage/accum rollout.
 - **Extensible Design:** New quantization schemes (Q4, INT8) can be added by implementing `MetalPolicy` without modifying core kernel generation logic.
 - **Zero-Leakage Enforcement**: Successfully removed all explicit `short_name() == "f16"` or `is_q8` branching from kernel stages and execution steps.
-- **Mixed-Quant Safety Paths (Current):** Fused QKV and fused SwiGLU now detect mixed policy tuples at runtime and switch to correctness-first decomposed execution paths (per-tensor policy GEMV flow) instead of forcing a single-policy fused kernel.
-- **Mixed-Quant Perf Caveat:** These safety paths are slower than uniform-policy fused kernels; Foundry now emits one-time warnings when fallback activates so perf regressions are visible during profiling.
-- **Mixed-Quant Fast-Path Plan:** Next step is tuple-policy fused kernel variants (e.g., `(q,k,v)` / `(gate,up)`) to recover fused performance without sacrificing correctness.
+- **Mixed-Quant Safety Paths (Current):** Fused QKV and fused SwiGLU now detect mixed policy tuples at runtime and fail-fast by design (no silent fallback/decomposition).
+- **Mixed-Quant Perf Caveat:** Mixed-policy models lose fused-path performance until tuple-policy fused kernels are implemented.
+- **Mixed-Quant Fast-Path Plan:** Next step is tuple-policy fused kernel variants (e.g., `(q,k,v)` / `(gate,up)`) to recover fused performance while keeping fail-fast behavior explicit for unsupported tuples.
 
 ### 6. Backend Reliability & Correctness
 - **Q8 Inference Fixed:** Resolved garbage output regression by enforcing strict runtime dtype validation for GEMM prefill kernels (was defaulting to F16).
@@ -91,6 +95,41 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Agnostic Testing:** Refactored diagnostic and parity tests to use generic `MockModel` and `MapMetadata` implementations, allowing verification without concrete GGUF files.
 - **Zero-Warning Workspace:** Performed a project-wide cleanup of unused imports and dead code resulting from the refactor, achieving a 100% clean build.
 
+### 13. Dynamic DType Storage/Compute/Accumulation
+
+| Kernel Family | Storage DType | Compute DType | Accum DType | Status |
+| --- | --- | --- | --- | --- |
+| RMSNorm | F16/F32 via runtime type helpers | ComputeT | AccumT | ✅ Cut over |
+| GEMV/GEMV-Fused | F16/F32 (dense), quant policies for weights | ComputeT | AccumT | ✅ Cut over (fast F16 aliases isolated) |
+| GEMM/MMA | Runtime-typed IO + quant policy loaders | ComputeT (`MmaComputeT`) | AccumT (`MmaAccumT`) | 🟡 Groundwork in place (tile path remains half-specialized for perf) |
+| SwiGLU / Fused FFN stages | Runtime-typed IO/bias/output | ComputeT | AccumT | ✅ Cut over (vector fast path isolated) |
+| RoPE | Runtime-typed IO + tensor caches | ComputeT | AccumT | ✅ Cut over (shared-vector alias path) |
+| FlashAttention Decode/Prefill/Split-K | Runtime IO bindings + typed helper aliases (F16/F32 dense) | ComputeT in math path | AccumT at stores | ✅ Dense F16/F32 cut over; mixed/quant fail-fast |
+
+- [x] Remove misleading hardcoded dtype internals in core kernels by introducing reusable typed aliases/helpers.
+- [x] Preserve explicit fail-fast behavior for unsupported FA Q/K/V dtype combinations.
+- [x] Add mixed-policy safety guards for fused QKV/SwiGLU paths and keep them visible in runtime behavior.
+- [x] Add targeted exact tests for critical policy and fail-fast paths.
+- [x] Keep kernel compile/runtime behavior observable with debug tracing hooks.
+- [x] Centralize runtime dtype contract metadata (source/storage/compute/accum + byte sizes) for kernel checks and selector groundwork.
+- [x] Add storage-byte-aware selector groundwork + debug telemetry for FA decode variant resolution.
+- [x] De-duplicate FA dtype contract enforcement across decode/rope paths and centralize prefill selector heuristics in dispatch helpers.
+- [x] Expand FA dense routing to validated F16/F32 execution variants with shared contract checks and selector telemetry.
+- [x] Audit kernel space for hardcoded storage pointers (`const device half*`, `threadgroup half*`) and keep only intentional fast-path aliases.
+- [ ] Add BF16 compute/accum variant rollout after F16/F32 sprint stabilization
+
+- Completed dense `F16/F32` runtime dtype cutover for FlashAttention decode + prefill + split-k paths (mixed/quant remain explicit fail-fast).
+- Completed MMA tile widening groundwork so GEMM honors runtime storage dtype instead of being hard-locked to half tiles.
+- Added accum dtype policy override (`METALLIC_ACCUM_DTYPE`) with fail-fast validation against narrower-than-compute configurations.
+- Verified cleanup gates and targeted parity/contract tests (`fmt`, `clippy --fix`, `build`, exact FA/GEMM dtype tests).
+- Fixed a critical runtime helper correctness bug in `runtime_types.metal`:
+  - `metallic_store_output2/4` previously used packed contiguous stores in a way that ignored explicit indices (`idx1/idx2/idx3`), corrupting strided-write kernels.
+  - Reworked helpers so indexed variants always honor explicit indices; added explicit contiguous helpers (`*_contig`) for packed fast paths.
+  - Flash decode now uses contiguous helpers; Flash prefill/split-k keep indexed strided stores.
+- Fixed Flash prefill lane-load indexing regressions:
+  - Restored lane-strided Q loads (`lane`, `lane+32`, `(+64,+96)` for D128) in prefill online + split-k kernels.
+- Recovered decode throughput after correctness fixes by removing extra storage->compute->storage conversions in Flash prefill Q register loads.
+
 ---
 
 ## ⚠️ Risks & Regressions (Immediate Priority)
@@ -115,7 +154,7 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 
 ### 2) FlashAttention (FA2 + Quantized KV Cache)
 
-- **Current state:** FA1-style attention is implemented for inference:
+- **Current state:** FA1-style attention is implemented for inference with dense `F16/F32` support:
   - Decode (M=1): fused kernel with streaming softmax + fused accumulation.
   - Prefill (M>1): tiled prefill + Split‑K prefill for large KV.
 - **Next for FA2:** pipelined MMA / double-buffered KV staging (reduce stalls, increase utilization).
@@ -125,13 +164,25 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 
 ### 3) Mixed-Quant Fused Kernel Performance Recovery
 
-- **Current state:** mixed-policy safety fallbacks are implemented for `FusedQkv` and fused SwiGLU paths to preserve correctness when tensor policies differ (e.g. Q/K/V or gate/up using different quant dtypes).
-- **Problem:** fallback paths increase dispatch count and temporary-buffer usage, causing measurable throughput/latency regression versus uniform-policy fused kernels.
+- **Current state:** mixed-policy combinations now fail-fast in fused `FusedQkv` and fused SwiGLU paths to preserve correctness and keep behavior explicit.
+- **Problem:** mixed-policy models currently lose fused-path performance because unsupported dtype tuples are rejected.
 - **Next sprint tasks:**
   - Introduce tuple-policy kernel varianting for fused ops (e.g. `(q,k,v)` and `(gate,up)` policy tuples).
   - Extend kernel cache keys/registry to include policy tuples while avoiding variant explosion.
-  - Reuse persistent scratch buffers in fallback paths to reduce alloc overhead until tuple-fused kernels land.
+  - Avoid fallback-path complexity; keep fail-fast and add explicit supported tuple sets as kernels land.
   - Add focused mixed-quant perf benchmarks and parity tests to gate optimization work.
+
+### 4) Dynamic Runtime DType kernel support (accum, storage, compute)
+
+- **Goal:** close remaining sprint items for mixed dtype support while keeping performance-first constraints.
+- **Remaining items:**
+  - Add tuple-policy fused execution variants for mixed-policy `FusedQkv` and fused SwiGLU (`(q,k,v)` and `(gate,up)` tuples).
+  - Run full model-level mixed GGUF validation matrix (long prefill/decode transitions, GQA cases) to confirm no hidden path regressions.
+  - Expand fused RoPE→FlashAttention parity/perf sweep for dense F32 across `head_dim={64,128}` and long KV lengths.
+  - Publish a single authoritative “supported dtype combos” table (storage/compute/accum + fail-fast rules) across docs (`LATEST_FOUNDRY.md`, `docs/QUANTIZATION.md`).
+  - Add optional CLI/config surface for accum dtype selection (`METALLIC_ACCUM_DTYPE`) beyond env-only operation.
+  - Add/store helper regression guard coverage for strided vs contiguous store helpers and keep this in exact CI runs.
+  - Continue micro-optimizing helper-heavy hot loops (conversion-elision + contiguous helper routing) without relaxing fail-fast behavior.
 
 ---
 

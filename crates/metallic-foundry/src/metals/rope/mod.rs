@@ -27,21 +27,24 @@ pub struct RopeParams {
 #[derive(Kernel, KernelArgs, Clone, Default)]
 #[kernel(
     source = "rope/rope.metal",
-    function = "rope_kernel_f16",
+    function = "rope_kernel",
     args = RopeParamsResolved,
     dispatch = per_element,
-    dtype = F16,
+    include_exprs("crate::policy::resolve_policy(self.input.dtype()).header()"),
     step = true
 )]
 pub struct Rope {
     /// Input tensor.
+    #[arg(metal_type = "const device InputStorageT*")]
     pub input: TensorArg,
     /// Output tensor (same shape as input).
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     /// Precomputed cosine cache [max_seq, dim/2].
+    #[arg(metal_type = "const device TensorStorageT*")]
     pub cos: TensorArg,
     /// Precomputed sine cache [max_seq, dim/2].
+    #[arg(metal_type = "const device TensorStorageT*")]
     pub sin: TensorArg,
     /// Kernel parameters (resolved from dynamic values).
     pub params: RopeParamsResolved,

@@ -16,6 +16,7 @@ pub enum FoundryEnvVar {
     KvPrefixCacheDisable,
     KvPrefixCacheEntries,
     DebugStepLog,
+    DebugKernelBindings,
     DebugCompiledStepSync,
     DebugStreamPoll,
     FoundryDecodeBatchSize,
@@ -24,6 +25,8 @@ pub enum FoundryEnvVar {
     SystemPrompt,
     DebugChatTemplate,
     RecordCbGpuTiming,
+    PolicyVariant,
+    AccumDtype,
     TuiMode,
     FoundryPerKernelProfiling,
     DebugTokenize,
@@ -75,6 +78,7 @@ impl FoundryEnvVar {
             FoundryEnvVar::KvPrefixCacheDisable => "METALLIC_KV_PREFIX_CACHE_DISABLE",
             FoundryEnvVar::KvPrefixCacheEntries => "METALLIC_KV_PREFIX_CACHE_ENTRIES",
             FoundryEnvVar::DebugStepLog => "METALLIC_DEBUG_STEP_LOG",
+            FoundryEnvVar::DebugKernelBindings => "METALLIC_DEBUG_KERNEL_BINDINGS",
             FoundryEnvVar::DebugCompiledStepSync => "METALLIC_DEBUG_COMPILED_STEP_SYNC",
             FoundryEnvVar::DebugStreamPoll => "METALLIC_DEBUG_STREAM_POLL",
             FoundryEnvVar::FoundryDecodeBatchSize => "METALLIC_FOUNDRY_DECODE_BATCH_SIZE",
@@ -83,6 +87,8 @@ impl FoundryEnvVar {
             FoundryEnvVar::SystemPrompt => "METALLIC_SYSTEM_PROMPT",
             FoundryEnvVar::DebugChatTemplate => "METALLIC_DEBUG_CHAT_TEMPLATE",
             FoundryEnvVar::RecordCbGpuTiming => "METALLIC_RECORD_CB_GPU_TIMING",
+            FoundryEnvVar::PolicyVariant => "METALLIC_POLICY_VARIANT",
+            FoundryEnvVar::AccumDtype => "METALLIC_ACCUM_DTYPE",
             FoundryEnvVar::TuiMode => "METALLIC_TUI_MODE",
             FoundryEnvVar::FoundryPerKernelProfiling => "METALLIC_FOUNDRY_PER_KERNEL_PROFILING",
             FoundryEnvVar::DebugTokenize => "METALLIC_DEBUG_TOKENIZE",
@@ -152,11 +158,18 @@ pub const FOUNDRY_DECODE_BATCH_SIZE: TypedEnvVar<usize> =
 /// Typed descriptor for debug stream polling toggle.
 pub const DEBUG_STREAM_POLL: TypedEnvVar<bool> =
     TypedEnvVar::new(FoundryEnvVar::DebugStreamPoll.into_env(), parse_truthy_flag, format_bool);
+/// Typed descriptor for METALLIC_DEBUG_KERNEL_BINDINGS.
+pub const DEBUG_KERNEL_BINDINGS: TypedEnvVar<bool> =
+    TypedEnvVar::new(FoundryEnvVar::DebugKernelBindings.into_env(), parse_truthy_flag, format_bool);
 /// Typed descriptor for METALLIC_SYSTEM_PROMPT.
 pub const SYSTEM_PROMPT: TypedEnvVar<String> = TypedEnvVar::new(FoundryEnvVar::SystemPrompt.into_env(), parse_string, format_string);
 /// Typed descriptor for METALLIC_RECORD_CB_GPU_TIMING.
 pub const RECORD_CB_GPU_TIMING: TypedEnvVar<bool> =
     TypedEnvVar::new(FoundryEnvVar::RecordCbGpuTiming.into_env(), parse_truthy_flag, format_bool);
+/// Typed descriptor for METALLIC_POLICY_VARIANT.
+pub const POLICY_VARIANT: TypedEnvVar<String> = TypedEnvVar::new(FoundryEnvVar::PolicyVariant.into_env(), parse_string, format_string);
+/// Typed descriptor for METALLIC_ACCUM_DTYPE.
+pub const ACCUM_DTYPE: TypedEnvVar<String> = TypedEnvVar::new(FoundryEnvVar::AccumDtype.into_env(), parse_string, format_string);
 /// Typed descriptor for METALLIC_FOUNDRY_PER_KERNEL_PROFILING.
 pub const FOUNDRY_PER_KERNEL_PROFILING: TypedEnvVar<bool> =
     TypedEnvVar::new(FoundryEnvVar::FoundryPerKernelProfiling.into_env(), parse_truthy_flag, format_bool);

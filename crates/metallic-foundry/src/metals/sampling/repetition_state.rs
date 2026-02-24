@@ -18,13 +18,13 @@ pub struct RepetitionStateParams {
     dtype = U32
 )]
 pub struct RepetitionStateInit {
-    #[arg(buffer = 0, output)]
+    #[arg(buffer = 0, output, metal_type = "device uint*")]
     pub ring: TensorArg,
-    #[arg(buffer = 1, output)]
+    #[arg(buffer = 1, output, metal_type = "device uint*")]
     pub pairs: TensorArg,
-    #[arg(buffer = 2, output)]
+    #[arg(buffer = 2, output, metal_type = "device uint*")]
     pub meta: TensorArg,
-    #[arg(buffer = 3)]
+    #[arg(buffer = 3, metal_type = "const device uint*")]
     pub tokens: TensorArg,
     pub params: RepetitionStateParams,
     #[arg(skip)]
@@ -60,13 +60,13 @@ impl RepetitionStateInit {
     dtype = U32
 )]
 pub struct RepetitionStateIngest {
-    #[arg(buffer = 0, output)]
+    #[arg(buffer = 0, output, metal_type = "device uint*")]
     pub ring: TensorArg,
-    #[arg(buffer = 1, output)]
+    #[arg(buffer = 1, output, metal_type = "device uint*")]
     pub pairs: TensorArg,
-    #[arg(buffer = 2, output)]
+    #[arg(buffer = 2, output, metal_type = "device uint*")]
     pub meta: TensorArg,
-    #[arg(buffer = 3)]
+    #[arg(buffer = 3, metal_type = "const device uint*")]
     pub tokens: TensorArg,
     pub params: RepetitionStateParams,
     #[arg(skip)]
@@ -102,13 +102,13 @@ impl RepetitionStateIngest {
     dtype = U32
 )]
 pub struct RepetitionStateUpdateFromToken {
-    #[arg(buffer = 0, output)]
+    #[arg(buffer = 0, output, metal_type = "device uint*")]
     pub ring: TensorArg,
-    #[arg(buffer = 1, output)]
+    #[arg(buffer = 1, output, metal_type = "device uint*")]
     pub pairs: TensorArg,
-    #[arg(buffer = 2, output)]
+    #[arg(buffer = 2, output, metal_type = "device uint*")]
     pub meta: TensorArg,
-    #[arg(buffer = 3)]
+    #[arg(buffer = 3, metal_type = "const device uint*")]
     pub token_buf: TensorArg,
     pub params: RepetitionStateParams,
     #[arg(skip)]

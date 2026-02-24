@@ -18,10 +18,16 @@ pub struct OnesParams {
 ///
 /// Fills output with 1.0. Vectorized: each thread handles 4 elements.
 #[derive(Kernel, KernelArgs, Clone, Default)]
-#[kernel(source = "tensor/ones.metal", function = "ones_kernel_f16", args = OnesParams, dispatch = vec_4, dtype = F16)]
+#[kernel(
+    source = "tensor/ones.metal",
+    function = "ones_kernel",
+    args = OnesParams,
+    dispatch = vec_4,
+    include_exprs("crate::policy::resolve_policy(self.output.dtype()).header()")
+)]
 pub struct Ones {
     /// Output tensor.
-    #[arg(output)]
+    #[arg(output, metal_type = "device OutputStorageT*")]
     pub output: TensorArg,
     /// Kernel parameters.
     pub params: OnesParams,

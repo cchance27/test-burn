@@ -16,11 +16,11 @@ float hash(uint2 seed) {
     return float(n & 0x0fffffffu) / float(0x10000000u);
 }
 
-/// Random Uniform kernel for half precision.
+/// Random Uniform kernel for runtime output storage type.
 ///
 /// Fills output with random values in [min, min + scale).
-kernel void random_uniform_kernel_f16(
-    device half* output [[buffer(0)]],
+kernel void random_uniform_kernel(
+    device OutputStorageT* output [[buffer(0)]],
     constant RandomUniformParams* params [[buffer(1)]],
     uint gid [[thread_position_in_grid]]
 ) {
@@ -31,5 +31,5 @@ kernel void random_uniform_kernel_f16(
     uint2 random_seed = uint2(gid, seed);
     float u = hash(random_seed);
     float value = minv + u * scale;
-    output[gid] = (half)value;
+    metallic_store_output(output, gid, metallic_to_accum(value));
 }

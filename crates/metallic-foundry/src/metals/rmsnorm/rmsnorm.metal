@@ -115,8 +115,8 @@ ALWAYS_INLINE float rmsnorm_compute_inv_rms(
         threadgroup float __rmsnorm_tg_reduction[33];                                          \
         run_rmsnorm_core<POLICY>(                                                              \
             (const device uchar*)INPUT,                                                        \
-            (device half*)OUTPUT,                                                              \
-            (const device half*)GAMMA,                                                         \
+            (device OutputStorageT*)OUTPUT,                                                    \
+            (const device GammaStorageT*)GAMMA,                                                \
             PARAMS,                                                                            \
             (const device uchar*)SCALE_BYTES,                                                  \
             GID,                                                                               \
@@ -133,8 +133,8 @@ ALWAYS_INLINE float rmsnorm_compute_inv_rms(
 template<typename Policy>
 void rmsnorm_apply(
     const device uchar *input,
-    device half *output,
-    const device half *gamma,
+    device OutputStorageT *output,
+    const device GammaStorageT *gamma,
     const device uchar *scale_bytes,
     const uint feature_dim,
     const uint row_idx,
@@ -166,8 +166,9 @@ void rmsnorm_apply(
         
         for (uint i = 0; i < valid_count; ++i) {
             float v = vals[i] * (float)scale + (float)affine;
-            float gamma_val = (float)gamma[k + i];
-            output[row_idx * feature_dim + k + i] = (half)(v * inv_rms * gamma_val);
+            const float gamma_val = (float)metallic_load_gamma(gamma, (ulong)(k + i));
+            const AccumT out_val = metallic_to_accum(v * inv_rms * gamma_val);
+            metallic_store_output(output, (ulong)(row_idx * feature_dim + k + i), out_val);
         }
     }
 }
@@ -179,8 +180,8 @@ void rmsnorm_apply(
 template<typename Policy>
 void run_rmsnorm_core(
     const device uchar *input,
-    device half *output,
-    const device half *gamma,
+    device OutputStorageT *output,
+    const device GammaStorageT *gamma,
     constant RmsNormParams *params,
     const device uchar *scale_bytes,
     uint3 gid,

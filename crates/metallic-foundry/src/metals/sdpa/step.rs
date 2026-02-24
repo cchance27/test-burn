@@ -118,12 +118,6 @@ impl CompiledStep for CompiledFlashAttentionStep {
             LAST_KV_SEQ_LEN.store(kv_seq_len, Ordering::Relaxed);
         }
 
-        if !self.step.kv_head_major {
-            return Err(MetalError::OperationNotSupported(
-                "FlashAttention only supports kv_head_major=true for now".into(),
-            ));
-        }
-
         let verbose_all = is_set(FoundryEnvVar::DebugSdpaVerboseAll);
         if debug_sdpa && verbose_sdpa && (verbose_all || m == 1) {
             tracing::info!(
@@ -294,29 +288,18 @@ impl CompiledStep for CompiledFlashAttentionStep {
                 return Ok(());
             }
 
-            return flashattention::step::run_flash_decode(
-                foundry,
-                q,
-                k,
-                v,
-                output,
-                n_heads,
-                head_dim,
-                kv_seq_len,
-                1,
-                self.step.kv_head_major,
-            );
+            flashattention::step::run_flash_decode(foundry, q, k, v, output, n_heads, head_dim, kv_seq_len, 1, self.step.kv_head_major)
         } else {
             // Prefill online path (M>1): currently only supports causal attention with the standard
             // invariant `query_offset + m == kv_seq_len`.
             if !self.step.causal {
-                return Err(MetalError::OperationNotSupported(
+                Err(MetalError::OperationNotSupported(
                     "FlashAttention prefill requires causal=true".into(),
-                ));
+                ))
             } else if q_offset_val + m != kv_seq_len {
-                return Err(MetalError::OperationNotSupported(format!(
+                Err(MetalError::OperationNotSupported(format!(
                     "FlashAttention prefill causal offset mismatch: query_offset({q_offset_val}) + m({m}) != kv_seq_len({kv_seq_len})"
-                )));
+                )))
             } else {
                 if debug_sdpa {
                     tracing::info!(target: "metallic_foundry::metals::sdpa", "FlashAttention -> online (prefill) m={}", m);
@@ -330,18 +313,7 @@ impl CompiledStep for CompiledFlashAttentionStep {
                     tracing::warn!("FlashAttention debug compare prefill triggered (skipping implementation for brevity)");
                 }
 
-                return flashattention::step::run_flash_decode(
-                    foundry,
-                    q,
-                    k,
-                    v,
-                    output,
-                    n_heads,
-                    head_dim,
-                    kv_seq_len,
-                    m,
-                    self.step.kv_head_major,
-                );
+                flashattention::step::run_flash_decode(foundry, q, k, v, output, n_heads, head_dim, kv_seq_len, m, self.step.kv_head_major)
             }
         }
     }

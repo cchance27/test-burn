@@ -3,13 +3,13 @@ using namespace metal;
 
 // KvRearrangeParams struct is injected by Foundry via struct_defs()
 
-/// KV Rearrange kernel for half precision.
+/// KV Rearrange kernel for runtime storage types.
 ///
 /// Rearranges QKV outputs from [batch*seq, kv_dim] to [batch*n_heads, seq, head_dim].
 /// Handles GQA (Grouped Query Attention) via group_size = n_heads / n_kv_heads.
-kernel void kv_rearrange_kernel_f16(
-    const device half* input [[buffer(0)]],
-    device half* output [[buffer(1)]],
+kernel void kv_rearrange_kernel(
+    const device InputStorageT* input [[buffer(0)]],
+    device OutputStorageT* output [[buffer(1)]],
     constant KvRearrangeParamsResolved* params [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
@@ -43,5 +43,5 @@ kernel void kv_rearrange_kernel_f16(
     uint src_row = b * seq + s;
     uint src_idx = src_row * row_stride + base_offset;
     
-    output[gid] = input[src_idx];
+    metallic_store_output(output, gid, metallic_to_accum(metallic_load_input(input, src_idx)));
 }
