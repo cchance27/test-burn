@@ -7,7 +7,7 @@ Foundry uses a centralized **Policy-Based Architecture** to handle mixed-precisi
 
 To achieve this, we use a Unified Policy model where a single Rust struct (e.g., `PolicyQ8`) implements two key traits: one for **Code Generation** (`MetalPolicy`) and one for **Runtime Loading / Binding** (`MetalPolicyRuntime`).
 
-## Policy Variant Groundwork (2026-02-22)
+## Policy Variant Runtime State (Updated)
 
 Foundry now has a centralized **policy variant resolver** (`crates/metallic-foundry/src/policy/variant.rs`) that describes, per source dtype:
 
@@ -16,19 +16,20 @@ Foundry now has a centralized **policy variant resolver** (`crates/metallic-foun
 - `compute_dtype` (target compute dtype metadata for future kernel selection)
 - `lossy_cast` (explicit precision-loss signal)
 
-This gives us one policy entrypoint for staged dtype migration.
+This provides one policy entrypoint for runtime dtype behavior across dense + quant tensors.
 
 Current behavior:
 
 - Default variant is `preserve:f16`.
-- Dense `F32` materializes as true `F32` via `PolicyF32Native` (`policy_f32.metal`).
-- Quantized storage stays source-quantized; compute target metadata is tracked via `QuantComputeVariant` (`F16`/`BF16`/`F32`) for selector rollout.
+- Dense `F32` materializes as true `F32` via `PolicyF32Native` (`policy_f32.metal`) when preserve mode is selected.
+- Dense `F32` can be capped to `F16` via dense variant selection (`dense:f16` or `dense=f16`).
+- Quantized storage stays source-quantized; quant compute target metadata is represented by `QuantComputeVariant` (`F16`/`BF16`/`F32`).
 
 Runtime selection:
 
 - `METALLIC_POLICY_VARIANT` controls the active variant used by `resolve_policy(...)`.
 - Supported values:
-  - `dense=f16` (cap dense tensors to `F16`; quant tensors unchanged)
+  - `dense:f16` or `dense=f16` (cap dense tensors to `F16`; quant tensors unchanged)
   - `preserve`
   - `preserve:f16` / `preserve:bf16` / `preserve:f32`
   - key/value form: `dense=preserve,quant=bf16`
@@ -36,24 +37,27 @@ Runtime selection:
 
 Important:
 
-- This is groundwork, not full end-to-end compute-dtype migration.
-- Kernels that currently hardcode `half` for non-policy tensors (for example some bias/norm paths) still need explicit variant support before preserve mode can be enabled globally.
+- F16/F32 runtime dtype migration is complete for current kernels.
+- Hot internal vector lanes use compile-time fast aliases (`FastScalarT`, `FastVec2T`, `FastVec4T`) so fast paths are not tied to raw `half` spellings.
+- BF16 is intentionally deferred to a future sprint (`docs/FUTURE_BF16.md`).
 - Fail-fast remains required for unsupported dtype/variant combinations.
-- GEMM runtime now resolves activation/output/bias/residual storage from tensor dtypes (including preserve-dense `F32`) and fails fast only when those tensors are quantized block formats.
+- GEMM/GEMV/Flash and fused paths resolve storage/compute/accum via runtime dtype contracts and fail fast on unsupported combinations.
 
-### Kernel dtype helper layer (groundwork)
+### Kernel dtype helper layer (runtime contract)
 
 To avoid per-kernel dtype branching, Foundry now has a shared Metal helper include:
 
 - `crates/metallic-foundry/src/metals/dtypes/runtime_types.metal`
 
-It defines storage/compute/accum aliases and helper APIs:
+It defines storage/compute/accum aliases, fast-lane aliases, and helper APIs:
 
 - `InputStorageT`, `OutputStorageT`, `BiasStorageT`, `ResidualStorageT`, `GammaStorageT`
 - `ComputeT`, `AccumT`
+- `FastScalarT`, `FastVec2T`, `FastVec4T`
 - `metallic_load_*`, `metallic_to_*`, `metallic_store_output`
+- indexed vs contiguous output helper variants (`metallic_store_output{2,4}` and `*_contig`)
 
-The first migrations use this helper in `gemv` output paths and `rmsnorm` standalone paths so kernel code can use common load/store/cast APIs instead of direct `half` casts.
+Kernels use this helper layer broadly (including FlashAttention, GEMV, QKV, SwiGLU, RoPE, softmax/materialized SDPA paths) so kernel code can stay policy/runtime-typed without per-kernel dtype branching.
 
 ## Core Concepts
 
