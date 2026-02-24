@@ -92,13 +92,6 @@ impl KvGeometry {
     pub fn from_cache_tensor(arch: &Architecture, tensor: &TensorArg, expected_capacity: usize) -> Result<Self, MetalError> {
         let base = Self::from_architecture(arch);
 
-        if tensor.dtype != crate::tensor::Dtype::F16 {
-            return Err(MetalError::InvalidShape(format!(
-                "KV cache tensor must be F16, got {:?}",
-                tensor.dtype
-            )));
-        }
-
         if tensor.dims.len() != 3 {
             return Err(MetalError::InvalidShape(format!(
                 "KV cache tensor must be rank-3 [heads, seq, head_dim], got {:?}",

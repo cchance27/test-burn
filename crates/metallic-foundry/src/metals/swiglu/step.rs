@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     Foundry, MetalError, metals::common::{
-        dtype_contract::require_uniform_dtypes, runtime::{require_non_empty_io, require_vector_len, resolve_batch, tail_dim}
+        policy_slots::bind_dual_policy_slots, runtime::{require_non_empty_io, require_vector_len, resolve_batch, tail_dim}
     }, spec::{CompiledStep, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, TensorArg}
 };
 
@@ -184,29 +184,22 @@ impl CompiledStep for CompiledFusedSwigluStep {
             require_vector_len("b_up", &b_up, n_dim)?;
         }
 
-        let policy_gate = crate::policy::resolve_policy(w_gate.dtype);
-        let loader_gate = policy_gate.loader_stage();
-        let args_gate = loader_gate.bind(fast_bindings, &self.wg_resolved);
-
-        let policy_up = crate::policy::resolve_policy(w_up.dtype);
-        let loader_up = policy_up.loader_stage();
-        let args_up = loader_up.bind(fast_bindings, &self.wu_resolved);
+        let policy_slots = bind_dual_policy_slots(fast_bindings, w_gate.dtype, &self.wg_resolved, w_up.dtype, &self.wu_resolved);
+        let same_policy = policy_slots.same_policy;
+        let policy_gate = policy_slots.a.policy.clone();
+        let policy_up = policy_slots.b.policy.clone();
         let batch = resolve_batch(bindings);
 
-        // Safety path for mixed quantized Gate/Up policies.
-        // A single fused kernel is specialized for one policy; running mixed tensors through it is incorrect.
-        require_uniform_dtypes("FusedSwiglu", &[("gate", w_gate.dtype), ("up", w_up.dtype)]).map_err(|_| {
-            MetalError::OperationFailed(format!(
-                "FusedSwiglu mixed-policy is unsupported (gate={:?}, up={:?}, batch={}, k_dim={}, n_dim={}).",
-                w_gate.dtype, w_up.dtype, batch, k_dim, n_dim
-            ))
-        })?;
-
-        let w_gate_arg = args_gate[0].clone();
-        let s_gate = if args_gate.len() > 1 { Some(args_gate[1].clone()) } else { None };
-        let w_up_arg = args_up[0].clone();
-        let s_up = if args_up.len() > 1 { Some(args_up[1].clone()) } else { None };
-        let weights_per_block = effective_weights_per_block(policy_gate.as_ref(), self.step.weights_per_block);
+        let w_gate_arg = policy_slots.a.weight();
+        let s_gate = policy_slots.a.scale();
+        let w_up_arg = policy_slots.b.weight();
+        let s_up = policy_slots.b.scale();
+        let weights_per_block_gate = effective_weights_per_block(policy_gate.as_ref(), self.step.weights_per_block);
+        let weights_per_block_up = if same_policy {
+            weights_per_block_gate
+        } else {
+            effective_weights_per_block(policy_up.as_ref(), self.step.weights_per_block)
+        };
 
         let args = super::ffn_step::FusedFfnArgs {
             w_gate: w_gate_arg,
@@ -217,7 +210,8 @@ impl CompiledStep for CompiledFusedSwigluStep {
             output: TensorArg::from_tensor(output),
             k_dim,
             n_dim,
-            weights_per_block,
+            weights_per_block_gate,
+            weights_per_block_up,
             gamma: TensorArg::from_tensor(gamma),
             b_gate,
             b_up,
@@ -226,7 +220,7 @@ impl CompiledStep for CompiledFusedSwigluStep {
             epsilon: resolve_rms_eps(bindings, Some(self.step.epsilon)),
         };
 
-        let kernel = get_fused_ffn_kernel(policy_gate);
+        let kernel = get_fused_ffn_kernel(policy_gate, policy_up);
         let dispatch = DispatchConfig::warp_per_row(n_dim, batch);
 
         foundry.run(&kernel.clone().bind_arc(args, dispatch))

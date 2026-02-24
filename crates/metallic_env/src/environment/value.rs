@@ -15,7 +15,7 @@
 //! assert_eq!(*_guard, Level::DEBUG);
 //! ```
 
-use std::{marker::PhantomData, ops::Deref};
+use std::{marker::PhantomData, ops::Deref, sync::OnceLock};
 
 use super::{EnvVar, Environment, guard::EnvVarGuard};
 
@@ -163,6 +163,28 @@ impl<T> TypedEnvVar<T> {
             }),
             None => Ok(None),
         }
+    }
+
+    /// Read the environment variable, panicking if a value is present but invalid.
+    ///
+    /// This is intended for fail-fast configuration paths where silently ignoring
+    /// malformed values is undesirable.
+    #[must_use]
+    pub fn get_valid(&self) -> Option<T> {
+        self.get()
+            .unwrap_or_else(|err| panic!("Invalid environment value for {}: {err}", self.key()))
+    }
+
+    /// Read and cache the first successfully-validated value for this descriptor.
+    ///
+    /// Once cached, subsequent reads are lock-free and do not observe later
+    /// process-environment mutations for the same variable.
+    #[must_use]
+    pub fn get_valid_cached(&self, cache: &'static OnceLock<Option<T>>) -> Option<T>
+    where
+        T: Clone,
+    {
+        cache.get_or_init(|| self.get_valid()).clone()
     }
 
     /// Set the environment variable to the provided typed value.

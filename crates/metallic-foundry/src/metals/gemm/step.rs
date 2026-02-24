@@ -136,23 +136,56 @@ pub struct GemmKernelKey {
     pub activation: Activation,
 }
 
-/// Build and compile a GEMM kernel for the given configuration.
-pub fn build_gemm_kernel(key: GemmKernelKey) -> CompiledCompoundKernel {
-    let name = format!(
+#[inline]
+fn tile_config_suffix(config: TileConfig) -> &'static str {
+    match config {
+        TileConfig::Default => "def",
+        TileConfig::SkinnyM => "skinny_m",
+        TileConfig::SkinnyN => "skinny_n",
+        TileConfig::HighPerformance => "perf",
+        TileConfig::Custom { .. } => "custom",
+    }
+}
+
+#[inline]
+fn transpose_suffix(transpose: bool) -> &'static str {
+    if transpose { "t" } else { "n" }
+}
+
+fn gemm_kernel_name(key: &GemmKernelKey) -> String {
+    format!(
         "gemm_v2_{}_{}_{}{}_{}",
         key.a_quant,
         key.b_quant,
-        if key.transpose_a { "t" } else { "n" },
-        if key.transpose_b { "t" } else { "n" },
-        match key.config {
-            TileConfig::Default => "def",
-            TileConfig::SkinnyM => "skinny_m",
-            TileConfig::SkinnyN => "skinny_n",
-            TileConfig::HighPerformance => "perf",
-            TileConfig::Custom { .. } => "custom",
-        }
-    );
+        transpose_suffix(key.transpose_a),
+        transpose_suffix(key.transpose_b),
+        tile_config_suffix(key.config)
+    )
+}
 
+fn gemm_variant_key(key: &GemmKernelKey) -> String {
+    let policy_tuple = format!("a={}_b={}", key.a_quant, key.b_quant);
+    let transpose = format!("{}{}", transpose_suffix(key.transpose_a), transpose_suffix(key.transpose_b));
+    let tile = tile_config_suffix(key.config);
+    let alpha_beta = if key.has_alpha_beta { "ab1" } else { "ab0" };
+    let bias = if key.has_bias { "bias1" } else { "bias0" };
+    format!(
+        "{}_{}_{}_{}_{}_act{}",
+        policy_tuple,
+        transpose,
+        tile,
+        alpha_beta,
+        bias,
+        key.activation.struct_name()
+    )
+}
+
+fn build_gemm_compound(
+    name: &str,
+    key: &GemmKernelKey,
+    a_policy: Arc<dyn MetalPolicy>,
+    b_policy: Arc<dyn MetalPolicy>,
+) -> CompiledCompoundKernel {
     let mut epilogue = GemmEpilogueStage::new();
     if key.has_alpha_beta {
         epilogue = epilogue.with_alpha_beta();
@@ -160,24 +193,23 @@ pub fn build_gemm_kernel(key: GemmKernelKey) -> CompiledCompoundKernel {
     if key.has_bias {
         epilogue = epilogue.with_bias();
     }
-
     epilogue = epilogue.with_activation(key.activation);
 
-    let a_policy = crate::policy::resolve_policy_by_name(&key.a_quant).expect("Unknown policy A");
-    let b_policy = crate::policy::resolve_policy_by_name(&key.b_quant).expect("Unknown policy B");
-
-    manual_output(&name)
+    manual_output(name)
         .prologue(TileLayoutStage::new(key.config, key.transpose_a, key.transpose_b))
-        // A loader uses a_quant policy
-        // Coerce Arc<dyn MetalPolicyRuntime> to Arc<dyn MetalPolicy> by creating new Arc or unsafe cast?
-        // Safe way: just use parameter. new() expects Arc<dyn MetalPolicy>.
-        // MetalPolicyRuntime inherits MetalPolicy.
-        .prologue(TileLoadAStage::new(a_policy.clone(), key.transpose_a))
-        // B loader uses b_quant policy (typically where quant happens)
-        .prologue(TileLoadBStage::new(b_policy.clone(), key.transpose_b))
+        .prologue(TileLoadAStage::new(a_policy, key.transpose_a))
+        .prologue(TileLoadBStage::new(b_policy, key.transpose_b))
         .main(MmaLoopStage::new().with_k_aligned(false))
         .epilogue(epilogue)
         .compile()
+}
+
+/// Build and compile a GEMM kernel for the given configuration.
+pub fn build_gemm_kernel(key: GemmKernelKey) -> CompiledCompoundKernel {
+    let name = gemm_kernel_name(&key);
+    let a_policy = crate::policy::resolve_policy_by_name(&key.a_quant).expect("Unknown policy A");
+    let b_policy = crate::policy::resolve_policy_by_name(&key.b_quant).expect("Unknown policy B");
+    build_gemm_compound(&name, &key, a_policy, b_policy)
 }
 
 /// Get a cached GEMM kernel for the given configuration.
@@ -203,7 +235,7 @@ pub fn get_gemm_kernel(
         activation,
     };
 
-    let variant = format!("{:?}", gemm_key);
+    let variant = gemm_variant_key(&gemm_key);
     get_or_build_compound_kernel("gemm", variant, || build_gemm_kernel(gemm_key))
 }
 

@@ -423,23 +423,26 @@ fn run_flash_decode_impl(
         )));
     }
 
+    // Decode kernels currently assume head-major KV-cache addressing:
+    // k/v base pointers are per-head and token stepping happens via stride_*_s.
+    // Token-major decode (`kv_head_major=false`) is not wired/parity-tested yet.
+    if !kv_head_major {
+        return Err(MetalError::OperationNotSupported(
+            "Flash decode only supports kv_head_major=true for now".into(),
+        ));
+    }
+
     let batch = 1u32;
     let capacity = k.dims().get(1).copied().unwrap_or(kv_seq_len as usize) as u32;
     let q_seq_len_decode = q_seq_len.max(1);
-    let (q_stride_b, q_stride_h) = if kv_head_major {
-        (n_heads * q_seq_len_decode * head_dim, q_seq_len_decode * head_dim)
-    } else {
-        (q_seq_len_decode * n_heads * head_dim, head_dim)
-    };
+    let (q_stride_b, q_stride_h) = (n_heads * q_seq_len_decode * head_dim, q_seq_len_decode * head_dim);
     let n_kv_heads = infer_n_kv_heads(k, kv_head_major, head_dim).max(1);
-    let cache_heads = if kv_head_major { n_kv_heads } else { n_heads };
+    let cache_heads = n_kv_heads;
     let group_size = (n_heads / n_kv_heads).max(1);
-    let kv_path = if kv_head_major && n_kv_heads < n_heads {
+    let kv_path = if n_kv_heads < n_heads {
         "compact_gqa"
-    } else if kv_head_major {
-        "expanded_heads_or_mha"
     } else {
-        "token_major"
+        "expanded_heads_or_mha"
     };
     tracing::trace!(
         kv_path,

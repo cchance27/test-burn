@@ -1,15 +1,19 @@
+use std::sync::OnceLock;
+
 use metallic_env::{FA_PREFILL_SPLIT_K, FA_PREFILL_WARPS};
 
 use crate::types::TensorArg;
 
 #[inline]
 pub(super) fn prefill_warps_env() -> Option<u32> {
-    FA_PREFILL_WARPS.get().ok().flatten()
+    static OVERRIDE: OnceLock<Option<u32>> = OnceLock::new();
+    FA_PREFILL_WARPS.get_valid_cached(&OVERRIDE)
 }
 
 #[inline]
 pub(super) fn prefill_split_k_env() -> Option<u32> {
-    FA_PREFILL_SPLIT_K.get().ok().flatten()
+    static OVERRIDE: OnceLock<Option<u32>> = OnceLock::new();
+    FA_PREFILL_SPLIT_K.get_valid_cached(&OVERRIDE)
 }
 
 #[inline]

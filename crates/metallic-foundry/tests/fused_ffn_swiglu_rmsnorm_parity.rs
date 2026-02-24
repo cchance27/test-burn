@@ -256,8 +256,12 @@ fn test_fused_ffn_swiglu_rmsnorm_q8_parity_m2() -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn test_fused_ffn_swiglu_rmsnorm_mixed_policy_fails_fast() -> Result<(), Box<dyn std::error::Error>> {
-    let mut foundry = Foundry::new()?;
+fn test_fused_ffn_swiglu_rmsnorm_mixed_policy_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let mut foundry = match Foundry::new() {
+        Ok(foundry) => foundry,
+        Err(metallic_foundry::MetalError::DeviceNotFound) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
     let mut bindings = TensorBindings::new();
 
     let m: usize = 1;
@@ -270,7 +274,7 @@ fn test_fused_ffn_swiglu_rmsnorm_mixed_policy_fails_fast() -> Result<(), Box<dyn
     let b_gate_f16 = vec![f16::from_f32(0.0); n_dim];
     let b_up_f16 = vec![f16::from_f32(0.0); n_dim];
 
-    // Gate is quantized Q8, Up is dense F16 -> mixed-policy should hard-fail.
+    // Gate is quantized Q8, Up is dense F16 -> mixed-policy fused path should run.
     let w_gate_q8 = vec![0u8; n_dim * k_dim];
     let s_gate_bytes = vec![0u8; n_dim * 2];
     let w_up_f16 = vec![f16::from_f32(0.1); n_dim * k_dim];
@@ -308,11 +312,11 @@ fn test_fused_ffn_swiglu_rmsnorm_mixed_policy_fails_fast() -> Result<(), Box<dyn
         epsilon: Some(1e-6),
     };
 
-    let err = fused
-        .execute(&mut foundry, &mut bindings)
-        .expect_err("mixed-policy fused FFN SwiGLU should fail fast");
-    let msg = err.to_string();
-    assert!(msg.contains("mixed-policy is unsupported"), "unexpected error: {msg}");
+    fused.execute(&mut foundry, &mut bindings)?;
+    foundry.synchronize()?;
+
+    let out: Vec<f16> = output.to_vec(&foundry);
+    assert!(out.iter().all(|v| v.to_f32().is_finite()));
     Ok(())
 }
 

@@ -157,8 +157,12 @@ fn test_fused_qkv_f32_preserve_parity_m1() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
-fn test_fused_qkv_mixed_policy_fails_fast() -> Result<(), Box<dyn std::error::Error>> {
-    let mut foundry = Foundry::new()?;
+fn test_fused_qkv_mixed_policy_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let mut foundry = match Foundry::new() {
+        Ok(foundry) => foundry,
+        Err(metallic_foundry::MetalError::DeviceNotFound) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
     let mut bindings = TensorBindings::new();
 
     let m: usize = 1;
@@ -176,6 +180,7 @@ fn test_fused_qkv_mixed_policy_fails_fast() -> Result<(), Box<dyn std::error::Er
     )?;
     let gamma = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![k_dim], TensorInit::CopyFrom(&vec![f16::from_f32(1.0); k_dim]))?;
     let w_q = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![n_dim * k_dim], TensorInit::CopyFrom(&vec![0u8; n_dim * k_dim]))?;
+    let s_q = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![n_dim * 2], TensorInit::CopyFrom(&vec![0u8; n_dim * 2]))?;
     let w_k = FoundryTensor::<F16, Pooled>::new(
         &mut foundry,
         vec![n_kv * k_dim],
@@ -193,6 +198,7 @@ fn test_fused_qkv_mixed_policy_fails_fast() -> Result<(), Box<dyn std::error::Er
     bindings.insert("hidden".to_string(), metallic_foundry::types::TensorArg::from_tensor(&hidden));
     bindings.insert("gamma".to_string(), metallic_foundry::types::TensorArg::from_tensor(&gamma));
     bindings.insert("w_q".to_string(), metallic_foundry::types::TensorArg::from_tensor(&w_q));
+    bindings.insert("w_q_scales".to_string(), metallic_foundry::types::TensorArg::from_tensor(&s_q));
     bindings.insert("w_k".to_string(), metallic_foundry::types::TensorArg::from_tensor(&w_k));
     bindings.insert("w_v".to_string(), metallic_foundry::types::TensorArg::from_tensor(&w_v));
     bindings.insert("q".to_string(), metallic_foundry::types::TensorArg::from_tensor(&q_out));
@@ -222,10 +228,14 @@ fn test_fused_qkv_mixed_policy_fails_fast() -> Result<(), Box<dyn std::error::Er
         strategy: GemvStrategy::Canonical,
     };
 
-    let err = fused
-        .execute(&mut foundry, &mut bindings)
-        .expect_err("mixed-policy fused qkv should fail fast");
-    let msg = err.to_string();
-    assert!(msg.contains("mixed-policy is unsupported"), "unexpected error: {msg}");
+    fused.execute(&mut foundry, &mut bindings)?;
+    foundry.synchronize()?;
+
+    let out_q: Vec<f16> = q_out.to_vec(&foundry);
+    let out_k: Vec<f16> = k_out.to_vec(&foundry);
+    let out_v: Vec<f16> = v_out.to_vec(&foundry);
+    assert!(out_q.iter().all(|v| v.to_f32().is_finite()));
+    assert!(out_k.iter().all(|v| v.to_f32().is_finite()));
+    assert!(out_v.iter().all(|v| v.to_f32().is_finite()));
     Ok(())
 }

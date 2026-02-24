@@ -95,7 +95,7 @@ struct KvPrefixTensorSnapshot {
     buffer: crate::types::MetalBuffer,
     dtype: crate::tensor::Dtype,
     heads: usize,
-    head_dim: usize,
+    payload_elems: usize,
 }
 
 #[derive(Debug)]

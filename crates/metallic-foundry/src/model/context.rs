@@ -5,7 +5,9 @@
 use metallic_env::{FoundryEnvVar, KV_MEMORY_BUDGET_MB, MAX_CONTEXT_LEN, is_set};
 use sysinfo::System;
 
-use crate::{model::KvGeometry, spec::Architecture, types::Device};
+use crate::{
+    model::KvGeometry, spec::{Architecture, StorageClass, TensorBindings}, tensor::dtypes::DtypeExt, types::Device
+};
 
 /// Configuration for context length and buffer management.
 #[derive(Debug)]
@@ -159,11 +161,14 @@ impl ContextConfig {
             }
         };
 
-        // KV bytes per token are layout-dependent:
-        // Expanded cache: 2(K+V) * n_layers * n_heads * head_dim * 2(F16 bytes)
-        // Compact GQA cache: 2(K+V) * n_layers * n_kv_heads * head_dim * 2(F16 bytes)
+        // Prefer exact KV byte sizing from prepare.tensors (handles F32, I8+scales, etc.).
+        // Fall back to the legacy dense-F16 estimator when prepare metadata is insufficient.
         let kv = KvGeometry::from_architecture(arch);
-        let per_token_bytes = kv.per_token_bytes_f16(arch.n_layers());
+        let (per_token_bytes, estimate_source) = if let Some(est) = Self::estimate_kv_memory_from_prepare(arch, 1) {
+            (est.kv_cache_bytes, "prepare")
+        } else {
+            (kv.per_token_bytes_f16(arch.n_layers()), "fallback_f16_dense")
+        };
         tracing::debug!(
             layout = ?kv.layout,
             n_heads = kv.n_heads,
@@ -173,6 +178,7 @@ impl ContextConfig {
             cache_heads = kv.cache_heads(),
             budget_mb = budget_bytes / 1024 / 1024,
             per_token_bytes,
+            estimate_source,
             "Applying KV memory budget"
         );
 
@@ -217,6 +223,18 @@ impl ContextConfig {
 
     /// Estimate the memory required for the KV cache.
     pub fn estimate_kv_memory(arch: &Architecture, context_len: usize) -> MemoryEstimate {
+        if let Some(estimate) = Self::estimate_kv_memory_from_prepare(arch, context_len) {
+            tracing::trace!(
+                source = "prepare",
+                n_layers = arch.n_layers(),
+                context_len,
+                per_layer_bytes = estimate.per_layer_bytes,
+                total_bytes = estimate.kv_cache_bytes,
+                "Estimated KV memory"
+            );
+            return estimate;
+        }
+
         let kv = KvGeometry::from_architecture(arch);
         // 2 (K+V) * cache_heads(layout) * context_len * head_dim * 2 (F16 bytes)
         let per_layer_bytes = 2 * kv.cache_heads() * context_len * kv.head_dim * 2;
@@ -235,6 +253,108 @@ impl ContextConfig {
             kv_cache_bytes: total,
             per_layer_bytes,
         }
+    }
+
+    fn estimate_kv_memory_from_prepare(arch: &Architecture, context_len: usize) -> Option<MemoryEstimate> {
+        if arch.prepare.tensors.is_empty() {
+            return None;
+        }
+
+        fn eval_expr(expr: &crate::spec::IntExpr, bindings: &TensorBindings) -> Option<usize> {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| expr.eval(bindings))).ok()
+        }
+
+        fn resolve_repeat_count(bindings: &TensorBindings, raw: &str) -> Option<usize> {
+            if let Ok(v) = raw.parse::<usize>() {
+                return Some(v);
+            }
+            if let Some(v) = bindings.get_int_global(raw) {
+                return Some(v);
+            }
+            bindings.get_var(raw).and_then(|v| v.parse::<usize>().ok())
+        }
+
+        let mut bindings = TensorBindings::new();
+        for (name, value) in &arch.params {
+            if let Some(v) = value.as_usize() {
+                bindings.set_int_global(name, v);
+                bindings.set_global(name, v.to_string());
+            }
+        }
+        for (name, value) in &arch.prepare.dynamics {
+            bindings.set_int_global(name, *value);
+            bindings.set_global(name, value.to_string());
+        }
+        let context_len = context_len.max(1);
+        bindings.set_int_global("max_seq_len", context_len);
+        bindings.set_global("max_seq_len", context_len.to_string());
+
+        for (name, expr) in &arch.prepare.globals {
+            let value = eval_expr(expr, &bindings)?;
+            bindings.set_int_global(name, value);
+            bindings.set_global(name, value.to_string());
+        }
+        for derived in &arch.prepare.derived_globals {
+            let value = eval_expr(&derived.expr, &bindings)?;
+            bindings.set_int_global(&derived.name, value);
+            bindings.set_global(&derived.name, value.to_string());
+        }
+
+        let mut total_bytes = 0usize;
+        for tensor in &arch.prepare.tensors {
+            if tensor.storage != StorageClass::KvCache {
+                continue;
+            }
+
+            let repeat_count = tensor
+                .repeat
+                .as_ref()
+                .map(|repeat| resolve_repeat_count(&bindings, &repeat.count))
+                .unwrap_or(Some(1))?;
+
+            if repeat_count == 0 {
+                continue;
+            }
+
+            if let Some(repeat) = &tensor.repeat {
+                bindings.push_scope();
+                for i in 0..repeat_count {
+                    bindings.set_var(&repeat.var, i.to_string());
+                    let dims = tensor
+                        .dims
+                        .iter()
+                        .map(|expr| eval_expr(expr, &bindings))
+                        .collect::<Option<Vec<_>>>()?;
+                    if dims.is_empty() || dims.contains(&0) {
+                        return None;
+                    }
+                    let bytes = tensor.dtype.layout_size(&dims);
+                    total_bytes = total_bytes.checked_add(bytes)?;
+                }
+                bindings.pop_scope();
+            } else {
+                let dims = tensor
+                    .dims
+                    .iter()
+                    .map(|expr| eval_expr(expr, &bindings))
+                    .collect::<Option<Vec<_>>>()?;
+                if dims.is_empty() || dims.contains(&0) {
+                    return None;
+                }
+                let bytes = tensor.dtype.layout_size(&dims);
+                total_bytes = total_bytes.checked_add(bytes)?;
+            }
+        }
+
+        if total_bytes == 0 {
+            return None;
+        }
+
+        let n_layers = arch.n_layers().max(1);
+        Some(MemoryEstimate {
+            kv_cache_bytes: total_bytes,
+            per_layer_bytes: total_bytes / n_layers,
+        })
     }
 
     /// Get the recommended maximum working set size for the Metal device.

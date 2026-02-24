@@ -43,35 +43,53 @@ impl CompiledModel {
         Ok(names)
     }
 
-    fn kv_tensor_copy_shape(arg: &TensorArg, name: &str, prefix_len: usize) -> Result<(usize, usize, usize, usize), MetalError> {
-        if arg.dims.len() != 3 {
+    fn kv_tensor_copy_layout(arg: &TensorArg, name: &str) -> Result<(usize, usize, usize, usize), MetalError> {
+        if arg.dims.len() < 3 {
             return Err(MetalError::InvalidShape(format!(
-                "KV tensor '{name}' must be rank-3 for prefix caching, got dims={:?}",
+                "KV tensor '{name}' must be rank>=3 [heads, seq, ...], got dims={:?}",
                 arg.dims
             )));
         }
+        if arg.strides.len() != arg.dims.len() {
+            return Err(MetalError::InvalidShape(format!(
+                "KV tensor '{name}' has invalid strides {:?} for dims {:?}",
+                arg.strides, arg.dims
+            )));
+        }
+
         let heads = arg.dims[0];
         let capacity = arg.dims[1];
-        let head_dim = arg.dims[2];
+        let payload_elems = arg.dims[2..]
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .ok_or_else(|| MetalError::InvalidShape(format!("KV tensor '{name}' payload size overflow")))?;
+        if payload_elems == 0 {
+            return Err(MetalError::InvalidShape(format!(
+                "KV tensor '{name}' has zero-sized payload dims {:?}",
+                &arg.dims[2..]
+            )));
+        }
+
+        // Prefix snapshot/restore and growth preservation assume contiguous [heads, seq, ...] layout.
+        let expected = crate::tensor::compute_strides(&arg.dims);
+        if arg.strides.as_slice() != expected.as_slice() {
+            return Err(MetalError::InvalidShape(format!(
+                "KV tensor '{name}' has unsupported strides {:?}, expected {:?}",
+                arg.strides, expected
+            )));
+        }
+        Ok((heads, capacity, payload_elems, arg.dtype.size_bytes()))
+    }
+
+    fn kv_tensor_copy_shape(arg: &TensorArg, name: &str, prefix_len: usize) -> Result<(usize, usize, usize, usize), MetalError> {
+        let (heads, capacity, payload_elems, elem_bytes) = Self::kv_tensor_copy_layout(arg, name)?;
         if prefix_len > capacity {
             return Err(MetalError::InvalidShape(format!(
                 "KV tensor '{name}' prefix_len {} exceeds capacity {}",
                 prefix_len, capacity
             )));
         }
-
-        // Prefix snapshot/restore assumes contiguous [heads, seq, dim] layout.
-        if arg.strides.len() == 3 {
-            let expected = [capacity.saturating_mul(head_dim), head_dim, 1];
-            if arg.strides[0] != expected[0] || arg.strides[1] != expected[1] || arg.strides[2] != expected[2] {
-                return Err(MetalError::InvalidShape(format!(
-                    "KV tensor '{name}' has unsupported strides {:?}, expected {:?}",
-                    arg.strides, expected
-                )));
-            }
-        }
-
-        Ok((heads, capacity, head_dim, arg.dtype.size_bytes()))
+        Ok((heads, capacity, payload_elems, elem_bytes))
     }
 
     fn capture_kv_prefix_snapshot(
@@ -107,9 +125,9 @@ impl CompiledModel {
         let copy_result = (|| -> Result<(), MetalError> {
             for name in kv_names {
                 let live = session.bindings.get(&name)?;
-                let (heads, capacity, head_dim, elem_bytes) = Self::kv_tensor_copy_shape(&live, &name, prefix_len)?;
+                let (heads, capacity, payload_elems, elem_bytes) = Self::kv_tensor_copy_shape(&live, &name, prefix_len)?;
                 let bytes_per_head = prefix_len
-                    .checked_mul(head_dim)
+                    .checked_mul(payload_elems)
                     .and_then(|v| v.checked_mul(elem_bytes))
                     .ok_or_else(|| MetalError::InvalidShape(format!("KV tensor '{name}' snapshot size overflow")))?;
                 let snapshot_bytes = heads
@@ -137,7 +155,7 @@ impl CompiledModel {
                 for h in 0..heads {
                     let src_head_offset = h
                         .checked_mul(capacity)
-                        .and_then(|v| v.checked_mul(head_dim))
+                        .and_then(|v| v.checked_mul(payload_elems))
                         .and_then(|v| v.checked_mul(elem_bytes))
                         .ok_or_else(|| MetalError::InvalidShape(format!("KV tensor '{name}' source offset overflow")))?;
                     let dst_head_offset = h
@@ -158,7 +176,7 @@ impl CompiledModel {
                     buffer: snapshot_buffer,
                     dtype: live.dtype,
                     heads,
-                    head_dim,
+                    payload_elems,
                 });
             }
             Ok(())
@@ -216,7 +234,7 @@ impl CompiledModel {
         let copy_result = (|| -> Result<(), MetalError> {
             for saved in &snapshot.kv_tensors {
                 let live = session.bindings.get(&saved.name)?;
-                let (heads, capacity, head_dim, elem_bytes) = Self::kv_tensor_copy_shape(&live, &saved.name, snapshot.prefix_len)?;
+                let (heads, capacity, payload_elems, elem_bytes) = Self::kv_tensor_copy_shape(&live, &saved.name, snapshot.prefix_len)?;
 
                 if live.dtype != saved.dtype {
                     return Err(MetalError::InvalidShape(format!(
@@ -224,16 +242,16 @@ impl CompiledModel {
                         saved.name, live.dtype, saved.dtype
                     )));
                 }
-                if heads != saved.heads || head_dim != saved.head_dim {
+                if heads != saved.heads || payload_elems != saved.payload_elems {
                     return Err(MetalError::InvalidShape(format!(
-                        "KV tensor '{}' shape mismatch during snapshot restore: live=[{}, {}, {}], snapshot=[{}, {}, {}]",
-                        saved.name, heads, capacity, head_dim, saved.heads, snapshot.prefix_len, saved.head_dim
+                        "KV tensor '{}' shape mismatch during snapshot restore: live=[{}, {}, payload={}], snapshot=[{}, {}, payload={}]",
+                        saved.name, heads, capacity, payload_elems, saved.heads, snapshot.prefix_len, saved.payload_elems
                     )));
                 }
 
                 let bytes_per_head = snapshot
                     .prefix_len
-                    .checked_mul(head_dim)
+                    .checked_mul(payload_elems)
                     .and_then(|v| v.checked_mul(elem_bytes))
                     .ok_or_else(|| MetalError::InvalidShape(format!("KV tensor '{}' restore size overflow", saved.name)))?;
                 if bytes_per_head == 0 {
@@ -251,7 +269,7 @@ impl CompiledModel {
                         .ok_or_else(|| MetalError::InvalidShape(format!("KV tensor '{}' source offset overflow", saved.name)))?;
                     let dst_head_offset = h
                         .checked_mul(capacity)
-                        .and_then(|v| v.checked_mul(head_dim))
+                        .and_then(|v| v.checked_mul(payload_elems))
                         .and_then(|v| v.checked_mul(elem_bytes))
                         .ok_or_else(|| MetalError::InvalidShape(format!("KV tensor '{}' destination offset overflow", saved.name)))?;
 
@@ -716,46 +734,52 @@ impl CompiledModel {
             if current_pos == 0 {
                 return Ok(());
             }
-            if old.dtype != crate::tensor::Dtype::F16 || new.dtype != crate::tensor::Dtype::F16 {
+
+            if old.dtype != new.dtype {
                 return Err(MetalError::InvalidShape(format!(
-                    "KV cache '{name}' must be F16 for growth preservation"
+                    "KV cache '{name}' dtype changed during growth: old={:?}, new={:?}",
+                    old.dtype, new.dtype
                 )));
             }
 
-            let old_geom = KvGeometry::from_cache_tensor(arch, old, old_capacity)?;
-            let new_geom = KvGeometry::from_cache_tensor(arch, new, new_capacity)?;
+            let (old_heads, old_cap, old_payload_elems, old_elem_bytes) = Self::kv_tensor_copy_layout(old, name)?;
+            let (new_heads, new_cap, new_payload_elems, new_elem_bytes) = Self::kv_tensor_copy_layout(new, name)?;
             tracing::trace!(
                 tensor = %name,
                 old_dims = ?old.dims,
                 new_dims = ?new.dims,
-                old_layout = ?old_geom.layout,
-                new_layout = ?new_geom.layout,
-                old_cache_heads = old_geom.cache_heads(),
-                new_cache_heads = new_geom.cache_heads(),
+                old_heads,
+                new_heads,
+                old_payload_elems,
+                new_payload_elems,
+                old_elem_bytes,
+                new_elem_bytes,
                 old_capacity,
                 new_capacity,
                 "Preserving KV cache tensor across growth"
             );
-            if old_geom.layout != new_geom.layout {
+            if old_cap != old_capacity || new_cap != new_capacity {
                 return Err(MetalError::InvalidShape(format!(
-                    "KV cache '{name}' layout changed during growth: old={:?}, new={:?}",
-                    old_geom.layout, new_geom.layout
+                    "KV cache '{name}' capacity mismatch during growth: old_cap={} expected_old_cap={} new_cap={} expected_new_cap={}",
+                    old_cap, old_capacity, new_cap, new_capacity
                 )));
             }
-            if old_geom.cache_heads() != old.dims[0] || old_geom.head_dim != old.dims[2] {
+            if old_heads != new_heads {
                 return Err(MetalError::InvalidShape(format!(
-                    "KV cache '{name}' old dims mismatch: got {:?}, inferred heads={} head_dim={}",
-                    old.dims,
-                    old_geom.cache_heads(),
-                    old_geom.head_dim
+                    "KV cache '{name}' heads changed during growth: old_heads={} new_heads={}",
+                    old_heads, new_heads
                 )));
             }
-            if new_geom.cache_heads() != new.dims[0] || new_geom.head_dim != new.dims[2] {
+            if old_payload_elems != new_payload_elems || old_elem_bytes != new_elem_bytes {
                 return Err(MetalError::InvalidShape(format!(
-                    "KV cache '{name}' new dims mismatch: got {:?}, inferred heads={} head_dim={}",
-                    new.dims,
-                    new_geom.cache_heads(),
-                    new_geom.head_dim
+                    "KV cache '{name}' payload changed during growth: old_payload={} old_elem_bytes={} new_payload={} new_elem_bytes={}",
+                    old_payload_elems, old_elem_bytes, new_payload_elems, new_elem_bytes
+                )));
+            }
+            if current_pos > old_cap {
+                return Err(MetalError::InvalidShape(format!(
+                    "KV cache '{name}' current_pos {} exceeds old capacity {} during growth",
+                    current_pos, old_cap
                 )));
             }
 
@@ -768,10 +792,29 @@ impl CompiledModel {
                 .as_ref()
                 .ok_or_else(|| MetalError::InvalidOperation(format!("{name} buffer missing after growth")))?;
 
-            let copy_size = current_pos * old_geom.head_dim * 2;
-            for h in 0..old_geom.cache_heads() {
-                let old_head_offset = h * old_capacity * old_geom.head_dim * 2;
-                let new_head_offset = h * new_capacity * old_geom.head_dim * 2;
+            let bytes_per_token = old_payload_elems
+                .checked_mul(old_elem_bytes)
+                .ok_or_else(|| MetalError::InvalidShape(format!("KV cache '{name}' bytes_per_token overflow")))?;
+            let bytes_per_old_head = old_cap
+                .checked_mul(bytes_per_token)
+                .ok_or_else(|| MetalError::InvalidShape(format!("KV cache '{name}' old head span overflow")))?;
+            let bytes_per_new_head = new_cap
+                .checked_mul(bytes_per_token)
+                .ok_or_else(|| MetalError::InvalidShape(format!("KV cache '{name}' new head span overflow")))?;
+            let copy_size = current_pos
+                .checked_mul(bytes_per_token)
+                .ok_or_else(|| MetalError::InvalidShape(format!("KV cache '{name}' growth copy size overflow")))?;
+            if copy_size == 0 {
+                return Ok(());
+            }
+
+            for h in 0..old_heads {
+                let old_head_offset = h
+                    .checked_mul(bytes_per_old_head)
+                    .ok_or_else(|| MetalError::InvalidShape(format!("KV cache '{name}' old head offset overflow")))?;
+                let new_head_offset = h
+                    .checked_mul(bytes_per_new_head)
+                    .ok_or_else(|| MetalError::InvalidShape(format!("KV cache '{name}' new head offset overflow")))?;
                 foundry.blit_copy(
                     old_buf,
                     old.offset + old_head_offset,
@@ -782,7 +825,7 @@ impl CompiledModel {
             }
             tracing::trace!(
                 tensor = %name,
-                copied_heads = old_geom.cache_heads(),
+                copied_heads = old_heads,
                 copied_tokens = current_pos,
                 copied_bytes_per_head = copy_size,
                 "Preserved KV cache contents for grown tensor"

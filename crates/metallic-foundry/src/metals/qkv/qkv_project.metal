@@ -20,7 +20,18 @@ ALWAYS_INLINE QkvFastVec4T qkv_load_gamma_half4(const device GammaStorageT* gamm
 #endif
 }
 
-template<typename Policy, uint vec_width, bool has_norm>
+ALWAYS_INLINE ulong qkv_weight_index(
+    const uint row,
+    const uint k,
+    const uint n,
+    const uint weights_per_block
+) {
+    return ((ulong)(k % weights_per_block))
+        + ((ulong)weights_per_block)
+            * (((ulong)row) + ((ulong)(k / weights_per_block)) * ((ulong)n)); // INDEX64_OK
+}
+
+template<typename PolicyQ, typename PolicyK, typename PolicyV, uint vec_width, bool has_norm>
 ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
     const device uchar* w_q,
     const device uchar* s_q,
@@ -32,23 +43,32 @@ ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
     constant uint& k_dim,
     constant uint& n_dim,
     constant uint& n_kv,
-    constant uint& weights_per_block,
+    constant uint& weights_per_block_q,
+    constant uint& weights_per_block_k,
+    constant uint& weights_per_block_v,
     const device GammaStorageT* gamma,
     float inv_rms,
     uint lane_id,
     uint row_idx,
     uint batch_idx
 ) {
-    const uint blocks_per_k = (k_dim + weights_per_block - 1) / weights_per_block;
+    const uint blocks_per_k_q = (k_dim + weights_per_block_q - 1) / weights_per_block_q;
+    const uint blocks_per_k_k = (k_dim + weights_per_block_k - 1) / weights_per_block_k;
+    const uint blocks_per_k_v = (k_dim + weights_per_block_v - 1) / weights_per_block_v;
     float acc_q = 0.0f;
     float acc_k = 0.0f;
     float acc_v = 0.0f;
     uint k_base = 0;
 
-    const ulong scale_stride = (ulong)row_idx * blocks_per_k * Policy::SCALE_BYTES; // INDEX64_OK
-    const device uchar* row_s_q = s_q + scale_stride;
-    const device uchar* row_s_k = s_k + scale_stride;
-    const device uchar* row_s_v = s_v + scale_stride;
+    const ulong scale_stride_q = (ulong)row_idx * blocks_per_k_q * PolicyQ::SCALE_BYTES; // INDEX64_OK
+    const ulong scale_stride_k = (ulong)row_idx * blocks_per_k_k * PolicyK::SCALE_BYTES; // INDEX64_OK
+    const ulong scale_stride_v = (ulong)row_idx * blocks_per_k_v * PolicyV::SCALE_BYTES; // INDEX64_OK
+    const device uchar* row_s_q = s_q + scale_stride_q;
+    const device uchar* row_s_k = (row_idx < n_kv) ? (s_k + scale_stride_k) : s_k;
+    const device uchar* row_s_v = (row_idx < n_kv) ? (s_v + scale_stride_v) : s_v;
+    const bool same_wpb_qk = (weights_per_block_q == weights_per_block_k);
+    const bool same_wpb_qv = (weights_per_block_q == weights_per_block_v);
+    const bool same_wpb_kv = (weights_per_block_k == weights_per_block_v);
 #if METALLIC_FASTPATH_INPUT_HALF
     const device QkvFastScalarT* input_half = (const device QkvFastScalarT*)input;
 #endif
@@ -113,18 +133,20 @@ ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
 
         const float4 xv_f32_lo = float4(xv_lo);
         const float4 xv_f32_hi = float4(xv_hi);
-        const uint block_off = k / weights_per_block;
+        const uint block_off_q = k / weights_per_block_q;
+        const uint block_off_k = same_wpb_qk ? block_off_q : (k / weights_per_block_k);
+        const uint block_off_v = same_wpb_qv ? block_off_q : (k / weights_per_block_v);
 
-        const float s_q_val = (float)Policy::load_scale(row_s_q, block_off);
-        const float s_k_val = (row_idx < n_kv) ? (float)Policy::load_scale(row_s_k, block_off) : 0.0f;
-        const float s_v_val = (row_idx < n_kv) ? (float)Policy::load_scale(row_s_v, block_off) : 0.0f;
-        const float a_q_val = (Policy::HAS_AFFINE ? (float)Policy::load_affine(row_s_q, block_off) : 0.0f);
-        const float a_k_val = (row_idx < n_kv) ? (Policy::HAS_AFFINE ? (float)Policy::load_affine(row_s_k, block_off) : 0.0f) : 0.0f;
-        const float a_v_val = (row_idx < n_kv) ? (Policy::HAS_AFFINE ? (float)Policy::load_affine(row_s_v, block_off) : 0.0f) : 0.0f;
+        const float s_q_val = (float)PolicyQ::load_scale(row_s_q, block_off_q);
+        const float s_k_val = (row_idx < n_kv) ? (float)PolicyK::load_scale(row_s_k, block_off_k) : 0.0f;
+        const float s_v_val = (row_idx < n_kv) ? (float)PolicyV::load_scale(row_s_v, block_off_v) : 0.0f;
+        const float a_q_val = (PolicyQ::HAS_AFFINE ? (float)PolicyQ::load_affine(row_s_q, block_off_q) : 0.0f);
+        const float a_k_val = (row_idx < n_kv) ? (PolicyK::HAS_AFFINE ? (float)PolicyK::load_affine(row_s_k, block_off_k) : 0.0f) : 0.0f;
+        const float a_v_val = (row_idx < n_kv) ? (PolicyV::HAS_AFFINE ? (float)PolicyV::load_affine(row_s_v, block_off_v) : 0.0f) : 0.0f;
 
         ulong w_idx;
 #if defined(IS_CANONICAL) && IS_CANONICAL
-        if (weights_per_block == 32) {
+        if (weights_per_block_q == 32) {
             const ulong U32_MAX_U = 0xFFFFFFFFul;
             if (((ulong)n_dim) * ((ulong)k_dim) <= U32_MAX_U) { // INDEX64_OK
                 const uint w_idx_u32 = (k & 31u) + (row_idx << 5u) + (k & ~31u) * n_dim;
@@ -133,54 +155,60 @@ ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
                 w_idx = ((ulong)(k & 31u)) + (((ulong)row_idx) << 5ul) + ((ulong)(k & ~31u)) * ((ulong)n_dim); // INDEX64_OK
             }
         } else {
-            w_idx = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_dim); // INDEX64_OK
+            w_idx = qkv_weight_index(row_idx, k, n_dim, weights_per_block_q); // INDEX64_OK
         }
 #else
-        w_idx = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_dim); // INDEX64_OK
+        w_idx = qkv_weight_index(row_idx, k, n_dim, weights_per_block_q); // INDEX64_OK
 #endif
 
         if (vec_width == 4) {
             float w[4];
-            Policy::template load_weights<4>(w_q, w_idx, w);
+            PolicyQ::template load_weights<4>(w_q, w_idx, w);
             acc_q += s_q_val * dot(xv_f32_lo, float4(w[0], w[1], w[2], w[3]))
-                + (Policy::HAS_AFFINE ? (a_q_val * dot(xv_f32_lo, float4(1.0f))) : 0.0f);
+                + (PolicyQ::HAS_AFFINE ? (a_q_val * dot(xv_f32_lo, float4(1.0f))) : 0.0f);
         } else {
-            acc_q += Policy::template dot<8>(w_q, w_idx, s_q_val, xv_f32_lo, xv_f32_hi)
-                + (Policy::HAS_AFFINE ? (a_q_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
+            acc_q += PolicyQ::template dot<8>(w_q, w_idx, s_q_val, xv_f32_lo, xv_f32_hi)
+                + (PolicyQ::HAS_AFFINE ? (a_q_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
         }
 
         if (row_idx < n_kv) {
-            ulong w_idx_kv;
+            ulong w_idx_k;
+            ulong w_idx_v;
 #if defined(IS_CANONICAL) && IS_CANONICAL
-            if (weights_per_block == 32) {
+            if (weights_per_block_k == 32 && weights_per_block_v == 32) {
                 const ulong U32_MAX_U = 0xFFFFFFFFul;
                 if (((ulong)n_kv) * ((ulong)k_dim) <= U32_MAX_U) { // INDEX64_OK
                     const uint w_idx_kv_u32 = (k & 31u) + (row_idx << 5u) + (k & ~31u) * n_kv;
-                    w_idx_kv = (ulong)w_idx_kv_u32; // INDEX64_OK
+                    w_idx_k = (ulong)w_idx_kv_u32; // INDEX64_OK
+                    w_idx_v = (ulong)w_idx_kv_u32; // INDEX64_OK
                 } else {
-                    w_idx_kv = ((ulong)(k & 31u)) + (((ulong)row_idx) << 5ul) + ((ulong)(k & ~31u)) * ((ulong)n_kv); // INDEX64_OK
+                    const ulong w_idx_kv_u64 = ((ulong)(k & 31u)) + (((ulong)row_idx) << 5ul) + ((ulong)(k & ~31u)) * ((ulong)n_kv); // INDEX64_OK
+                    w_idx_k = w_idx_kv_u64;
+                    w_idx_v = w_idx_kv_u64;
                 }
             } else {
-                w_idx_kv = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_kv); // INDEX64_OK
+                w_idx_k = qkv_weight_index(row_idx, k, n_kv, weights_per_block_k); // INDEX64_OK
+                w_idx_v = same_wpb_kv ? w_idx_k : qkv_weight_index(row_idx, k, n_kv, weights_per_block_v); // INDEX64_OK
             }
 #else
-            w_idx_kv = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_kv); // INDEX64_OK
+            w_idx_k = qkv_weight_index(row_idx, k, n_kv, weights_per_block_k); // INDEX64_OK
+            w_idx_v = same_wpb_kv ? w_idx_k : qkv_weight_index(row_idx, k, n_kv, weights_per_block_v); // INDEX64_OK
 #endif
 
             if (vec_width == 4) {
                 float wk[4];
                 float wv[4];
-                Policy::template load_weights<4>(w_k, w_idx_kv, wk);
-                Policy::template load_weights<4>(w_v, w_idx_kv, wv);
+                PolicyK::template load_weights<4>(w_k, w_idx_k, wk);
+                PolicyV::template load_weights<4>(w_v, w_idx_v, wv);
                 acc_k += s_k_val * dot(xv_f32_lo, float4(wk[0], wk[1], wk[2], wk[3]))
-                    + (Policy::HAS_AFFINE ? (a_k_val * dot(xv_f32_lo, float4(1.0f))) : 0.0f);
+                    + (PolicyK::HAS_AFFINE ? (a_k_val * dot(xv_f32_lo, float4(1.0f))) : 0.0f);
                 acc_v += s_v_val * dot(xv_f32_lo, float4(wv[0], wv[1], wv[2], wv[3]))
-                    + (Policy::HAS_AFFINE ? (a_v_val * dot(xv_f32_lo, float4(1.0f))) : 0.0f);
+                    + (PolicyV::HAS_AFFINE ? (a_v_val * dot(xv_f32_lo, float4(1.0f))) : 0.0f);
             } else {
-                acc_k += Policy::template dot<8>(w_k, w_idx_kv, s_k_val, xv_f32_lo, xv_f32_hi)
-                    + (Policy::HAS_AFFINE ? (a_k_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
-                acc_v += Policy::template dot<8>(w_v, w_idx_kv, s_v_val, xv_f32_lo, xv_f32_hi)
-                    + (Policy::HAS_AFFINE ? (a_v_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
+                acc_k += PolicyK::template dot<8>(w_k, w_idx_k, s_k_val, xv_f32_lo, xv_f32_hi)
+                    + (PolicyK::HAS_AFFINE ? (a_k_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
+                acc_v += PolicyV::template dot<8>(w_v, w_idx_v, s_v_val, xv_f32_lo, xv_f32_hi)
+                    + (PolicyV::HAS_AFFINE ? (a_v_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
             }
         }
 
@@ -258,28 +286,32 @@ ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
 
         const float4 xv_f32_lo = float4(xv_lo);
         const float4 xv_f32_hi = float4(xv_hi);
-        const uint block_off = k / weights_per_block;
+        const uint block_off_q = k / weights_per_block_q;
+        const uint block_off_k = same_wpb_qk ? block_off_q : (k / weights_per_block_k);
+        const uint block_off_v = same_wpb_qv ? block_off_q : (k / weights_per_block_v);
 
-        const float s_q_val = (k < k_dim) ? (float)Policy::load_scale(row_s_q, block_off) : 0.0f;
-        const float s_k_val = (row_idx < n_kv && k < k_dim) ? (float)Policy::load_scale(row_s_k, block_off) : 0.0f;
-        const float s_v_val = (row_idx < n_kv && k < k_dim) ? (float)Policy::load_scale(row_s_v, block_off) : 0.0f;
-        const float a_q_val = (k < k_dim) ? (Policy::HAS_AFFINE ? (float)Policy::load_affine(row_s_q, block_off) : 0.0f) : 0.0f;
-        const float a_k_val = (row_idx < n_kv && k < k_dim) ? (Policy::HAS_AFFINE ? (float)Policy::load_affine(row_s_k, block_off) : 0.0f) : 0.0f;
-        const float a_v_val = (row_idx < n_kv && k < k_dim) ? (Policy::HAS_AFFINE ? (float)Policy::load_affine(row_s_v, block_off) : 0.0f) : 0.0f;
+        const float s_q_val = (k < k_dim) ? (float)PolicyQ::load_scale(row_s_q, block_off_q) : 0.0f;
+        const float s_k_val = (row_idx < n_kv && k < k_dim) ? (float)PolicyK::load_scale(row_s_k, block_off_k) : 0.0f;
+        const float s_v_val = (row_idx < n_kv && k < k_dim) ? (float)PolicyV::load_scale(row_s_v, block_off_v) : 0.0f;
+        const float a_q_val = (k < k_dim) ? (PolicyQ::HAS_AFFINE ? (float)PolicyQ::load_affine(row_s_q, block_off_q) : 0.0f) : 0.0f;
+        const float a_k_val = (row_idx < n_kv && k < k_dim) ? (PolicyK::HAS_AFFINE ? (float)PolicyK::load_affine(row_s_k, block_off_k) : 0.0f) : 0.0f;
+        const float a_v_val = (row_idx < n_kv && k < k_dim) ? (PolicyV::HAS_AFFINE ? (float)PolicyV::load_affine(row_s_v, block_off_v) : 0.0f) : 0.0f;
 
         if (k < k_dim) {
             if (vec_width == 4) {
                 float w[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                Policy::template load_weights<4>(w_q, WEIGHT_INDEX(row_idx, k, k_dim, n_dim), w);
+                const ulong w_q_idx = qkv_weight_index(row_idx, k, n_dim, weights_per_block_q); // INDEX64_OK
+                PolicyQ::template load_weights<4>(w_q, w_q_idx, w);
                 for (uint i = valid_count; i < 4u; ++i) w[i] = 0.0f;
                 acc_q += s_q_val * dot(xv_f32_lo, float4(w[0], w[1], w[2], w[3]))
-                    + (Policy::HAS_AFFINE ? (a_q_val * dot(xv_f32_lo, float4(1.0f))) : 0.0f);
+                    + (PolicyQ::HAS_AFFINE ? (a_q_val * dot(xv_f32_lo, float4(1.0f))) : 0.0f);
             } else {
                 float w[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-                Policy::template load_weights<8>(w_q, WEIGHT_INDEX(row_idx, k, k_dim, n_dim), w);
+                const ulong w_q_idx = qkv_weight_index(row_idx, k, n_dim, weights_per_block_q); // INDEX64_OK
+                PolicyQ::template load_weights<8>(w_q, w_q_idx, w);
                 for (uint i = valid_count; i < 8u; ++i) w[i] = 0.0f;
                 acc_q += s_q_val * (dot(xv_f32_lo, float4(w[0], w[1], w[2], w[3])) + dot(xv_f32_hi, float4(w[4], w[5], w[6], w[7])))
-                    + (Policy::HAS_AFFINE ? (a_q_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
+                    + (PolicyQ::HAS_AFFINE ? (a_q_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
             }
         }
 
@@ -287,34 +319,79 @@ ALWAYS_INLINE float3 run_parallel_qkv_project_stage(
             if (vec_width == 4) {
                 float wk[4] = {0.0f, 0.0f, 0.0f, 0.0f};
                 float wv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                Policy::template load_weights<4>(w_k, WEIGHT_INDEX(row_idx, k, k_dim, n_kv), wk);
-                Policy::template load_weights<4>(w_v, WEIGHT_INDEX(row_idx, k, k_dim, n_kv), wv);
+                const ulong w_k_idx = qkv_weight_index(row_idx, k, n_kv, weights_per_block_k); // INDEX64_OK
+                const ulong w_v_idx = same_wpb_kv ? w_k_idx : qkv_weight_index(row_idx, k, n_kv, weights_per_block_v); // INDEX64_OK
+                PolicyK::template load_weights<4>(w_k, w_k_idx, wk);
+                PolicyV::template load_weights<4>(w_v, w_v_idx, wv);
                 for (uint i = valid_count; i < 4u; ++i) {
                     wk[i] = 0.0f;
                     wv[i] = 0.0f;
                 }
                 acc_k += s_k_val * dot(xv_f32_lo, float4(wk[0], wk[1], wk[2], wk[3]))
-                    + (Policy::HAS_AFFINE ? (a_k_val * dot(xv_f32_lo, float4(1.0f))) : 0.0f);
+                    + (PolicyK::HAS_AFFINE ? (a_k_val * dot(xv_f32_lo, float4(1.0f))) : 0.0f);
                 acc_v += s_v_val * dot(xv_f32_lo, float4(wv[0], wv[1], wv[2], wv[3]))
-                    + (Policy::HAS_AFFINE ? (a_v_val * dot(xv_f32_lo, float4(1.0f))) : 0.0f);
+                    + (PolicyV::HAS_AFFINE ? (a_v_val * dot(xv_f32_lo, float4(1.0f))) : 0.0f);
             } else {
                 float wk[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
                 float wv[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-                Policy::template load_weights<8>(w_k, WEIGHT_INDEX(row_idx, k, k_dim, n_kv), wk);
-                Policy::template load_weights<8>(w_v, WEIGHT_INDEX(row_idx, k, k_dim, n_kv), wv);
+                const ulong w_k_idx = qkv_weight_index(row_idx, k, n_kv, weights_per_block_k); // INDEX64_OK
+                const ulong w_v_idx = same_wpb_kv ? w_k_idx : qkv_weight_index(row_idx, k, n_kv, weights_per_block_v); // INDEX64_OK
+                PolicyK::template load_weights<8>(w_k, w_k_idx, wk);
+                PolicyV::template load_weights<8>(w_v, w_v_idx, wv);
                 for (uint i = valid_count; i < 8u; ++i) {
                     wk[i] = 0.0f;
                     wv[i] = 0.0f;
                 }
                 acc_k += s_k_val * (dot(xv_f32_lo, float4(wk[0], wk[1], wk[2], wk[3])) + dot(xv_f32_hi, float4(wk[4], wk[5], wk[6], wk[7])))
-                    + (Policy::HAS_AFFINE ? (a_k_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
+                    + (PolicyK::HAS_AFFINE ? (a_k_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
                 acc_v += s_v_val * (dot(xv_f32_lo, float4(wv[0], wv[1], wv[2], wv[3])) + dot(xv_f32_hi, float4(wv[4], wv[5], wv[6], wv[7])))
-                    + (Policy::HAS_AFFINE ? (a_v_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
+                    + (PolicyV::HAS_AFFINE ? (a_v_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
             }
         }
     }
 
     return float3(acc_q, acc_k, acc_v);
+}
+
+template<typename Policy, uint vec_width, bool has_norm>
+ALWAYS_INLINE float3 run_parallel_qkv_project_stage_uniform(
+    const device uchar* w_q,
+    const device uchar* s_q,
+    const device uchar* w_k,
+    const device uchar* s_k,
+    const device uchar* w_v,
+    const device uchar* s_v,
+    const device InputStorageT* input,
+    constant uint& k_dim,
+    constant uint& n_dim,
+    constant uint& n_kv,
+    constant uint& weights_per_block,
+    const device GammaStorageT* gamma,
+    float inv_rms,
+    uint lane_id,
+    uint row_idx,
+    uint batch_idx
+) {
+    return run_parallel_qkv_project_stage<Policy, Policy, Policy, vec_width, has_norm>(
+        w_q,
+        s_q,
+        w_k,
+        s_k,
+        w_v,
+        s_v,
+        input,
+        k_dim,
+        n_dim,
+        n_kv,
+        weights_per_block,
+        weights_per_block,
+        weights_per_block,
+        gamma,
+        inv_rms,
+        lane_id,
+        row_idx,
+        batch_idx
+    );
 }
 
 ALWAYS_INLINE float3 run_qkv_reduce_stage(float3 input_var) {

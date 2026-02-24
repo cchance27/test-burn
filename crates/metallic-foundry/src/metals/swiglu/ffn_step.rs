@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     Foundry, MetalError, metals::common::{
-        dtype_contract::require_uniform_dtypes, runtime::{require_non_empty_io, require_vector_len, resolve_batch, tail_dim}
+        policy_slots::bind_dual_policy_slots, runtime::{require_non_empty_io, require_vector_len, resolve_batch, tail_dim}
     }, spec::{CompiledStep, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, TensorArg}
 };
 
@@ -63,18 +63,20 @@ pub struct FusedFfnArgs {
     #[arg(buffer = 7)]
     pub n_dim: u32,
     #[arg(buffer = 8)]
-    pub weights_per_block: u32,
-    #[arg(buffer = 9, metal_type = "const device GammaStorageT*")]
+    pub weights_per_block_gate: u32,
+    #[arg(buffer = 9)]
+    pub weights_per_block_up: u32,
+    #[arg(buffer = 10, metal_type = "const device GammaStorageT*")]
     pub gamma: TensorArg,
-    #[arg(buffer = 10, metal_type = "const device BiasStorageT*")]
-    pub b_gate: TensorArg,
     #[arg(buffer = 11, metal_type = "const device BiasStorageT*")]
+    pub b_gate: TensorArg,
+    #[arg(buffer = 12, metal_type = "const device BiasStorageT*")]
     pub b_up: TensorArg,
-    #[arg(buffer = 12)]
-    pub has_b_gate: u32,
     #[arg(buffer = 13)]
-    pub has_b_up: u32,
+    pub has_b_gate: u32,
     #[arg(buffer = 14)]
+    pub has_b_up: u32,
+    #[arg(buffer = 15)]
     pub epsilon: f32,
 }
 
@@ -158,13 +160,10 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
         let w_up = get(self.w_up_resolved.weights)?;
         let output = get(self.output_idx)?;
 
-        let policy_gate = crate::policy::resolve_policy(w_gate.dtype);
-        let loader_gate = policy_gate.loader_stage();
-        let args_gate = loader_gate.bind(fast_bindings, &self.w_gate_resolved);
-
-        let policy_up = crate::policy::resolve_policy(w_up.dtype);
-        let loader_up = policy_up.loader_stage();
-        let args_up = loader_up.bind(fast_bindings, &self.w_up_resolved);
+        let policy_slots = bind_dual_policy_slots(fast_bindings, w_gate.dtype, &self.w_gate_resolved, w_up.dtype, &self.w_up_resolved);
+        let same_policy = policy_slots.same_policy;
+        let policy_gate = policy_slots.a.policy.clone();
+        let policy_up = policy_slots.b.policy.clone();
 
         let (b_gate, has_b_gate) = if let Some(idx) = self.b_gate_idx {
             (TensorArg::from_tensor(get(idx)?), 1u32)
@@ -183,17 +182,10 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
         let n_dim = tail_dim(output)?;
         let batch = resolve_batch(bindings);
 
-        require_uniform_dtypes("FusedFfnSwiGluRmsNorm", &[("gate", w_gate.dtype), ("up", w_up.dtype)]).map_err(|_| {
-            MetalError::OperationFailed(format!(
-                "FusedFfnSwiGluRmsNorm mixed-policy is unsupported (gate={:?}, up={:?}, batch={}, k_dim={}, n_dim={}).",
-                w_gate.dtype, w_up.dtype, batch, k_dim, n_dim
-            ))
-        })?;
-
-        let w_gate_arg = args_gate[0].clone();
-        let s_gate = if args_gate.len() > 1 { Some(args_gate[1].clone()) } else { None };
-        let w_up_arg = args_up[0].clone();
-        let s_up = if args_up.len() > 1 { Some(args_up[1].clone()) } else { None };
+        let w_gate_arg = policy_slots.a.weight();
+        let s_gate = policy_slots.a.scale();
+        let w_up_arg = policy_slots.b.weight();
+        let s_up = policy_slots.b.scale();
 
         require_vector_len("gamma", &TensorArg::from_tensor(gamma), k_dim)?;
         if has_b_gate != 0 {
@@ -203,7 +195,12 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
             require_vector_len("b_up", &b_up, n_dim)?;
         }
 
-        let weights_per_block = effective_weights_per_block(policy_gate.as_ref(), self.weights_per_block);
+        let weights_per_block_gate = effective_weights_per_block(policy_gate.as_ref(), self.weights_per_block);
+        let weights_per_block_up = if same_policy {
+            weights_per_block_gate
+        } else {
+            effective_weights_per_block(policy_up.as_ref(), self.weights_per_block)
+        };
 
         let args = FusedFfnArgs {
             w_gate: w_gate_arg,
@@ -214,7 +211,8 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
             output: TensorArg::from_tensor(output),
             k_dim,
             n_dim,
-            weights_per_block,
+            weights_per_block_gate,
+            weights_per_block_up,
             gamma: TensorArg::from_tensor(gamma),
             b_gate,
             b_up,
@@ -223,7 +221,7 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
             epsilon: resolve_rms_eps(bindings, self.epsilon),
         };
 
-        let kernel = get_fused_ffn_kernel(policy_gate);
+        let kernel = get_fused_ffn_kernel(policy_gate, policy_up);
         let dispatch = DispatchConfig::warp_per_row(n_dim, batch);
 
         foundry.run(&kernel.clone().bind_arc(args, dispatch))

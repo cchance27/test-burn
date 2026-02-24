@@ -95,41 +95,6 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Agnostic Testing:** Refactored diagnostic and parity tests to use generic `MockModel` and `MapMetadata` implementations, allowing verification without concrete GGUF files.
 - **Zero-Warning Workspace:** Performed a project-wide cleanup of unused imports and dead code resulting from the refactor, achieving a 100% clean build.
 
-### 13. Dynamic DType Storage/Compute/Accumulation
-
-| Kernel Family | Storage DType | Compute DType | Accum DType | Status |
-| --- | --- | --- | --- | --- |
-| RMSNorm | F16/F32 via runtime type helpers | ComputeT | AccumT | ✅ Cut over |
-| GEMV/GEMV-Fused | F16/F32 (dense), quant policies for weights | ComputeT | AccumT | ✅ Cut over (fast F16 aliases isolated) |
-| GEMM/MMA | Runtime-typed IO + quant policy loaders | ComputeT (`MmaComputeT`) | AccumT (`MmaAccumT`) | 🟡 Groundwork in place (tile path remains half-specialized for perf) |
-| SwiGLU / Fused FFN stages | Runtime-typed IO/bias/output | ComputeT | AccumT | ✅ Cut over (vector fast path isolated) |
-| RoPE | Runtime-typed IO + tensor caches | ComputeT | AccumT | ✅ Cut over (shared-vector alias path) |
-| FlashAttention Decode/Prefill/Split-K | Runtime IO bindings + typed helper aliases (F16/F32 dense) | ComputeT in math path | AccumT at stores | ✅ Dense F16/F32 cut over; mixed/quant fail-fast |
-
-- [x] Remove misleading hardcoded dtype internals in core kernels by introducing reusable typed aliases/helpers.
-- [x] Preserve explicit fail-fast behavior for unsupported FA Q/K/V dtype combinations.
-- [x] Add mixed-policy safety guards for fused QKV/SwiGLU paths and keep them visible in runtime behavior.
-- [x] Add targeted exact tests for critical policy and fail-fast paths.
-- [x] Keep kernel compile/runtime behavior observable with debug tracing hooks.
-- [x] Centralize runtime dtype contract metadata (source/storage/compute/accum + byte sizes) for kernel checks and selector groundwork.
-- [x] Add storage-byte-aware selector groundwork + debug telemetry for FA decode variant resolution.
-- [x] De-duplicate FA dtype contract enforcement across decode/rope paths and centralize prefill selector heuristics in dispatch helpers.
-- [x] Expand FA dense routing to validated F16/F32 execution variants with shared contract checks and selector telemetry.
-- [x] Audit kernel space for hardcoded storage pointers (`const device half*`, `threadgroup half*`) and keep only intentional fast-path aliases.
-- [ ] Add BF16 compute/accum variant rollout after F16/F32 sprint stabilization
-
-- Completed dense `F16/F32` runtime dtype cutover for FlashAttention decode + prefill + split-k paths (mixed/quant remain explicit fail-fast).
-- Completed MMA tile widening groundwork so GEMM honors runtime storage dtype instead of being hard-locked to half tiles.
-- Added accum dtype policy override (`METALLIC_ACCUM_DTYPE`) with fail-fast validation against narrower-than-compute configurations.
-- Verified cleanup gates and targeted parity/contract tests (`fmt`, `clippy --fix`, `build`, exact FA/GEMM dtype tests).
-- Fixed a critical runtime helper correctness bug in `runtime_types.metal`:
-  - `metallic_store_output2/4` previously used packed contiguous stores in a way that ignored explicit indices (`idx1/idx2/idx3`), corrupting strided-write kernels.
-  - Reworked helpers so indexed variants always honor explicit indices; added explicit contiguous helpers (`*_contig`) for packed fast paths.
-  - Flash decode now uses contiguous helpers; Flash prefill/split-k keep indexed strided stores.
-- Fixed Flash prefill lane-load indexing regressions:
-  - Restored lane-strided Q loads (`lane`, `lane+32`, `(+64,+96)` for D128) in prefill online + split-k kernels.
-- Recovered decode throughput after correctness fixes by removing extra storage->compute->storage conversions in Flash prefill Q register loads.
-
 ---
 
 ## ⚠️ Risks & Regressions (Immediate Priority)
@@ -188,11 +153,7 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 
 ## ⚠️ Risks & Regressions (Immediate Priority)
 
-### 1. End-to-End Drift Investigation
-- **Symptom:** Block-level parity is exact, but full-model generation shows `hidden_state` drift (~1.375 after 24 layers) and `logits` drift (~21.4).
-- **Task:** Modify `dsl_vs_context_parity.rs` to perform a layer-by-layer residual stream comparison. Isolate exactly where the drift accumulates (e.g., is it uniform, or does one layer spike?).
-
-### 2. RoPE & Position Index Verification
+### 1. RoPE & Position Index Verification
 - **Task:** Verify that `position_offset` and `seq_len` are correctly propagated to the `RoPE` kernel in all layers, especially during multi-turn generation.
 
 ---

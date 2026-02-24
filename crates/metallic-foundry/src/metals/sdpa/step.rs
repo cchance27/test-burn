@@ -1,11 +1,10 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use half::f16;
 use metallic_env::{FoundryEnvVar, SDPA_DEBUG_ONLINE_COMPARE_MIN_KV, SDPA_DEBUG_ONLINE_COMPARE_PREFILL_MIN_KV, is_set};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Foundry, MetalError, metals::flashattention, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::{Pooled, View}, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::{KernelArg, TensorArg}
+    Foundry, MetalError, metals::flashattention, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::{Pooled, View}, tensor::{Dtype, F16, F32, Tensor as FoundryTensor, TensorInit}, types::{KernelArg, TensorArg}
 };
 
 /// FlashAttention Step (formerly SdpaStep).
@@ -220,58 +219,113 @@ impl CompiledStep for CompiledFlashAttentionStep {
             let debug_compare = is_set(FoundryEnvVar::SdpaDebugOnlineCompare);
             let min_kv: u32 = SDPA_DEBUG_ONLINE_COMPARE_MIN_KV.get().ok().flatten().unwrap_or(0);
             if debug_compare && kv_seq_len >= min_kv && DEBUG_ONLINE_COMPARE_ONCE.fetch_add(1, Ordering::Relaxed) == 0 {
-                let out_tmp = FoundryTensor::<F16, Pooled>::new(foundry, output.dims().to_vec(), TensorInit::Uninitialized)?;
+                let (online, mat): (Vec<f32>, Vec<f32>) = match output.dtype {
+                    Dtype::F16 => {
+                        let out_tmp = FoundryTensor::<F16, Pooled>::new(foundry, output.dims().to_vec(), TensorInit::Uninitialized)?;
 
-                // Run online into temp, materialized into real output.
-                flashattention::step::run_flash_decode(
-                    foundry,
-                    q,
-                    k,
-                    v,
-                    &TensorArg::from_tensor(&out_tmp),
-                    n_heads,
-                    head_dim,
-                    kv_seq_len,
-                    1,
-                    self.step.kv_head_major,
-                )?;
-                super::reference::execute_sdpa_reference(
-                    foundry,
-                    q,
-                    k,
-                    v,
-                    output,
-                    n_heads,
-                    head_dim,
-                    kv_seq_len,
-                    q_offset_val,
-                    1,
-                    self.step.causal,
-                )?;
-                foundry.synchronize()?;
+                        // Run online into temp, materialized into real output.
+                        flashattention::step::run_flash_decode(
+                            foundry,
+                            q,
+                            k,
+                            v,
+                            &TensorArg::from_tensor(&out_tmp),
+                            n_heads,
+                            head_dim,
+                            kv_seq_len,
+                            1,
+                            self.step.kv_head_major,
+                        )?;
+                        super::reference::execute_sdpa_reference(
+                            foundry,
+                            q,
+                            k,
+                            v,
+                            output,
+                            n_heads,
+                            head_dim,
+                            kv_seq_len,
+                            q_offset_val,
+                            1,
+                            self.step.causal,
+                        )?;
+                        foundry.synchronize()?;
 
-                let out_online_view = FoundryTensor::<F16, View>::from_raw_parts(
-                    out_tmp.buffer().clone(),
-                    out_tmp.dims().to_vec(),
-                    out_tmp.strides().to_vec(),
-                    out_tmp.offset(),
-                );
-                let out_mat_view = FoundryTensor::<F16, View>::from_raw_parts(
-                    output.buffer().clone(),
-                    output.dims().to_vec(),
-                    output.strides().to_vec(),
-                    output.offset(),
-                );
+                        let out_online_view = FoundryTensor::<F16, View>::from_raw_parts(
+                            out_tmp.buffer().clone(),
+                            out_tmp.dims().to_vec(),
+                            out_tmp.strides().to_vec(),
+                            out_tmp.offset(),
+                        );
+                        let out_mat_view = FoundryTensor::<F16, View>::from_raw_parts(
+                            output.buffer().clone(),
+                            output.dims().to_vec(),
+                            output.strides().to_vec(),
+                            output.offset(),
+                        );
+                        let online = out_online_view.to_vec(foundry).into_iter().map(f32::from).collect::<Vec<_>>();
+                        let mat = out_mat_view.to_vec(foundry).into_iter().map(f32::from).collect::<Vec<_>>();
+                        (online, mat)
+                    }
+                    Dtype::F32 => {
+                        let out_tmp = FoundryTensor::<F32, Pooled>::new(foundry, output.dims().to_vec(), TensorInit::Uninitialized)?;
 
-                let online: Vec<f16> = out_online_view.to_vec(foundry);
-                let mat: Vec<f16> = out_mat_view.to_vec(foundry);
+                        // Run online into temp, materialized into real output.
+                        flashattention::step::run_flash_decode(
+                            foundry,
+                            q,
+                            k,
+                            v,
+                            &TensorArg::from_tensor(&out_tmp),
+                            n_heads,
+                            head_dim,
+                            kv_seq_len,
+                            1,
+                            self.step.kv_head_major,
+                        )?;
+                        super::reference::execute_sdpa_reference(
+                            foundry,
+                            q,
+                            k,
+                            v,
+                            output,
+                            n_heads,
+                            head_dim,
+                            kv_seq_len,
+                            q_offset_val,
+                            1,
+                            self.step.causal,
+                        )?;
+                        foundry.synchronize()?;
+
+                        let out_online_view = FoundryTensor::<F32, View>::from_raw_parts(
+                            out_tmp.buffer().clone(),
+                            out_tmp.dims().to_vec(),
+                            out_tmp.strides().to_vec(),
+                            out_tmp.offset(),
+                        );
+                        let out_mat_view = FoundryTensor::<F32, View>::from_raw_parts(
+                            output.buffer().clone(),
+                            output.dims().to_vec(),
+                            output.strides().to_vec(),
+                            output.offset(),
+                        );
+                        (out_online_view.to_vec(foundry), out_mat_view.to_vec(foundry))
+                    }
+                    other => {
+                        return Err(MetalError::OperationNotSupported(format!(
+                            "FlashAttention debug compare supports only F16/F32 output, got {:?}",
+                            other
+                        )));
+                    }
+                };
                 let d_model = (n_heads as usize) * (head_dim as usize);
                 let limit = d_model.min(online.len()).min(mat.len());
                 let mut max_abs = 0.0f32;
                 let mut n_nan = 0usize;
                 for (a, b) in online.iter().take(limit).zip(mat.iter().take(limit)) {
-                    let af = f32::from(*a);
-                    let bf = f32::from(*b);
+                    let af = *a;
+                    let bf = *b;
                     if !af.is_finite() || !bf.is_finite() {
                         n_nan += 1;
                         continue;

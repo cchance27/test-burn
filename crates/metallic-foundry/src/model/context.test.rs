@@ -3,7 +3,7 @@
 use metallic_env::{EnvVarGuard, FoundryEnvVar};
 
 use super::*;
-use crate::spec::Architecture;
+use crate::spec::{Architecture, ModelSpec};
 
 fn mock_arch(max_seq_len: usize) -> Architecture {
     use crate::spec::ArchValue;
@@ -63,4 +63,116 @@ fn test_memory_estimation() {
     let est = ContextConfig::estimate_kv_memory(&arch, 2048);
     // Compact GQA (n_kv_heads=2): 4 * 2 * 2 * 2048 * 64 * 2 = 4,194,304 bytes
     assert_eq!(est.kv_cache_bytes, 4194304);
+}
+
+#[test]
+fn test_memory_estimation_uses_prepare_tensor_dtypes_f32() {
+    let spec = ModelSpec::from_json(
+        r#"
+        {
+          "name": "ctx-f32-kv-estimate",
+          "architecture": {
+            "d_model": 512,
+            "n_heads": 8,
+            "n_kv_heads": 2,
+            "n_layers": 4,
+            "ff_dim": 2048,
+            "vocab_size": 1000,
+            "max_seq_len": 4096,
+            "rope_base": 10000.0,
+            "rms_eps": 0.000001,
+            "prepare": {
+              "tensors": [
+                {
+                  "name": "k_cache_{i}",
+                  "repeat": { "count": "n_layers", "var": "i" },
+                  "dtype": "F32",
+                  "storage": "kv_cache",
+                  "dims": ["n_kv_heads", "max_seq_len", "d_model / n_heads"],
+                  "grow_with_kv": true
+                },
+                {
+                  "name": "v_cache_{i}",
+                  "repeat": { "count": "n_layers", "var": "i" },
+                  "dtype": "F32",
+                  "storage": "kv_cache",
+                  "dims": ["n_kv_heads", "max_seq_len", "d_model / n_heads"],
+                  "grow_with_kv": true
+                }
+              ]
+            },
+            "forward": []
+          }
+        }
+        "#,
+    )
+    .expect("parse spec");
+
+    let est = ContextConfig::estimate_kv_memory(&spec.architecture, 1024);
+    assert_eq!(est.per_layer_bytes, 1_048_576);
+    assert_eq!(est.kv_cache_bytes, 4_194_304);
+}
+
+#[test]
+fn test_memory_estimation_uses_prepare_tensor_dtypes_i8_with_scales() {
+    let spec = ModelSpec::from_json(
+        r#"
+        {
+          "name": "ctx-int8-scale-kv-estimate",
+          "architecture": {
+            "d_model": 512,
+            "n_heads": 8,
+            "n_kv_heads": 2,
+            "n_layers": 2,
+            "ff_dim": 2048,
+            "vocab_size": 1000,
+            "max_seq_len": 4096,
+            "rope_base": 10000.0,
+            "rms_eps": 0.000001,
+            "prepare": {
+              "tensors": [
+                {
+                  "name": "k_cache_data_{i}",
+                  "repeat": { "count": "n_layers", "var": "i" },
+                  "dtype": "I8",
+                  "storage": "kv_cache",
+                  "dims": ["n_kv_heads", "max_seq_len", "d_model / n_heads"],
+                  "grow_with_kv": true
+                },
+                {
+                  "name": "v_cache_data_{i}",
+                  "repeat": { "count": "n_layers", "var": "i" },
+                  "dtype": "I8",
+                  "storage": "kv_cache",
+                  "dims": ["n_kv_heads", "max_seq_len", "d_model / n_heads"],
+                  "grow_with_kv": true
+                },
+                {
+                  "name": "k_cache_scale_{i}",
+                  "repeat": { "count": "n_layers", "var": "i" },
+                  "dtype": "F16",
+                  "storage": "kv_cache",
+                  "dims": ["n_kv_heads", "max_seq_len", "(d_model / n_heads) / 32"],
+                  "grow_with_kv": true
+                },
+                {
+                  "name": "v_cache_scale_{i}",
+                  "repeat": { "count": "n_layers", "var": "i" },
+                  "dtype": "F16",
+                  "storage": "kv_cache",
+                  "dims": ["n_kv_heads", "max_seq_len", "(d_model / n_heads) / 32"],
+                  "grow_with_kv": true
+                }
+              ]
+            },
+            "forward": []
+          }
+        }
+        "#,
+    )
+    .expect("parse spec");
+
+    let est = ContextConfig::estimate_kv_memory(&spec.architecture, 256);
+    assert_eq!(est.per_layer_bytes, 69_632);
+    assert_eq!(est.kv_cache_bytes, 139_264);
 }

@@ -20,7 +20,7 @@ ALWAYS_INLINE FfnFastVec4T ffn_load_gamma_half4(const device GammaStorageT* gamm
 #endif
 }
 
-template<typename Policy, uint vec_width, bool has_norm>
+template<typename PolicyGate, typename PolicyUp, uint vec_width, bool has_norm>
 ALWAYS_INLINE float2 run_ffn_dual_project_stage(
     const device uchar* w_gate,
     const device uchar* s_gate,
@@ -29,21 +29,25 @@ ALWAYS_INLINE float2 run_ffn_dual_project_stage(
     const device InputStorageT* input,
     constant uint& k_dim,
     constant uint& n_dim,
-    constant uint& weights_per_block,
+    constant uint& weights_per_block_gate,
+    constant uint& weights_per_block_up,
     const device GammaStorageT* gamma,
     float inv_rms,
     uint lane_id,
     uint row_idx,
     uint batch_idx
 ) {
-    const uint blocks_per_k = (k_dim + weights_per_block - 1) / weights_per_block;
+    const uint blocks_per_k_gate = (k_dim + weights_per_block_gate - 1) / weights_per_block_gate;
+    const uint blocks_per_k_up = (k_dim + weights_per_block_up - 1) / weights_per_block_up;
     float acc_gate = 0.0f;
     float acc_up = 0.0f;
     uint k_base = 0;
 
-    ulong scale_stride = (ulong)row_idx * blocks_per_k * Policy::SCALE_BYTES; // INDEX64_OK
-    const device uchar* row_s_gate = s_gate + scale_stride;
-    const device uchar* row_s_up = s_up + scale_stride;
+    const ulong scale_stride_gate = (ulong)row_idx * blocks_per_k_gate * PolicyGate::SCALE_BYTES; // INDEX64_OK
+    const ulong scale_stride_up = (ulong)row_idx * blocks_per_k_up * PolicyUp::SCALE_BYTES; // INDEX64_OK
+    const device uchar* row_s_gate = s_gate + scale_stride_gate;
+    const device uchar* row_s_up = s_up + scale_stride_up;
+    const bool same_wpb = (weights_per_block_gate == weights_per_block_up);
 #if METALLIC_FASTPATH_INPUT_HALF
     const device FfnFastScalarT* input_half = (const device FfnFastScalarT*)input;
 #endif
@@ -98,25 +102,26 @@ ALWAYS_INLINE float2 run_ffn_dual_project_stage(
         float4 xv_f32_lo = float4(xv_lo);
         float4 xv_f32_hi = float4(xv_hi);
 
-        uint block_off = k / weights_per_block;
+        const uint block_off_gate = k / weights_per_block_gate;
+        const uint block_off_up = same_wpb ? block_off_gate : (k / weights_per_block_up);
         
-        float s_gate_val = (float)Policy::load_scale(row_s_gate, block_off);
-        float s_up_val = (float)Policy::load_scale(row_s_up, block_off);
-        float a_gate_val = (Policy::HAS_AFFINE ? (float)Policy::load_affine(row_s_gate, block_off) : 0.0f);
-        float a_up_val = (Policy::HAS_AFFINE ? (float)Policy::load_affine(row_s_up, block_off) : 0.0f);
+        float s_gate_val = (float)PolicyGate::load_scale(row_s_gate, block_off_gate);
+        float s_up_val = (float)PolicyUp::load_scale(row_s_up, block_off_up);
+        float a_gate_val = (PolicyGate::HAS_AFFINE ? (float)PolicyGate::load_affine(row_s_gate, block_off_gate) : 0.0f);
+        float a_up_val = (PolicyUp::HAS_AFFINE ? (float)PolicyUp::load_affine(row_s_up, block_off_up) : 0.0f);
 
         {
             float w[vec_width];
-            Policy::template load_weights<vec_width>(w_gate, row_idx * k_dim + k, w);
+            PolicyGate::template load_weights<vec_width>(w_gate, row_idx * k_dim + k, w);
             acc_gate += s_gate_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])))
-                + (Policy::HAS_AFFINE ? (a_gate_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
+                + (PolicyGate::HAS_AFFINE ? (a_gate_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
         }
 
         {
             float w[vec_width];
-            Policy::template load_weights<vec_width>(w_up, row_idx * k_dim + k, w);
+            PolicyUp::template load_weights<vec_width>(w_up, row_idx * k_dim + k, w);
             acc_up += s_up_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])))
-                + (Policy::HAS_AFFINE ? (a_up_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
+                + (PolicyUp::HAS_AFFINE ? (a_up_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
         }
 
         k_base += K_CHUNK_SIZE;
@@ -186,26 +191,61 @@ ALWAYS_INLINE float2 run_ffn_dual_project_stage(
         float4 xv_f32_lo = float4(xv_lo);
         float4 xv_f32_hi = float4(xv_hi);
 
-        uint block_off = k / weights_per_block;
-        float s_gate_val = (float)Policy::load_scale(row_s_gate, block_off);
-        float s_up_val = (float)Policy::load_scale(row_s_up, block_off);
-        float a_gate_val = (Policy::HAS_AFFINE ? (float)Policy::load_affine(row_s_gate, block_off) : 0.0f);
-        float a_up_val = (Policy::HAS_AFFINE ? (float)Policy::load_affine(row_s_up, block_off) : 0.0f);
+        const uint block_off_gate = k / weights_per_block_gate;
+        const uint block_off_up = same_wpb ? block_off_gate : (k / weights_per_block_up);
+        float s_gate_val = (float)PolicyGate::load_scale(row_s_gate, block_off_gate);
+        float s_up_val = (float)PolicyUp::load_scale(row_s_up, block_off_up);
+        float a_gate_val = (PolicyGate::HAS_AFFINE ? (float)PolicyGate::load_affine(row_s_gate, block_off_gate) : 0.0f);
+        float a_up_val = (PolicyUp::HAS_AFFINE ? (float)PolicyUp::load_affine(row_s_up, block_off_up) : 0.0f);
 
         {
             float w[vec_width];
-            Policy::template load_weights<vec_width>(w_gate, row_idx * k_dim + k, w);
+            PolicyGate::template load_weights<vec_width>(w_gate, row_idx * k_dim + k, w);
             acc_gate += s_gate_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])))
-                + (Policy::HAS_AFFINE ? (a_gate_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
+                + (PolicyGate::HAS_AFFINE ? (a_gate_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
         }
 
         {
             float w[vec_width];
-            Policy::template load_weights<vec_width>(w_up, row_idx * k_dim + k, w);
+            PolicyUp::template load_weights<vec_width>(w_up, row_idx * k_dim + k, w);
             acc_up += s_up_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])))
-                + (Policy::HAS_AFFINE ? (a_up_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
+                + (PolicyUp::HAS_AFFINE ? (a_up_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
         }
     }
 
     return float2(acc_gate, acc_up);
+}
+
+template<typename Policy, uint vec_width, bool has_norm>
+ALWAYS_INLINE float2 run_ffn_dual_project_stage_uniform(
+    const device uchar* w_gate,
+    const device uchar* s_gate,
+    const device uchar* w_up,
+    const device uchar* s_up,
+    const device InputStorageT* input,
+    constant uint& k_dim,
+    constant uint& n_dim,
+    constant uint& weights_per_block,
+    const device GammaStorageT* gamma,
+    float inv_rms,
+    uint lane_id,
+    uint row_idx,
+    uint batch_idx
+) {
+    return run_ffn_dual_project_stage<Policy, Policy, vec_width, has_norm>(
+        w_gate,
+        s_gate,
+        w_up,
+        s_up,
+        input,
+        k_dim,
+        n_dim,
+        weights_per_block,
+        weights_per_block,
+        gamma,
+        inv_rms,
+        lane_id,
+        row_idx,
+        batch_idx
+    );
 }

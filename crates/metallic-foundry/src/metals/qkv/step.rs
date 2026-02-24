@@ -2,7 +2,9 @@ use metallic_macros::KernelArgs;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Foundry, MetalError, metals::{common::dtype_contract::require_uniform_dtypes, gemv::GemvStrategy}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::TensorArg
+    Foundry, MetalError, metals::{
+        common::policy_slots::{bind_triple_policy_slots, effective_weights_per_block}, gemv::GemvStrategy
+    }, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::TensorArg
 };
 
 /// Fused QKV Step: RMSNorm(Input) -> Parallel QKV Projection -> 3 Outputs
@@ -72,24 +74,28 @@ pub struct FusedQkvArgs {
     #[arg(buffer = 9)]
     pub n_kv: u32,
     #[arg(buffer = 10)]
-    pub weights_per_block: u32,
-    #[arg(buffer = 11, output, metal_type = "device OutputStorageT*")]
-    pub out_q: TensorArg,
-    #[arg(buffer = 12, output, metal_type = "device OutputStorageT*")]
-    pub out_k: TensorArg,
+    pub weights_per_block_q: u32,
+    #[arg(buffer = 11)]
+    pub weights_per_block_k: u32,
+    #[arg(buffer = 12)]
+    pub weights_per_block_v: u32,
     #[arg(buffer = 13, output, metal_type = "device OutputStorageT*")]
+    pub out_q: TensorArg,
+    #[arg(buffer = 14, output, metal_type = "device OutputStorageT*")]
+    pub out_k: TensorArg,
+    #[arg(buffer = 15, output, metal_type = "device OutputStorageT*")]
     pub out_v: TensorArg,
-    #[arg(buffer = 14, metal_type = "const device BiasStorageT*")]
-    pub b_q: TensorArg,
-    #[arg(buffer = 15, metal_type = "const device BiasStorageT*")]
-    pub b_k: TensorArg,
     #[arg(buffer = 16, metal_type = "const device BiasStorageT*")]
+    pub b_q: TensorArg,
+    #[arg(buffer = 17, metal_type = "const device BiasStorageT*")]
+    pub b_k: TensorArg,
+    #[arg(buffer = 18, metal_type = "const device BiasStorageT*")]
     pub b_v: TensorArg,
-    #[arg(buffer = 17)]
-    pub has_bias: u32,
-    #[arg(buffer = 18, metal_type = "const device GammaStorageT*")]
-    pub gamma: TensorArg,
     #[arg(buffer = 19)]
+    pub has_bias: u32,
+    #[arg(buffer = 20, metal_type = "const device GammaStorageT*")]
+    pub gamma: TensorArg,
+    #[arg(buffer = 21)]
     pub epsilon: f32,
 }
 
@@ -207,31 +213,27 @@ impl CompiledStep for CompiledFusedQkvStep {
         let n_kv = self.step.n_kv.resolve(bindings);
         let m = self.step.m.resolve(bindings).max(1);
 
-        require_uniform_dtypes(
-            "FusedQkv",
-            &[("q", w_q_tensor.dtype), ("k", w_k_tensor.dtype), ("v", w_v_tensor.dtype)],
-        )
-        .map_err(|_| {
-            MetalError::OperationFailed(format!(
-                "FusedQkv mixed-policy is unsupported (q={:?}, k={:?}, v={:?}, m={}, k_dim={}, n_dim={}, n_kv={}).",
-                w_q_tensor.dtype, w_k_tensor.dtype, w_v_tensor.dtype, m, k_dim, n_dim, n_kv
-            ))
-        })?;
-        let shared_policy = crate::policy::resolve_policy(w_q_tensor.dtype);
+        let policy_slots = bind_triple_policy_slots(
+            fast_bindings,
+            w_q_tensor.dtype,
+            &self.w_q_resolved,
+            w_k_tensor.dtype,
+            &self.w_k_resolved,
+            w_v_tensor.dtype,
+            &self.w_v_resolved,
+        );
 
-        // Centralized Quantization Binding (uniform policy path).
-        let loader = shared_policy.loader_stage();
+        let same_policy = policy_slots.same_policy;
+        let policy_q = policy_slots.a.policy.clone();
+        let policy_k = policy_slots.b.policy.clone();
+        let policy_v = policy_slots.c.policy.clone();
 
-        let q_args = loader.bind(fast_bindings, &self.w_q_resolved);
-        let k_args = loader.bind(fast_bindings, &self.w_k_resolved);
-        let v_args = loader.bind(fast_bindings, &self.w_v_resolved);
-
-        let w_q = q_args[0].clone();
-        let s_q = if q_args.len() > 1 { Some(q_args[1].clone()) } else { None };
-        let w_k = k_args[0].clone();
-        let s_k = if k_args.len() > 1 { Some(k_args[1].clone()) } else { None };
-        let w_v = v_args[0].clone();
-        let s_v = if v_args.len() > 1 { Some(v_args[1].clone()) } else { None };
+        let w_q = policy_slots.a.weight();
+        let s_q = policy_slots.a.scale();
+        let w_k = policy_slots.b.weight();
+        let s_k = policy_slots.b.scale();
+        let w_v = policy_slots.c.weight();
+        let s_v = policy_slots.c.scale();
 
         // Use input buffer as dummy for missing optional args.
         let dummy_arg = TensorArg::from_tensor(input);
@@ -257,10 +259,17 @@ impl CompiledStep for CompiledFusedQkvStep {
             .unwrap_or_else(|| dummy_arg.clone());
 
         let b_q_saved = b_q.clone();
-        let weights_per_block = if shared_policy.has_scale() {
-            shared_policy.meta().weights_per_block as u32
+        let fallback_weights_per_block = self.step.weights_per_block.resolve(bindings);
+        let weights_per_block_q = effective_weights_per_block(policy_q.as_ref(), fallback_weights_per_block);
+        let weights_per_block_k = if same_policy {
+            weights_per_block_q
         } else {
-            self.step.weights_per_block.resolve(bindings)
+            effective_weights_per_block(policy_k.as_ref(), fallback_weights_per_block)
+        };
+        let weights_per_block_v = if same_policy {
+            weights_per_block_q
+        } else {
+            effective_weights_per_block(policy_v.as_ref(), fallback_weights_per_block)
         };
 
         let args = FusedQkvArgs {
@@ -274,7 +283,9 @@ impl CompiledStep for CompiledFusedQkvStep {
             k_dim,
             n_dim,
             n_kv,
-            weights_per_block,
+            weights_per_block_q,
+            weights_per_block_k,
+            weights_per_block_v,
             out_q: TensorArg::from_tensor(out_q),
             out_k: TensorArg::from_tensor(out_k),
             out_v: TensorArg::from_tensor(out_v),
@@ -286,7 +297,7 @@ impl CompiledStep for CompiledFusedQkvStep {
             epsilon: bindings.get_f32_var_or("rms_eps", 1e-6),
         };
 
-        let kernel = super::kernels::get_fused_qkv_kernel(self.step.strategy, shared_policy, self.gamma_idx.is_some());
+        let kernel = super::kernels::get_fused_qkv_kernel(self.step.strategy, policy_q, policy_k, policy_v, self.gamma_idx.is_some());
 
         // Manual dispatch to support M dimension (batch)
         const WARPS_PER_TG: usize = 8;

@@ -1,5 +1,3 @@
-use std::sync::OnceLock;
-
 use metallic_env::{FA_DECODE_KEYS_PER_WARP, FA_DECODE_SCALAR, FA_DECODE_TG_OUT, FA_DECODE_WARPS};
 
 use crate::MetalError;
@@ -103,59 +101,51 @@ impl FlashDecodeVariant {
     }
 }
 
-fn parse_env_u32(key: &'static str) -> Option<u32> {
-    match key {
-        "METALLIC_FA_DECODE_WARPS" => FA_DECODE_WARPS.get().ok().flatten(),
-        "METALLIC_FA_DECODE_KEYS_PER_WARP" => FA_DECODE_KEYS_PER_WARP.get().ok().flatten(),
-        _ => None,
-    }
+#[inline]
+fn parse_env_decode_warps() -> Option<u32> {
+    FA_DECODE_WARPS.get_valid()
 }
 
-fn parse_env_scalar() -> Option<FlashDecodeScalar> {
+#[inline]
+fn parse_env_decode_keys_per_warp() -> Option<u32> {
+    FA_DECODE_KEYS_PER_WARP.get_valid()
+}
+
+fn parse_env_scalar() -> Result<Option<FlashDecodeScalar>, MetalError> {
     FA_DECODE_SCALAR
-        .get()
-        .ok()
-        .flatten()
-        .and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
-            "half2" => Some(FlashDecodeScalar::Half2),
-            "half4" => Some(FlashDecodeScalar::Half4),
-            _ => None,
+        .get_valid()
+        .map(|s| match s.trim().to_ascii_lowercase().as_str() {
+            "half2" => Ok(FlashDecodeScalar::Half2),
+            "half4" => Ok(FlashDecodeScalar::Half4),
+            other => Err(MetalError::OperationNotSupported(format!(
+                "Invalid METALLIC_FA_DECODE_SCALAR='{}'; expected one of: half2, half4",
+                other
+            ))),
         })
+        .transpose()
 }
 
-fn parse_env_tg_out() -> Option<FlashDecodeTgOut> {
+fn parse_env_tg_out() -> Result<Option<FlashDecodeTgOut>, MetalError> {
     FA_DECODE_TG_OUT
-        .get()
-        .ok()
-        .flatten()
-        .and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
-            "float" | "f32" | "tgf" => Some(FlashDecodeTgOut::Float),
-            "half" | "f16" | "tgh" => Some(FlashDecodeTgOut::Half),
-            _ => None,
+        .get_valid()
+        .map(|s| match s.trim().to_ascii_lowercase().as_str() {
+            "float" | "f32" | "tgf" => Ok(FlashDecodeTgOut::Float),
+            "half" | "f16" | "tgh" => Ok(FlashDecodeTgOut::Half),
+            other => Err(MetalError::OperationNotSupported(format!(
+                "Invalid METALLIC_FA_DECODE_TG_OUT='{}'; expected one of: float|f32|tgf, half|f16|tgh",
+                other
+            ))),
         })
-}
-
-#[derive(Clone, Copy, Debug)]
-struct EnvOverride {
-    warps: Option<u32>,
-    keys_per_warp: Option<u32>,
-    scalar: Option<FlashDecodeScalar>,
-    tg_out: Option<FlashDecodeTgOut>,
-}
-
-fn decode_env_override() -> &'static EnvOverride {
-    static OVERRIDE: OnceLock<EnvOverride> = OnceLock::new();
-    OVERRIDE.get_or_init(|| EnvOverride {
-        warps: parse_env_u32("METALLIC_FA_DECODE_WARPS"),
-        keys_per_warp: parse_env_u32("METALLIC_FA_DECODE_KEYS_PER_WARP"),
-        scalar: parse_env_scalar(),
-        tg_out: parse_env_tg_out(),
-    })
+        .transpose()
 }
 
 pub fn flash_decode_variant_from_env(head_dim: u32) -> Result<Option<FlashDecodeVariant>, MetalError> {
-    let ov = decode_env_override();
-    if ov.warps.is_none() && ov.keys_per_warp.is_none() && ov.scalar.is_none() && ov.tg_out.is_none() {
+    let warps = parse_env_decode_warps();
+    let keys_per_warp = parse_env_decode_keys_per_warp();
+    let scalar = parse_env_scalar()?;
+    let tg_out = parse_env_tg_out()?;
+
+    if warps.is_none() && keys_per_warp.is_none() && scalar.is_none() && tg_out.is_none() {
         return Ok(None);
     }
 
@@ -167,10 +157,10 @@ pub fn flash_decode_variant_from_env(head_dim: u32) -> Result<Option<FlashDecode
     };
 
     let variant = FlashDecodeVariant {
-        warps: ov.warps.unwrap_or(if head_dim == 64 { 16 } else { 8 }),
-        keys_per_warp: ov.keys_per_warp.unwrap_or(if head_dim == 64 { 32 } else { 16 }),
-        scalar: ov.scalar.unwrap_or(default_scalar),
-        tg_out: ov.tg_out.unwrap_or(FlashDecodeTgOut::Float),
+        warps: warps.unwrap_or(if head_dim == 64 { 16 } else { 8 }),
+        keys_per_warp: keys_per_warp.unwrap_or(if head_dim == 64 { 32 } else { 16 }),
+        scalar: scalar.unwrap_or(default_scalar),
+        tg_out: tg_out.unwrap_or(FlashDecodeTgOut::Float),
     };
 
     variant.validate_for_head_dim(head_dim)?;
@@ -245,7 +235,10 @@ pub fn select_flash_decode_variant(head_dim: u32, kv_len: u32, _storage_bytes: u
 
 #[cfg(test)]
 mod tests {
-    use super::{select_flash_decode_variant, select_flash_decode_variant_m2m3};
+    use metallic_env::{EnvVarGuard, FoundryEnvVar};
+    use serial_test::serial;
+
+    use super::{flash_decode_variant_from_env, select_flash_decode_variant, select_flash_decode_variant_m2m3};
 
     #[test]
     fn storage_aware_selector_matches_tuned_table_for_current_paths() {
@@ -259,5 +252,39 @@ mod tests {
         let a = select_flash_decode_variant(128, 4096, 4);
         let b = select_flash_decode_variant_m2m3(128, 4096);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    #[serial]
+    fn decode_override_is_not_process_latched() {
+        let _clear_warps = EnvVarGuard::unset(FoundryEnvVar::FaDecodeWarps);
+        let _clear_keys = EnvVarGuard::unset(FoundryEnvVar::FaDecodeKeysPerWarp);
+        let _clear_scalar = EnvVarGuard::unset(FoundryEnvVar::FaDecodeScalar);
+        let _clear_tg = EnvVarGuard::unset(FoundryEnvVar::FaDecodeTgOut);
+
+        {
+            let _w = EnvVarGuard::set(FoundryEnvVar::FaDecodeWarps, "8");
+            let v = flash_decode_variant_from_env(64).expect("variant read").expect("override");
+            assert_eq!(v.warps, 8);
+        }
+
+        {
+            let _w = EnvVarGuard::set(FoundryEnvVar::FaDecodeWarps, "16");
+            let v = flash_decode_variant_from_env(64).expect("variant read").expect("override");
+            assert_eq!(v.warps, 16);
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn decode_override_rejects_invalid_scalar() {
+        let _clear_warps = EnvVarGuard::unset(FoundryEnvVar::FaDecodeWarps);
+        let _clear_keys = EnvVarGuard::unset(FoundryEnvVar::FaDecodeKeysPerWarp);
+        let _clear_tg = EnvVarGuard::unset(FoundryEnvVar::FaDecodeTgOut);
+        let _scalar = EnvVarGuard::set(FoundryEnvVar::FaDecodeScalar, "bad-scalar");
+
+        let err = flash_decode_variant_from_env(64).expect_err("invalid scalar should fail-fast");
+        let msg = format!("{err}");
+        assert!(msg.contains("Invalid METALLIC_FA_DECODE_SCALAR"));
     }
 }
