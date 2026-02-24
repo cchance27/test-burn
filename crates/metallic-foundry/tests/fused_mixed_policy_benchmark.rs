@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{io::Write, time::Instant};
 
 use half::f16;
 use metallic_foundry::{
@@ -19,6 +19,34 @@ fn bench_warmup() -> usize {
         .and_then(|v| v.trim().parse::<usize>().ok())
         .map(|v| v.min(100))
         .unwrap_or(20)
+}
+
+fn bench_log_every() -> usize {
+    std::env::var("METALLIC_FUSED_POLICY_BENCH_LOG_EVERY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|v| v.max(1))
+        .unwrap_or(10)
+}
+
+fn env_usize(key: &'static str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn qkv_shape() -> (usize, usize, usize) {
+    let k_dim = env_usize("METALLIC_FUSED_QKV_BENCH_K_DIM", 1024);
+    let n_dim = env_usize("METALLIC_FUSED_QKV_BENCH_N_DIM", 1024);
+    let n_kv = env_usize("METALLIC_FUSED_QKV_BENCH_N_KV", 256);
+    (k_dim, n_dim, n_kv)
+}
+
+fn swiglu_shape() -> (usize, usize) {
+    let k_dim = env_usize("METALLIC_FUSED_SWIGLU_BENCH_K_DIM", 1024);
+    let n_dim = env_usize("METALLIC_FUSED_SWIGLU_BENCH_N_DIM", 1024);
+    (k_dim, n_dim)
 }
 
 fn bind_all_symbols(symbols: &SymbolTable, bindings: &TensorBindings) -> FastBindings {
@@ -51,16 +79,30 @@ fn bench_materialized(
     iterations: usize,
     run: impl Fn(&mut Foundry) -> Result<(), MetalError>,
 ) -> Result<f64, MetalError> {
-    for _ in 0..warmup {
+    println!("  -> {label}: warmup start ({warmup} iterations)");
+    let _ = std::io::stdout().flush();
+    let warmup_log_every = bench_log_every().min(warmup.max(1));
+    for i in 0..warmup {
         run(foundry)?;
         foundry.synchronize()?;
+        if i == 0 || (i + 1) % warmup_log_every == 0 || i + 1 == warmup {
+            println!("     [{label}] warmup {}/{}", i + 1, warmup);
+            let _ = std::io::stdout().flush();
+        }
     }
 
+    println!("  -> {label}: measure start ({iterations} iterations)");
+    let _ = std::io::stdout().flush();
     let start = Instant::now();
-    for _ in 0..iterations {
+    let iter_log_every = bench_log_every().min(iterations.max(1));
+    for i in 0..iterations {
         run(foundry)?;
         // Force each iteration to fully materialize on GPU for stable mixed-policy comparisons.
         foundry.synchronize()?;
+        if i == 0 || (i + 1) % iter_log_every == 0 || i + 1 == iterations {
+            println!("     [{label}] iter {}/{}", i + 1, iterations);
+            let _ = std::io::stdout().flush();
+        }
     }
     let elapsed = start.elapsed();
     let avg_us = elapsed.as_micros() as f64 / iterations as f64;
@@ -78,6 +120,7 @@ fn build_qkv_exec(
     n_kv: usize,
 ) -> Result<(Vec<Box<dyn CompiledStep>>, FastBindings, TensorBindings, SymbolTable), MetalError> {
     let mut bindings = TensorBindings::new();
+    let blocks_per_k = k_dim.div_ceil(32);
 
     let hidden = FoundryTensor::<F16, Pooled>::new(foundry, vec![1, k_dim], TensorInit::CopyFrom(&vec![f16::from_f32(0.1); k_dim]))?;
     let gamma = FoundryTensor::<F16, Pooled>::new(foundry, vec![k_dim], TensorInit::CopyFrom(&vec![f16::from_f32(1.0); k_dim]))?;
@@ -93,7 +136,11 @@ fn build_qkv_exec(
 
     if q_mixed {
         let w_q = FoundryTensor::<Q8_0, Pooled>::new(foundry, vec![n_dim * k_dim], TensorInit::CopyFrom(&vec![0u8; n_dim * k_dim]))?;
-        let s_q = FoundryTensor::<Q8_0, Pooled>::new(foundry, vec![n_dim * 2], TensorInit::CopyFrom(&vec![0u8; n_dim * 2]))?;
+        let s_q = FoundryTensor::<Q8_0, Pooled>::new(
+            foundry,
+            vec![n_dim * blocks_per_k * 2],
+            TensorInit::CopyFrom(&vec![0u8; n_dim * blocks_per_k * 2]),
+        )?;
         bindings.insert("w_q".to_string(), TensorArg::from_tensor(&w_q));
         bindings.insert("w_q_scales".to_string(), TensorArg::from_tensor(&s_q));
     } else {
@@ -107,7 +154,11 @@ fn build_qkv_exec(
 
     if k_mixed {
         let w_k = FoundryTensor::<Q8_0, Pooled>::new(foundry, vec![n_kv * k_dim], TensorInit::CopyFrom(&vec![0u8; n_kv * k_dim]))?;
-        let s_k = FoundryTensor::<Q8_0, Pooled>::new(foundry, vec![n_kv * 2], TensorInit::CopyFrom(&vec![0u8; n_kv * 2]))?;
+        let s_k = FoundryTensor::<Q8_0, Pooled>::new(
+            foundry,
+            vec![n_kv * blocks_per_k * 2],
+            TensorInit::CopyFrom(&vec![0u8; n_kv * blocks_per_k * 2]),
+        )?;
         bindings.insert("w_k".to_string(), TensorArg::from_tensor(&w_k));
         bindings.insert("w_k_scales".to_string(), TensorArg::from_tensor(&s_k));
     } else {
@@ -121,7 +172,11 @@ fn build_qkv_exec(
 
     if v_mixed {
         let w_v = FoundryTensor::<Q8_0, Pooled>::new(foundry, vec![n_kv * k_dim], TensorInit::CopyFrom(&vec![0u8; n_kv * k_dim]))?;
-        let s_v = FoundryTensor::<Q8_0, Pooled>::new(foundry, vec![n_kv * 2], TensorInit::CopyFrom(&vec![0u8; n_kv * 2]))?;
+        let s_v = FoundryTensor::<Q8_0, Pooled>::new(
+            foundry,
+            vec![n_kv * blocks_per_k * 2],
+            TensorInit::CopyFrom(&vec![0u8; n_kv * blocks_per_k * 2]),
+        )?;
         bindings.insert("w_v".to_string(), TensorArg::from_tensor(&w_v));
         bindings.insert("w_v_scales".to_string(), TensorArg::from_tensor(&s_v));
     } else {
@@ -170,6 +225,7 @@ fn build_swiglu_exec(
     n_dim: usize,
 ) -> Result<(Vec<Box<dyn CompiledStep>>, FastBindings, TensorBindings, SymbolTable), MetalError> {
     let mut bindings = TensorBindings::new();
+    let blocks_per_k = k_dim.div_ceil(32);
 
     let input = FoundryTensor::<F16, Pooled>::new(foundry, vec![1, k_dim], TensorInit::CopyFrom(&vec![f16::from_f32(0.2); k_dim]))?;
     let gamma = FoundryTensor::<F16, Pooled>::new(foundry, vec![k_dim], TensorInit::CopyFrom(&vec![f16::from_f32(1.0); k_dim]))?;
@@ -180,7 +236,11 @@ fn build_swiglu_exec(
 
     if gate_mixed {
         let w_gate = FoundryTensor::<Q8_0, Pooled>::new(foundry, vec![n_dim * k_dim], TensorInit::CopyFrom(&vec![0u8; n_dim * k_dim]))?;
-        let s_gate = FoundryTensor::<Q8_0, Pooled>::new(foundry, vec![n_dim * 2], TensorInit::CopyFrom(&vec![0u8; n_dim * 2]))?;
+        let s_gate = FoundryTensor::<Q8_0, Pooled>::new(
+            foundry,
+            vec![n_dim * blocks_per_k * 2],
+            TensorInit::CopyFrom(&vec![0u8; n_dim * blocks_per_k * 2]),
+        )?;
         bindings.insert("wg".to_string(), TensorArg::from_tensor(&w_gate));
         bindings.insert("wg_scales".to_string(), TensorArg::from_tensor(&s_gate));
     } else {
@@ -194,7 +254,11 @@ fn build_swiglu_exec(
 
     if up_mixed {
         let w_up = FoundryTensor::<Q8_0, Pooled>::new(foundry, vec![n_dim * k_dim], TensorInit::CopyFrom(&vec![0u8; n_dim * k_dim]))?;
-        let s_up = FoundryTensor::<Q8_0, Pooled>::new(foundry, vec![n_dim * 2], TensorInit::CopyFrom(&vec![0u8; n_dim * 2]))?;
+        let s_up = FoundryTensor::<Q8_0, Pooled>::new(
+            foundry,
+            vec![n_dim * blocks_per_k * 2],
+            TensorInit::CopyFrom(&vec![0u8; n_dim * blocks_per_k * 2]),
+        )?;
         bindings.insert("wu".to_string(), TensorArg::from_tensor(&w_up));
         bindings.insert("wu_scales".to_string(), TensorArg::from_tensor(&s_up));
     } else {
@@ -238,15 +302,18 @@ fn benchmark_fused_qkv_mixed_policy_materialized() -> Result<(), MetalError> {
 
     let iterations = bench_iterations();
     let warmup = bench_warmup();
-    let k_dim = 4096usize;
-    let n_dim = 4096usize;
-    let n_kv = 1024usize;
+    let (k_dim, n_dim, n_kv) = qkv_shape();
     println!(
         "FusedQkv mixed-policy benchmark (materialized): iters={iterations}, warmup={warmup}, k_dim={k_dim}, n_dim={n_dim}, n_kv={n_kv}"
     );
+    let _ = std::io::stdout().flush();
 
+    println!("  -> building uniform fused QKV graph");
+    let _ = std::io::stdout().flush();
     let (uniform_steps, uniform_fast, uniform_bindings, uniform_symbols) =
         build_qkv_exec(&mut foundry, false, false, false, k_dim, n_dim, n_kv)?;
+    println!("  -> building mixed fused QKV graph");
+    let _ = std::io::stdout().flush();
     let (mixed_steps, mixed_fast, mixed_bindings, mixed_symbols) = build_qkv_exec(&mut foundry, true, false, false, k_dim, n_dim, n_kv)?;
 
     let uniform_us = bench_materialized(&mut foundry, "uniform f16/f16/f16", warmup, iterations, |f| {
@@ -278,11 +345,15 @@ fn benchmark_fused_swiglu_mixed_policy_materialized() -> Result<(), MetalError> 
 
     let iterations = bench_iterations();
     let warmup = bench_warmup();
-    let k_dim = 4096usize;
-    let n_dim = 4096usize;
+    let (k_dim, n_dim) = swiglu_shape();
     println!("FusedSwiGlu mixed-policy benchmark (materialized): iters={iterations}, warmup={warmup}, k_dim={k_dim}, n_dim={n_dim}");
+    let _ = std::io::stdout().flush();
 
+    println!("  -> building uniform fused SwiGLU graph");
+    let _ = std::io::stdout().flush();
     let (uniform_steps, uniform_fast, uniform_bindings, uniform_symbols) = build_swiglu_exec(&mut foundry, false, false, k_dim, n_dim)?;
+    println!("  -> building mixed fused SwiGLU graph");
+    let _ = std::io::stdout().flush();
     let (mixed_steps, mixed_fast, mixed_bindings, mixed_symbols) = build_swiglu_exec(&mut foundry, true, false, k_dim, n_dim)?;
 
     let uniform_us = bench_materialized(&mut foundry, "uniform f16/f16", warmup, iterations, |f| {
