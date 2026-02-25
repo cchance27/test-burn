@@ -26,6 +26,7 @@ pub enum FoundryEnvVar {
     DebugChatTemplate,
     RecordCbGpuTiming,
     PolicyVariant,
+    ComputeDtype,
     AccumDtype,
     TuiMode,
     FoundryPerKernelProfiling,
@@ -88,6 +89,7 @@ impl FoundryEnvVar {
             FoundryEnvVar::DebugChatTemplate => "METALLIC_DEBUG_CHAT_TEMPLATE",
             FoundryEnvVar::RecordCbGpuTiming => "METALLIC_RECORD_CB_GPU_TIMING",
             FoundryEnvVar::PolicyVariant => "METALLIC_POLICY_VARIANT",
+            FoundryEnvVar::ComputeDtype => "METALLIC_COMPUTE_DTYPE",
             FoundryEnvVar::AccumDtype => "METALLIC_ACCUM_DTYPE",
             FoundryEnvVar::TuiMode => "METALLIC_TUI_MODE",
             FoundryEnvVar::FoundryPerKernelProfiling => "METALLIC_FOUNDRY_PER_KERNEL_PROFILING",
@@ -168,6 +170,8 @@ pub const RECORD_CB_GPU_TIMING: TypedEnvVar<bool> =
     TypedEnvVar::new(FoundryEnvVar::RecordCbGpuTiming.into_env(), parse_truthy_flag, format_bool);
 /// Typed descriptor for METALLIC_POLICY_VARIANT.
 pub const POLICY_VARIANT: TypedEnvVar<String> = TypedEnvVar::new(FoundryEnvVar::PolicyVariant.into_env(), parse_string, format_string);
+/// Typed descriptor for METALLIC_COMPUTE_DTYPE.
+pub const COMPUTE_DTYPE: TypedEnvVar<String> = TypedEnvVar::new(FoundryEnvVar::ComputeDtype.into_env(), parse_string, format_string);
 /// Typed descriptor for METALLIC_ACCUM_DTYPE.
 pub const ACCUM_DTYPE: TypedEnvVar<String> = TypedEnvVar::new(FoundryEnvVar::AccumDtype.into_env(), parse_string, format_string);
 /// Typed descriptor for METALLIC_FOUNDRY_PER_KERNEL_PROFILING.

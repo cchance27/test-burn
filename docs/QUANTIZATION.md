@@ -59,6 +59,18 @@ It defines storage/compute/accum aliases, fast-lane aliases, and helper APIs:
 
 Kernels use this helper layer broadly (including FlashAttention, GEMV, QKV, SwiGLU, RoPE, softmax/materialized SDPA paths) so kernel code can stay policy/runtime-typed without per-kernel dtype branching.
 
+## Authoritative Runtime DType Matrix
+
+This table is the current source of truth for runtime dtype behavior.
+
+| Area | Storage dtype(s) | Compute dtype | Accum dtype | Contract / fail-fast behavior |
+|---|---|---|---|---|
+| Runtime helper layer (`runtime_types.metal`) | Bound tensor storage (`F16/F32/BF16` for dense, `uchar` for quant storage) | Inferred from runtime tensor mix, optionally overridden by `METALLIC_COMPUTE_DTYPE` / `--compute-dtype` | `METALLIC_ACCUM_DTYPE` / `--accum-dtype` (default `F32`) | Invalid override value fails fast. If accum precision is narrower than compute, compute is clamped to accum and a warning is emitted. |
+| FlashAttention dense kernels | Dense `F16`/`F32` only (uniform per op) | Runtime helper compute contract | Runtime helper accum contract | Non-dense or mixed dense dtypes are rejected. Invalid accum override fails fast. Non-`F32` accum is allowed with warning about possible stability loss. |
+| FusedQkv (tuple policy) | Per-buffer tuple policy `(q,k,v)` (uniform and mixed-policy supported) | Runtime helper compute contract | Runtime helper accum contract | Tuple-aware fused variants are generated/dispatched via policy tuples. Unresolved/invalid policy contracts fail fast. |
+| Fused SwiGLU / fused FFN SwiGLU RMSNorm (tuple policy) | Per-buffer tuple policy `(gate,up)` | Runtime helper compute contract | Runtime helper accum contract | Tuple-aware fused variants are generated/dispatched via policy tuples. Unresolved/invalid policy contracts fail fast. |
+| Runtime configuration surface | N/A | CLI: `--compute-dtype`; API: `FoundryConfig::with_compute_dtype`; generic override: `--foundry-env METALLIC_COMPUTE_DTYPE=...` | CLI: `--accum-dtype`; API: `FoundryConfig::with_accum_dtype`; generic override: `--foundry-env METALLIC_ACCUM_DTYPE=...` | All override sources flow through `Foundry::new_with_config(...)` and `metallic_env` scoped overrides. |
+
 ## Core Concepts
 
 ### 1. The Unified Policy Struct
@@ -226,12 +238,14 @@ This prevents format-specific regressions (e.g., `Q6_K` using a different logica
 
 ## Mixed-Quant Fused Paths (Current Status)
 
-Foundry fail-fast policy for mixed-policy fused paths:
+Tuple-policy fused execution is now supported:
 
-- `FusedQkv`: `w_q/w_k/w_v` policies must match.
-- `FusedSwiglu` / `FusedFfnSwiGluRmsNorm`: gate/up policies must match.
+- `FusedQkv` dispatches by `(q,k,v)` policy tuple.
+- `FusedSwiglu` / `FusedFfnSwiGluRmsNorm` dispatch by `(gate,up)` policy tuple.
 
-Mixed-policy fused configurations are rejected explicitly to avoid silent math/layout corruption and hidden perf cliffs.
+Kernel cache keys include policy tuples so mixed-policy variants are cached independently from uniform fast paths.
+
+Foundry remains fail-fast for invalid/unresolved policy contracts and unsupported dtype contracts.
 
 ## Scales Are Opaque Bytes
 

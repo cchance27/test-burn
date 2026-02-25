@@ -9,7 +9,7 @@ use crate::{
 
 #[test]
 fn dual_project_emit_and_policy_metadata() {
-    let stage = FfnDualProjectStage::new(Arc::new(PolicyF16)).with_norm("inv_rms");
+    let stage = FfnDualProjectStage::new(Arc::new(PolicyF16), Arc::new(PolicyF16)).with_norm("inv_rms");
     let (out, code) = stage.emit("unused");
 
     assert_eq!(out, "gu_partial");

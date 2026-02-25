@@ -279,7 +279,12 @@ ALWAYS_INLINE float4 metallic_load_gamma_vec4f(const device GammaStorageT* ptr, 
 #endif
 
 ALWAYS_INLINE void metallic_store_output(device OutputStorageT* ptr, const IndexT idx, const AccumT value) {
+    // Conversion-elision fast path when accum/output are both FP16 lanes.
+#if METALLIC_FASTPATH_OUTPUT_HALF && METALLIC_FASTPATH_ACCUM_HALF
+    ptr[idx] = (OutputStorageT)value;
+#else
     ptr[idx] = metallic_to_output(value);
+#endif
 }
 #if !METALLIC_INDEX_IS_64
 ALWAYS_INLINE void metallic_store_output(device OutputStorageT* ptr, const ulong idx, const AccumT value) {
@@ -287,7 +292,15 @@ ALWAYS_INLINE void metallic_store_output(device OutputStorageT* ptr, const ulong
 }
 #endif
 
+// Forward declarations for auto-routing in indexed helpers.
+ALWAYS_INLINE void metallic_store_output2_contig(device OutputStorageT* ptr, const IndexT idx, const float2 value);
+ALWAYS_INLINE void metallic_store_output4_contig(device OutputStorageT* ptr, const IndexT idx, const float4 value);
+
 ALWAYS_INLINE void metallic_store_output2(device OutputStorageT* ptr, const IndexT idx0, const IndexT idx1, const float2 value) {
+    if (idx1 == idx0 + (IndexT)1) {
+        metallic_store_output2_contig(ptr, idx0, value);
+        return;
+    }
     metallic_store_output(ptr, idx0, metallic_to_accum(value[0]));
     metallic_store_output(ptr, idx1, metallic_to_accum(value[1]));
 }
@@ -305,6 +318,10 @@ ALWAYS_INLINE void metallic_store_output4(
     const IndexT idx3,
     const float4 value
 ) {
+    if (idx1 == idx0 + (IndexT)1 && idx2 == idx1 + (IndexT)1 && idx3 == idx2 + (IndexT)1) {
+        metallic_store_output4_contig(ptr, idx0, value);
+        return;
+    }
     metallic_store_output(ptr, idx0, metallic_to_accum(value[0]));
     metallic_store_output(ptr, idx1, metallic_to_accum(value[1]));
     metallic_store_output(ptr, idx2, metallic_to_accum(value[2]));

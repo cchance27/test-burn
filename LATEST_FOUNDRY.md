@@ -127,16 +127,15 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Selector work:** auto-select per device + shape (kv_len, m) and expose env overrides for benchmarking.
 - **KV-cache quantization (proposal):** add a policy-driven quantized KV-cache format (e.g. int8 + per-block scales) consumable by FlashAttention tile loaders for bandwidth/memory wins, gated by device/heuristics and protected by parity/regression tests.
 
-### 4) Dynamic Runtime DType kernel support (accum, storage, compute)
+## Runtime DType Support Matrix (Authoritative)
 
-- **Goal:** close remaining sprint items for mixed dtype support while keeping performance-first constraints.
-- **Remaining items:**
-  - Run full model-level mixed GGUF validation matrix (long prefill/decode transitions, GQA cases) to confirm no hidden path regressions.
-  - Expand fused RoPE→FlashAttention parity/perf sweep for dense F32 across `head_dim={64,128}` and long KV lengths.
-  - Publish a single authoritative “supported dtype combos” table (storage/compute/accum + fail-fast rules) across docs (`LATEST_FOUNDRY.md`, `docs/QUANTIZATION.md`).
-  - Add optional CLI/config surface for accum dtype selection (`METALLIC_ACCUM_DTYPE`) beyond env-only operation.
-  - Add/store helper regression guard coverage for strided vs contiguous store helpers and keep this in exact CI runs.
-  - Continue micro-optimizing helper-heavy hot loops (conversion-elision + contiguous helper routing) without relaxing fail-fast behavior.
+| Area | Storage | Compute | Accum | Contract / fail-fast behavior |
+|---|---|---|---|---|
+| Runtime helper layer (`runtime_types.metal`) | Per-bound tensor dtype (`F16/F32/BF16` dense, `uchar` for quant storage) | Inferred from runtime tensor mix or `METALLIC_COMPUTE_DTYPE`/`--compute-dtype` | `METALLIC_ACCUM_DTYPE`/`--accum-dtype` (default `F32`) | Invalid dtype override value fails fast. If accum precision is narrower than compute, compute is clamped down to accum with warning. |
+| FlashAttention (dense) | Dense `F16`/`F32` tensors only; uniform Q/K/V/O dtype | Runtime helper compute contract | Runtime helper accum contract | Rejects non-dense or mixed dense dtypes in one op. Invalid accum override fails fast. Non-`F32` accum is allowed but emits stability warning. |
+| FusedQkv (tuple policy) | Per-tensor policy tuple `(q,k,v)` (uniform or mixed quant) | Runtime helper compute contract | Runtime helper accum contract | Tuple-policy fused dispatch is supported; unresolved/invalid policy contracts fail fast. |
+| Fused SwiGLU / fused FFN SwiGLU RMSNorm (tuple policy) | Per-tensor policy tuple `(gate,up)` | Runtime helper compute contract | Runtime helper accum contract | Tuple-policy fused dispatch is supported; unresolved/invalid policy contracts fail fast. |
+| CLI / config surface | N/A | `--compute-dtype`, `--foundry-env METALLIC_COMPUTE_DTYPE=...`, `FoundryConfig::with_compute_dtype(...)` | `--accum-dtype`, `--foundry-env METALLIC_ACCUM_DTYPE=...`, `FoundryConfig::with_accum_dtype(...)` | `Foundry::new_with_config(...)` applies per-instance overrides via `metallic_env` override scope. |
 
 ---
 
@@ -370,3 +369,23 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Completed:** tuple-aware kernel cache keying landed for fused mixed-policy variants with preserved uniform fast-path variants.
 - **Completed:** focused mixed-policy fused benchmarks were added (`fused_mixed_policy_benchmark.rs`) with materialized iteration runs and runtime progress logging for `--nocapture` workflows.
 - **Deferred (intentional):** explicit tuple allowlists and strict per-tuple parity gate enforcement are postponed until the dedicated per-variant benchmarking and kernel-level perf optimization campaign.
+
+### 21. Dynamic Runtime DType Kernel Support (accum, storage, compute) (COMPLETED)
+- **Completed:** model-level mixed-GGUF validation matrix runner landed (`crates/metallic-foundry/tests/mixed_gguf_validation_matrix.rs`) covering prefill/decode transitions, long-context prefill chunking, and GQA group-size variation.
+- **Completed:** dense F32 RoPE→FlashAttention parity/perf sweep landed (`crates/metallic-foundry/tests/flashattention_rope_decode_f32_parity_perf.rs`) for `head_dim={64,128}` and short/long KV lengths with parity + perf thresholds.
+- **Completed:** authoritative dtype support matrix published in `LATEST_FOUNDRY.md` and `docs/QUANTIZATION.md`.
+- **Completed:** CLI/config runtime dtype surface landed:
+  - CLI flags: `--compute-dtype`, `--accum-dtype`, `--foundry-env KEY=VALUE`
+  - Programmatic API: `FoundryConfig::{with_compute_dtype, with_accum_dtype, with_env_override}` via `Foundry::new_with_config(...)`
+- **Completed:** store-helper regression guard coverage landed for strided vs contiguous output stores (`runtime_store_helpers_regression.rs`).
+- **Completed:** helper-path micro-opts landed in `runtime_types.metal`:
+  - conversion-elision fast path in `metallic_store_output` when `AccumT` and output storage are both FP16
+  - contiguous auto-routing in indexed helpers (`metallic_store_output2/4` -> `*_contig` when indices are contiguous)
+- **Completed:** local perf non-regression guard landed (`runtime_store_helpers_perf_guard.rs`) for helper-path changes.
+
+Local narrow gates (manual; no CI dependency):
+
+1. `cargo test -q --message-format=short -p metallic-foundry --test mixed_gguf_validation_matrix mixed_gguf_validation_matrix_prefill_decode_long_context_gqa -- --ignored --exact --nocapture`
+2. `cargo test -q --message-format=short -p metallic-foundry --test flashattention_rope_decode_f32_parity_perf flashattention_rope_decode_f32_parity_and_perf_sweep -- --ignored --exact --nocapture`
+3. `cargo test -q --message-format=short -p metallic-foundry --test runtime_store_helpers_regression runtime_store_helpers_respect_strided_and_contiguous_indices -- --exact`
+4. `cargo test -q --message-format=short -p metallic-foundry --test runtime_store_helpers_perf_guard runtime_store_helpers_perf_non_regression -- --ignored --exact --nocapture`

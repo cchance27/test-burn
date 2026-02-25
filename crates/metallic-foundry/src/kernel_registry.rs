@@ -240,11 +240,15 @@ impl KernelRegistry {
     ///
     /// # Returns
     /// Arc to the cached or newly-compiled pipeline.
-    pub fn get_or_load_pipeline<K: crate::Kernel>(&self, device: &MetalDevice, kernel: &K) -> Result<Arc<Pipeline>, MetalError> {
+    pub fn get_or_load_pipeline<K, F>(&self, device: &MetalDevice, kernel: &K, compile: F) -> Result<Arc<Pipeline>, MetalError>
+    where
+        K: crate::Kernel,
+        F: FnOnce() -> Result<Pipeline, MetalError>,
+    {
         let pipeline_key = PipelineCacheKey::new(kernel, device);
 
         self.pipelines
-            .try_get_with(pipeline_key, || crate::compile_pipeline(device, kernel).map(Arc::new))
+            .try_get_with(pipeline_key, || compile().map(Arc::new))
             .map_err(|e| MetalError::PipelineCreationFailed(format!("Pipeline compilation failed: {}", e)))
     }
 

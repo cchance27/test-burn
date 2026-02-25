@@ -35,6 +35,18 @@ pub struct CliConfig {
     #[arg(long, value_enum, value_name = "BACKEND")]
     pub sdpa_backend: Option<SdpaBackendChoice>,
 
+    /// Compute dtype override for runtime math (`f16`, `bf16`, `f32`).
+    #[arg(long, value_enum, value_name = "DTYPE")]
+    pub compute_dtype: Option<RuntimeDtypeChoice>,
+
+    /// Accumulation dtype override for runtime math (`f16`, `bf16`, `f32`).
+    #[arg(long, value_enum, value_name = "DTYPE")]
+    pub accum_dtype: Option<RuntimeDtypeChoice>,
+
+    /// Foundry runtime env override (repeatable): --foundry-env KEY=VALUE
+    #[arg(long = "foundry-env", value_name = "KEY=VALUE", action = clap::ArgAction::Append)]
+    pub foundry_env: Vec<String>,
+
     /// Optional workflow JSON file path (Foundry engine only). If provided, may include model resources for multi-model workflows.
     #[arg(long, value_name = "WORKFLOW_JSON")]
     pub workflow: Option<String>,
@@ -137,6 +149,25 @@ pub enum SdpaBackendChoice {
     Graph,
 }
 
+/// Runtime dtype choices exposed via the CLI.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
+pub enum RuntimeDtypeChoice {
+    F16,
+    Bf16,
+    F32,
+}
+
+impl RuntimeDtypeChoice {
+    #[must_use]
+    pub fn as_env_value(self) -> &'static str {
+        match self {
+            Self::F16 => "f16",
+            Self::Bf16 => "bf16",
+            Self::F32 => "f32",
+        }
+    }
+}
+
 impl CliConfig {
     /// Get all prompts, using a single default prompt if none were provided.
     pub fn get_prompts(&self) -> Vec<String> {
@@ -169,6 +200,22 @@ impl CliConfig {
             let key = key_raw.trim();
             if key.is_empty() {
                 return Err(format!("Invalid --kwarg '{raw}': key cannot be empty"));
+            }
+            out.push((key.to_string(), value_raw.trim().to_string()));
+        }
+        Ok(out)
+    }
+
+    /// Parse repeatable `--foundry-env key=value` flags into normalized pairs.
+    pub fn parsed_foundry_env_overrides(&self) -> Result<Vec<(String, String)>, String> {
+        let mut out = Vec::with_capacity(self.foundry_env.len());
+        for raw in &self.foundry_env {
+            let Some((key_raw, value_raw)) = raw.split_once('=') else {
+                return Err(format!("Invalid --foundry-env '{raw}': expected key=value"));
+            };
+            let key = key_raw.trim();
+            if key.is_empty() {
+                return Err(format!("Invalid --foundry-env '{raw}': key cannot be empty"));
             }
             out.push((key.to_string(), value_raw.trim().to_string()));
         }

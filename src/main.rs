@@ -82,6 +82,19 @@ fn main() -> AppResult<()> {
     let worker_generation = cli_config.generation;
     let worker_output_format = cli_config.output_format.clone();
     let workflow_path = cli_config.workflow.clone();
+    let mut worker_foundry_config = metallic_foundry::FoundryConfig::default();
+    for (key, value) in cli_config
+        .parsed_foundry_env_overrides()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?
+    {
+        worker_foundry_config = worker_foundry_config.with_env_override(key, value);
+    }
+    if let Some(compute_dtype) = cli_config.compute_dtype {
+        worker_foundry_config = worker_foundry_config.with_env_override("METALLIC_COMPUTE_DTYPE", compute_dtype.as_env_value());
+    }
+    if let Some(accum_dtype) = cli_config.accum_dtype {
+        worker_foundry_config = worker_foundry_config.with_env_override("METALLIC_ACCUM_DTYPE", accum_dtype.as_env_value());
+    }
     let worker_workflow_kwargs = cli_config
         .parsed_workflow_kwargs()
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
@@ -132,6 +145,7 @@ fn main() -> AppResult<()> {
         prompts,
         worker_generation,
         worker_output_format,
+        worker_foundry_config,
         workflow_path,
         worker_workflow_kwargs,
         worker_thinking_override,

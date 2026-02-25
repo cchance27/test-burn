@@ -26,6 +26,7 @@ pub(crate) struct GenerationWorkerParams {
     pub prompts: Vec<String>,
     pub worker_generation: cli::config::GenerationConfig,
     pub worker_output_format: cli::config::OutputFormat,
+    pub worker_foundry_config: metallic_foundry::FoundryConfig,
     pub workflow_path: Option<String>,
     pub worker_workflow_kwargs: Vec<(String, String)>,
     pub worker_thinking_override: Option<bool>,
@@ -39,6 +40,7 @@ pub(crate) fn spawn_generation_worker(params: GenerationWorkerParams) -> thread:
         prompts,
         worker_generation,
         worker_output_format,
+        worker_foundry_config,
         workflow_path,
         worker_workflow_kwargs,
         worker_thinking_override,
@@ -117,7 +119,7 @@ pub(crate) fn spawn_generation_worker(params: GenerationWorkerParams) -> thread:
                 Some(routing.spec_path)
             };
             worker_tx.send(AppEvent::StatusUpdate("Initializing Foundry...".to_string()))?;
-            let mut foundry = metallic_foundry::Foundry::new()?;
+            let mut foundry = metallic_foundry::Foundry::new_with_config(worker_foundry_config)?;
             worker_tx.send(AppEvent::StatusUpdate("Building compiled model(s)...".to_string()))?;
             let mut models_owned: FxHashMap<String, Arc<CompiledModel>> = FxHashMap::default();
             if has_workflow_model_resources {

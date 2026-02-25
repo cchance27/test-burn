@@ -3,8 +3,9 @@
 use std::any::{Any, TypeId};
 
 pub use error::MetalError;
+pub use foundry_config::FoundryConfig;
 use instrument::CaptureMetrics;
-use metallic_env::{ACCUM_DTYPE, DEBUG_KERNEL_BINDINGS, DUMP_METAL_SOURCE_DIR};
+use metallic_env::{ACCUM_DTYPE, COMPUTE_DTYPE, DEBUG_KERNEL_BINDINGS, DUMP_METAL_SOURCE_DIR, Environment, EnvironmentOverrideGuard};
 use rustc_hash::FxHashMap;
 pub use spec::*;
 pub use tensor::*;
@@ -14,6 +15,7 @@ pub use types::*;
 pub mod compound;
 pub mod constants;
 mod error;
+mod foundry_config;
 pub mod fusion;
 pub mod generation;
 pub mod instrument;
@@ -45,6 +47,9 @@ pub enum KernelSource {
 pub struct Foundry {
     pub device: MetalDevice,
     pub queue: MetalQueue,
+    config: FoundryConfig,
+    /// Holds process override scope for metallic_env lookups during Foundry lifetime.
+    _env_override_guard: Option<EnvironmentOverrideGuard>,
     /// Type-safe registry for resources (caches, pools, etc.)
     resources: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
     /// Current stream for batched commands
@@ -58,18 +63,37 @@ pub struct Foundry {
 impl Foundry {
     /// Create a new Foundry with the system default device.
     pub fn new() -> Result<Self, MetalError> {
+        Self::new_with_config(FoundryConfig::default())
+    }
+
+    /// Create a new Foundry with explicit runtime configuration.
+    pub fn new_with_config(config: FoundryConfig) -> Result<Self, MetalError> {
         let device = crate::types::MetalDevice::create_system_default_device()?;
         let queue = device.new_command_queue()?;
-        Foundry::new_with_result(device, queue)
+        Foundry::new_with_result(device, queue, config)
     }
 
     /// Create a new Foundry with an existing device and queue.
     pub fn new_with(device: MetalDevice, queue: MetalQueue) -> Self {
-        Self::new_with_result(device, queue).expect("Failed to create Foundry with existing device and queue")
+        Self::new_with_device_config(device, queue, FoundryConfig::default())
+    }
+
+    /// Create a new Foundry with an existing device, queue, and runtime configuration.
+    pub fn new_with_device_config(device: MetalDevice, queue: MetalQueue, config: FoundryConfig) -> Self {
+        Self::new_with_result(device, queue, config).expect("Failed to create Foundry with existing device and queue")
     }
 
     /// Internal constructor that returns a Result.
-    fn new_with_result(device: MetalDevice, queue: MetalQueue) -> Result<Self, MetalError> {
+    fn new_with_result(device: MetalDevice, queue: MetalQueue, config: FoundryConfig) -> Result<Self, MetalError> {
+        let env_override_guard = if config.has_overrides() {
+            // Overrides can affect source generation (`METALLIC_ACCUM_DTYPE`, etc.). Ensure
+            // stale pipelines from prior override state are not reused.
+            kernel_registry().clear();
+            Some(Environment::push_overrides(config.clone_env_overrides()))
+        } else {
+            None
+        };
+
         let mut resources: FxHashMap<TypeId, Box<dyn Any + Send + Sync>> = FxHashMap::default();
         let pool = pool::MemoryPool::new(device.clone(), queue.clone())?;
         resources.insert(TypeId::of::<pool::MemoryPool>(), Box::new(pool) as Box<dyn Any + Send + Sync>);
@@ -77,11 +101,19 @@ impl Foundry {
         Ok(Self {
             device,
             queue,
+            config,
+            _env_override_guard: env_override_guard,
             resources,
             active_stream: None,
             capture_metrics: None,
-            debug_kernel_bindings_enabled: DEBUG_KERNEL_BINDINGS.get().ok().flatten().unwrap_or(false),
+            debug_kernel_bindings_enabled: DEBUG_KERNEL_BINDINGS.get_valid().unwrap_or(false),
         })
+    }
+
+    /// Access immutable runtime configuration used by this Foundry instance.
+    #[must_use]
+    pub fn config(&self) -> &FoundryConfig {
+        &self.config
     }
 
     /// Retrieve a mutable reference to a registered resource.
@@ -194,7 +226,7 @@ impl Foundry {
     /// Loads or retrieves a compute pipeline for the given Kernel type.
     pub fn load_kernel<K: Kernel>(&mut self, kernel: &K) -> Result<MetalPipeline, MetalError> {
         let registry = kernel_registry();
-        let pipeline = registry.get_or_load_pipeline(&self.device, kernel)?;
+        let pipeline = registry.get_or_load_pipeline(&self.device, kernel, || crate::compile_pipeline(&self.device, kernel))?;
         Ok((*pipeline).clone())
     }
     /// Dispatches a kernel using a pre-loaded pipeline.
@@ -713,8 +745,7 @@ impl RuntimeDtypeSlots {
             Dtype::F16
         };
 
-        let accum_dtype = resolve_accum_dtype_override(compute_dtype);
-        (compute_dtype, accum_dtype)
+        resolve_runtime_math_dtypes(compute_dtype)
     }
 
     fn emit_slot_define(
@@ -740,8 +771,41 @@ impl RuntimeDtypeSlots {
     }
 }
 
-fn resolve_accum_dtype_override(compute_dtype: Dtype) -> Dtype {
-    let requested = match ACCUM_DTYPE.get() {
+fn resolve_runtime_math_dtypes(inferred_compute_dtype: Dtype) -> (Dtype, Dtype) {
+    let mut compute_dtype = resolve_compute_dtype_override(inferred_compute_dtype);
+    let accum_dtype = resolve_accum_dtype_override();
+    if dtype_precision_rank(accum_dtype) < dtype_precision_rank(compute_dtype) {
+        tracing::warn!(
+            requested_compute = ?compute_dtype,
+            requested_accum = ?accum_dtype,
+            forced_compute = ?accum_dtype,
+            "Accum dtype is narrower than compute dtype; forcing compute dtype to match accumulation precision."
+        );
+        compute_dtype = accum_dtype;
+    }
+    (compute_dtype, accum_dtype)
+}
+
+fn resolve_compute_dtype_override(default_compute_dtype: Dtype) -> Dtype {
+    match COMPUTE_DTYPE.get() {
+        Ok(Some(raw)) => match raw.trim().to_ascii_lowercase().as_str() {
+            "f16" | "half" => Dtype::F16,
+            "bf16" | "bfloat16" => Dtype::BF16,
+            "f32" | "float" => Dtype::F32,
+            other => panic!(
+                "Invalid {}='{}': unsupported compute dtype '{}', expected one of f16|bf16|f32",
+                COMPUTE_DTYPE.key(),
+                raw,
+                other
+            ),
+        },
+        Ok(None) => default_compute_dtype,
+        Err(err) => panic!("Failed to read {}: {err:#}", COMPUTE_DTYPE.key()),
+    }
+}
+
+fn resolve_accum_dtype_override() -> Dtype {
+    match ACCUM_DTYPE.get() {
         Ok(Some(raw)) => match raw.trim().to_ascii_lowercase().as_str() {
             "f16" | "half" => Dtype::F16,
             "bf16" | "bfloat16" => Dtype::BF16,
@@ -755,52 +819,38 @@ fn resolve_accum_dtype_override(compute_dtype: Dtype) -> Dtype {
         },
         Ok(None) => Dtype::F32,
         Err(err) => panic!("Failed to read {}: {err:#}", ACCUM_DTYPE.key()),
-    };
+    }
+}
 
-    // Fail-fast if requested accumulation is narrower than compute precision.
-    let rank = |dtype: Dtype| match dtype {
+fn dtype_precision_rank(dtype: Dtype) -> u8 {
+    match dtype {
         Dtype::F16 => 0u8,
         Dtype::BF16 => 1u8,
         Dtype::F32 => 2u8,
         _ => 255u8,
-    };
-    if rank(requested) < rank(compute_dtype) {
-        panic!(
-            "{}={} is incompatible with compute dtype {:?} (accum dtype cannot be narrower than compute).",
-            ACCUM_DTYPE.key(),
-            match requested {
-                Dtype::F16 => "f16",
-                Dtype::BF16 => "bf16",
-                Dtype::F32 => "f32",
-                _ => "unknown",
-            },
-            compute_dtype
-        );
     }
-
-    requested
 }
 
 #[cfg(test)]
 mod math_dtype_tests {
-    use metallic_env::ACCUM_DTYPE;
+    use metallic_env::{ACCUM_DTYPE, COMPUTE_DTYPE};
 
-    use super::resolve_accum_dtype_override;
+    use super::resolve_runtime_math_dtypes;
     use crate::tensor::Dtype;
 
     #[test]
     #[serial_test::serial]
     fn accum_override_accepts_explicit_f32() {
         let _guard = ACCUM_DTYPE.set_guard("f32".to_string()).expect("set accum env");
-        assert_eq!(resolve_accum_dtype_override(Dtype::F32), Dtype::F32);
+        assert_eq!(resolve_runtime_math_dtypes(Dtype::F32), (Dtype::F32, Dtype::F32));
     }
 
     #[test]
     #[serial_test::serial]
-    #[should_panic(expected = "accum dtype cannot be narrower than compute")]
-    fn accum_override_rejects_narrower_than_compute() {
+    fn accum_narrower_than_compute_forces_compute() {
         let _guard = ACCUM_DTYPE.set_guard("f16".to_string()).expect("set accum env");
-        let _ = resolve_accum_dtype_override(Dtype::F32);
+        let _compute_guard = COMPUTE_DTYPE.set_guard("f32".to_string()).expect("set compute env");
+        assert_eq!(resolve_runtime_math_dtypes(Dtype::F32), (Dtype::F16, Dtype::F16));
     }
 }
 
