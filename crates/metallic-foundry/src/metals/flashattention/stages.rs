@@ -1,6 +1,6 @@
 use metallic_macros::{KernelArgs, MetalStruct, Stage};
 
-use super::variants::{FlashDecodeScalar, FlashDecodeTgOut, FlashDecodeVariant};
+use super::variants::{FlashDecodeScalar, FlashDecodeTgOut, FlashDecodeVariant, FlashPrefillEngine};
 use crate::types::TensorArg;
 
 /// Handles layout and indexing for Multi-Head Attention (Decode).
@@ -97,7 +97,7 @@ impl HeadLayoutStage {
 #[stage(
     includes("simd.metal", "flashattention/decode_common.metal", "flashattention/decode_kernels.metal", "softmax/streaming.metal"),
     struct_defs = "SdpaParams",
-    template_bindings(emit_call = "self.fused_emit_call()"),
+    template_bindings(emit_call = "self.fused_emit_call()", use_mma = "if self.use_mma { 1 } else { 0 }"),
     emit = r#"
     {emit_call}
 "#,
@@ -108,11 +108,17 @@ pub struct FlashDecodeFusedStage<const HEAD_DIM: usize> {
     pub sdpa_params: SdpaParams,
     #[arg(skip, stage_skip)]
     pub variant: FlashDecodeVariant,
+    #[arg(skip, stage_skip)]
+    pub use_mma: bool,
 }
 
 impl<const HEAD_DIM: usize> FlashDecodeFusedStage<HEAD_DIM> {
     pub fn new(sdpa_params: SdpaParams, variant: FlashDecodeVariant) -> Self {
-        Self { sdpa_params, variant }
+        Self {
+            sdpa_params,
+            variant,
+            use_mma: false,
+        }
     }
 
     fn fused_emit_call(&self) -> String {
@@ -131,29 +137,31 @@ impl<const HEAD_DIM: usize> FlashDecodeFusedStage<HEAD_DIM> {
                 r#"
     uint warp = (uint)__simd_group_id;
     uint lane = (uint)__simd_lane_id;
-    FLASH_DECODE_DECLARE_REDUCE_SHARED_HALF2({warps}, {tg_out_half}, shared_warp_max, shared_warp_sums, shared_warp_out);
+    FLASH_DECODE_DECLARE_REDUCE_SHARED_HALF2_MMA({warps}, {keys_per_warp}, {tg_out_half}, shared_warp_max, shared_warp_sums, shared_warp_out, shared_warp_scores);
     const threadgroup FlashDecodeVec2T* q_vec = (const threadgroup FlashDecodeVec2T*)q_shared;
-    run_flash_decode_fused_half2_stage<{warps}, {keys_per_warp}, {tg_out_half}>(
-        q_vec, k_ptr, v_ptr, output_ptr, sdpa_params, warp, lane, shared_warp_max, shared_warp_sums, shared_warp_out
+    run_flash_decode_fused_half2_stage<{warps}, {keys_per_warp}, {tg_out_half}, {use_mma}>(
+        q_vec, k_ptr, v_ptr, output_ptr, sdpa_params, warp, lane, shared_warp_max, shared_warp_sums, shared_warp_out, shared_warp_scores
     );
 "#,
                 warps = self.variant.warps,
                 keys_per_warp = self.variant.keys_per_warp,
-                tg_out_half = tg_out_half
+                tg_out_half = tg_out_half,
+                use_mma = if self.use_mma { 1 } else { 0 },
             ),
             FlashDecodeScalar::Half4 => format!(
                 r#"
     uint warp = (uint)__simd_group_id;
     uint lane = (uint)__simd_lane_id;
-    FLASH_DECODE_DECLARE_REDUCE_SHARED_HALF4({warps}, {tg_out_half}, shared_warp_max, shared_warp_sums, shared_warp_out);
+    FLASH_DECODE_DECLARE_REDUCE_SHARED_HALF4_MMA({warps}, {keys_per_warp}, {tg_out_half}, shared_warp_max, shared_warp_sums, shared_warp_out, shared_warp_scores);
     const threadgroup FlashDecodeVec4T* q_vec = (const threadgroup FlashDecodeVec4T*)q_shared;
-    run_flash_decode_fused_half4_stage<{warps}, {keys_per_warp}, {tg_out_half}>(
-        q_vec, k_ptr, v_ptr, output_ptr, sdpa_params, warp, lane, shared_warp_max, shared_warp_sums, shared_warp_out
+    run_flash_decode_fused_half4_stage<{warps}, {keys_per_warp}, {tg_out_half}, {use_mma}>(
+        q_vec, k_ptr, v_ptr, output_ptr, sdpa_params, warp, lane, shared_warp_max, shared_warp_sums, shared_warp_out, shared_warp_scores
     );
 "#,
                 warps = self.variant.warps,
                 keys_per_warp = self.variant.keys_per_warp,
-                tg_out_half = tg_out_half
+                tg_out_half = tg_out_half,
+                use_mma = if self.use_mma { 1 } else { 0 },
             ),
         }
     }
@@ -166,7 +174,7 @@ impl<const HEAD_DIM: usize> FlashDecodeFusedStage<HEAD_DIM> {
 #[stage(
     includes("simd.metal", "flashattention/decode_common.metal", "flashattention/decode_kernels.metal", "softmax/streaming.metal"),
     struct_defs = "SdpaParams",
-    template_bindings(emit_call = "self.standalone_emit_call()"),
+    template_bindings(emit_call = "self.standalone_emit_call()", use_mma = "if self.use_mma { 1 } else { 0 }"),
     emit = r#"
     {emit_call}
 "#,
@@ -177,11 +185,17 @@ pub struct FlashDecodeStage<const HEAD_DIM: usize> {
     pub sdpa_params: SdpaParams,
     #[arg(skip, stage_skip)]
     pub variant: FlashDecodeVariant,
+    #[arg(skip, stage_skip)]
+    pub use_mma: bool,
 }
 
 impl<const HEAD_DIM: usize> FlashDecodeStage<HEAD_DIM> {
     pub fn new(sdpa_params: SdpaParams, variant: FlashDecodeVariant) -> Self {
-        Self { sdpa_params, variant }
+        Self {
+            sdpa_params,
+            variant,
+            use_mma: false,
+        }
     }
 
     fn standalone_emit_call(&self) -> String {
@@ -201,28 +215,30 @@ impl<const HEAD_DIM: usize> FlashDecodeStage<HEAD_DIM> {
     uint warp = (uint)__simd_group_id;
     uint lane = (uint)__simd_lane_id;
     FLASH_DECODE_DECLARE_Q_SHARED_HALF2(q_shared);
-    FLASH_DECODE_DECLARE_REDUCE_SHARED_HALF2({warps}, {tg_out_half}, shared_warp_max, shared_warp_sums, shared_warp_out);
-    run_flash_decode_standalone_half2_stage<{warps}, {keys_per_warp}, {tg_out_half}>(
-        q_ptr, k_ptr, v_ptr, output_ptr, sdpa_params, warp, lane, q_shared, shared_warp_max, shared_warp_sums, shared_warp_out
+    FLASH_DECODE_DECLARE_REDUCE_SHARED_HALF2_MMA({warps}, {keys_per_warp}, {tg_out_half}, shared_warp_max, shared_warp_sums, shared_warp_out, shared_warp_scores);
+    run_flash_decode_standalone_half2_stage<{warps}, {keys_per_warp}, {tg_out_half}, {use_mma}>(
+        q_ptr, k_ptr, v_ptr, output_ptr, sdpa_params, warp, lane, q_shared, shared_warp_max, shared_warp_sums, shared_warp_out, shared_warp_scores
     );
 "#,
                 warps = self.variant.warps,
                 keys_per_warp = self.variant.keys_per_warp,
-                tg_out_half = tg_out_half
+                tg_out_half = tg_out_half,
+                use_mma = if self.use_mma { 1 } else { 0 },
             ),
             FlashDecodeScalar::Half4 => format!(
                 r#"
     uint warp = (uint)__simd_group_id;
     uint lane = (uint)__simd_lane_id;
     FLASH_DECODE_DECLARE_Q_SHARED_HALF4(q_shared);
-    FLASH_DECODE_DECLARE_REDUCE_SHARED_HALF4({warps}, {tg_out_half}, shared_warp_max, shared_warp_sums, shared_warp_out);
-    run_flash_decode_standalone_half4_stage<{warps}, {keys_per_warp}, {tg_out_half}, {vec4}>(
-        q_ptr, k_ptr, v_ptr, output_ptr, sdpa_params, warp, lane, q_shared, shared_warp_max, shared_warp_sums, shared_warp_out
+    FLASH_DECODE_DECLARE_REDUCE_SHARED_HALF4_MMA({warps}, {keys_per_warp}, {tg_out_half}, shared_warp_max, shared_warp_sums, shared_warp_out, shared_warp_scores);
+    run_flash_decode_standalone_half4_stage<{warps}, {keys_per_warp}, {tg_out_half}, {use_mma}, {vec4}>(
+        q_ptr, k_ptr, v_ptr, output_ptr, sdpa_params, warp, lane, q_shared, shared_warp_max, shared_warp_sums, shared_warp_out, shared_warp_scores
     );
 "#,
                 warps = self.variant.warps,
                 keys_per_warp = self.variant.keys_per_warp,
                 tg_out_half = tg_out_half,
+                use_mma = if self.use_mma { 1 } else { 0 },
                 vec4 = HEAD_DIM / 4
             ),
         }
@@ -300,6 +316,7 @@ pub struct SdpaPrefillSplitKParams {
 #[derive(Clone, Copy, Debug)]
 pub struct SdpaPrefillVariant {
     pub warps: u32,
+    pub engine: FlashPrefillEngine,
 }
 
 impl SdpaPrefillVariant {
@@ -317,13 +334,13 @@ impl SdpaPrefillVariant {
         "flashattention/prefill_online.metal",
         "flashattention/prefill_splitk.metal"
     ),
-    template_bindings(warps = "validated_prefill_warps(self.variant)"),
+    template_bindings(warps = "validated_prefill_warps(self.variant)", engine = "validated_prefill_engine(self.variant)"),
     struct_defs("SdpaPrefillParams", "SdpaPrefillSplitKParams"),
     emit = r#"
     SDPA_PREFILL_DECLARE_SHARED(k_shared, v_shared);
     uint simd_lane_id = lid.x & 31u;
     uint simd_group_id = lid.x >> 5;
-    run_sdpa_prefill_stage<{warps}>(
+    run_sdpa_prefill_stage<{warps}, {engine}>(
         q, k, v, output, sdpa_prefill_params, gid, lid, tptg, simd_lane_id, simd_group_id, k_shared, v_shared
     );
 "#,
@@ -352,7 +369,10 @@ impl SdpaPrefillStage {
             v: TensorArg::default(),
             output: TensorArg::default(),
             sdpa_prefill_params: params,
-            variant: SdpaPrefillVariant { warps: 8 },
+            variant: SdpaPrefillVariant {
+                warps: 8,
+                engine: FlashPrefillEngine::Fa2Pipelined,
+            },
         }
     }
 }
@@ -365,13 +385,13 @@ impl SdpaPrefillStage {
         "flashattention/prefill_online.metal",
         "flashattention/prefill_splitk.metal"
     ),
-    template_bindings(warps = "validated_prefill_warps(self.variant)"),
+    template_bindings(warps = "validated_prefill_warps(self.variant)", engine = "validated_prefill_engine(self.variant)"),
     struct_defs("SdpaPrefillParams", "SdpaPrefillSplitKParams"),
     emit = r#"
     SDPA_PREFILL_DECLARE_SHARED(k_shared, v_shared);
     uint simd_lane_id = lid.x & 31u;
     uint simd_group_id = lid.x >> 5;
-    run_sdpa_prefill_splitk_part_stage<{warps}>(
+    run_sdpa_prefill_splitk_part_stage<{warps}, {engine}>(
         q, k, v, partial_acc, partial_m, partial_l, sdpa_prefill_splitk_params, gid, lid, tptg,
         simd_lane_id, simd_group_id, k_shared, v_shared
     );
@@ -408,7 +428,10 @@ impl SdpaPrefillSplitKPartStage {
             partial_m: TensorArg::default(),
             partial_l: TensorArg::default(),
             sdpa_prefill_splitk_params: params,
-            variant: SdpaPrefillVariant { warps: 8 },
+            variant: SdpaPrefillVariant {
+                warps: 8,
+                engine: FlashPrefillEngine::Fa2Pipelined,
+            },
         }
     }
 }
@@ -455,7 +478,10 @@ impl SdpaPrefillSplitKReduceStage {
             partial_m: TensorArg::default(),
             partial_l: TensorArg::default(),
             sdpa_prefill_splitk_params: params,
-            variant: SdpaPrefillVariant { warps: 8 },
+            variant: SdpaPrefillVariant {
+                warps: 8,
+                engine: FlashPrefillEngine::Fa2Pipelined,
+            },
         }
     }
 }
@@ -474,4 +500,10 @@ pub struct SdpaParams {
 fn validated_prefill_warps(variant: SdpaPrefillVariant) -> u32 {
     variant.validate();
     variant.warps
+}
+
+#[inline]
+fn validated_prefill_engine(variant: SdpaPrefillVariant) -> u32 {
+    variant.validate();
+    variant.engine.template_tag()
 }

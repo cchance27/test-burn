@@ -5,7 +5,7 @@ use metallic_macros::KernelArgs;
 use super::{
     stages::{
         FlashDecodeFusedStage, FlashDecodeStage, HeadLayoutStage, SdpaParams, SdpaPrefillParams, SdpaPrefillSplitKParams, SdpaPrefillSplitKPartStage, SdpaPrefillSplitKReduceStage, SdpaPrefillStage, SdpaPrefillVariant
-    }, variants::FlashDecodeVariant
+    }, variants::{FlashDecodeVariant, FlashPrefillEngine}
 };
 use crate::{
     compound::CompiledCompoundKernel, metals::{
@@ -45,10 +45,16 @@ pub(super) fn get_rope_flash_decode_kernel(head_dim: u32, variant: FlashDecodeVa
     })
 }
 
-pub(super) fn get_flash_decode_kernel(head_dim: u32, variant: FlashDecodeVariant) -> Arc<CompiledCompoundKernel> {
+pub(super) fn get_flash_decode_kernel(head_dim: u32, variant: FlashDecodeVariant, use_mma: bool) -> Arc<CompiledCompoundKernel> {
     let suffix = variant.cache_key_suffix();
     let stage_head_dim = if head_dim == 64 { 64 } else { 128 };
-    let name_suffix = format!("d{}_h{}_{}", stage_head_dim, head_dim, suffix);
+    let name_suffix = format!(
+        "d{}_h{}_{}_{}",
+        stage_head_dim,
+        head_dim,
+        suffix,
+        if use_mma { "mma" } else { "scalar" }
+    );
     get_or_build_compound_kernel("flash_decode_standalone", name_suffix.clone(), || {
         let dummy_tensor = TensorArg::default();
         let dummy_layout = HeadLayoutStage::new(
@@ -63,8 +69,16 @@ pub(super) fn get_flash_decode_kernel(head_dim: u32, variant: FlashDecodeVariant
         );
 
         let stage_box: Box<dyn crate::compound::Stage> = match stage_head_dim {
-            128 => Box::new(FlashDecodeStage::<128>::new(SdpaParams::default(), variant)),
-            64 => Box::new(FlashDecodeStage::<64>::new(SdpaParams::default(), variant)),
+            128 => {
+                let mut stage = FlashDecodeStage::<128>::new(SdpaParams::default(), variant);
+                stage.use_mma = use_mma;
+                Box::new(stage)
+            }
+            64 => {
+                let mut stage = FlashDecodeStage::<64>::new(SdpaParams::default(), variant);
+                stage.use_mma = use_mma;
+                Box::new(stage)
+            }
             _ => panic!("Unsupported decode stage_head_dim for Flash Decode: {}", stage_head_dim),
         };
 
@@ -75,23 +89,29 @@ pub(super) fn get_flash_decode_kernel(head_dim: u32, variant: FlashDecodeVariant
     })
 }
 
-pub(super) fn get_sdpa_prefill_kernel(prefill_warps: u32) -> Arc<CompiledCompoundKernel> {
-    let variant = format!("w{}", prefill_warps);
-    get_or_build_compound_kernel("sdpa_prefill", variant, || {
+pub(super) fn get_sdpa_prefill_kernel(variant: SdpaPrefillVariant) -> Arc<CompiledCompoundKernel> {
+    let key_variant = format!("w{}_{}", variant.warps, variant.engine.cache_key_suffix());
+    get_or_build_compound_kernel("sdpa_prefill", key_variant, || {
         let mut stage = SdpaPrefillStage::new(SdpaPrefillParams::default());
-        stage.variant = SdpaPrefillVariant { warps: prefill_warps };
-        manual_output(&format!("sdpa_prefill_w{}", prefill_warps)).main(stage).compile()
+        stage.variant = variant;
+        manual_output(&format!("sdpa_prefill_w{}_{}", variant.warps, variant.engine.cache_key_suffix()))
+            .main(stage)
+            .compile()
     })
 }
 
-pub(super) fn get_sdpa_prefill_splitk_part_kernel(prefill_warps: u32) -> Arc<CompiledCompoundKernel> {
-    let variant = format!("w{}", prefill_warps);
-    get_or_build_compound_kernel("sdpa_prefill_splitk_part", variant, || {
+pub(super) fn get_sdpa_prefill_splitk_part_kernel(variant: SdpaPrefillVariant) -> Arc<CompiledCompoundKernel> {
+    let key_variant = format!("w{}_{}", variant.warps, variant.engine.cache_key_suffix());
+    get_or_build_compound_kernel("sdpa_prefill_splitk_part", key_variant, || {
         let mut stage = SdpaPrefillSplitKPartStage::new(SdpaPrefillSplitKParams::default());
-        stage.variant = SdpaPrefillVariant { warps: prefill_warps };
-        manual_output(&format!("sdpa_prefill_splitk_part_w{}", prefill_warps))
-            .main(stage)
-            .compile()
+        stage.variant = variant;
+        manual_output(&format!(
+            "sdpa_prefill_splitk_part_w{}_{}",
+            variant.warps,
+            variant.engine.cache_key_suffix()
+        ))
+        .main(stage)
+        .compile()
     })
 }
 
@@ -99,7 +119,10 @@ pub(super) fn get_sdpa_prefill_splitk_reduce_kernel(prefill_warps: u32) -> Arc<C
     let variant = format!("w{}", prefill_warps);
     get_or_build_compound_kernel("sdpa_prefill_splitk_reduce", variant, || {
         let mut stage = SdpaPrefillSplitKReduceStage::new(SdpaPrefillSplitKParams::default());
-        stage.variant = SdpaPrefillVariant { warps: prefill_warps };
+        stage.variant = SdpaPrefillVariant {
+            warps: prefill_warps,
+            engine: FlashPrefillEngine::Fa2Pipelined,
+        };
         manual_output(&format!("sdpa_prefill_splitk_reduce_w{}", prefill_warps))
             .main(stage)
             .compile()

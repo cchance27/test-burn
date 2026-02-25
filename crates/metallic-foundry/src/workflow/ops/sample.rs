@@ -1,5 +1,5 @@
 use half::f16;
-use metallic_env::SAMPLE_CPU_FALLBACK;
+use metallic_env::{DEBUG_DECODE_STAGE_TIMING, SAMPLE_CPU_FALLBACK};
 
 use crate::{
     error::MetalError, metals::sampling::{ApplyRepetitionPenalty, RepetitionStateIngest, RepetitionStateInit, RepetitionStateUpdateFromToken, SampleTopK}, types::{MetalBuffer, MetalResourceOptions, TensorArg}, workflow::{
@@ -328,7 +328,13 @@ impl WorkflowOp for SampleOp {
         ctx: &mut WorkflowExecutionContext<'_>,
         _on_token: &mut dyn FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
     ) -> Result<WorkflowOpOutcome, MetalError> {
+        let debug_decode_stage_timing = DEBUG_DECODE_STAGE_TIMING.get_valid().unwrap_or(false);
         let decode_start = std::time::Instant::now();
+        let mut penalties_elapsed = std::time::Duration::ZERO;
+        let mut sample_elapsed = std::time::Duration::ZERO;
+        let mut state_update_elapsed = std::time::Duration::ZERO;
+        let mut readback_elapsed = std::time::Duration::ZERO;
+        let mut logits_snapshot_elapsed = std::time::Duration::ZERO;
         let logits_arg = ctx
             .values
             .get(&self.logits_var)
@@ -404,6 +410,7 @@ impl WorkflowOp for SampleOp {
 
         let window_len = effective_penalty_window(repeat_last_n, max_tokens);
         if use_token_penalties && window_len > 0 {
+            let penalties_start = std::time::Instant::now();
             // (Re)allocate state buffers if needed.
             if self.rep_ring_buf.is_none() || self.rep_window_len != window_len {
                 tracing::debug!(
@@ -520,6 +527,7 @@ impl WorkflowOp for SampleOp {
                 frequency_penalty,
             );
             ctx.foundry.run(&penalty_kernel)?;
+            penalties_elapsed += penalties_start.elapsed();
         }
 
         let debug_logits = metallic_instrumentation::logging::debug_sample_logits_enabled()
@@ -527,11 +535,15 @@ impl WorkflowOp for SampleOp {
             && !in_batched_decode_loop;
         let cpu_fallback = sample_cpu_fallback_from_ctx(ctx).unwrap_or_else(sample_cpu_fallback_enabled) && !in_batched_decode_loop;
         let logits_snapshot = if debug_logits || cpu_fallback {
-            Some(read_logits_f32(ctx, &logits_arg, vocab_size as usize)?)
+            let snapshot_start = std::time::Instant::now();
+            let snapshot = read_logits_f32(ctx, &logits_arg, vocab_size as usize)?;
+            logits_snapshot_elapsed += snapshot_start.elapsed();
+            Some(snapshot)
         } else {
             None
         };
 
+        let sample_start = std::time::Instant::now();
         if cpu_fallback {
             let logits = logits_snapshot.as_ref().expect("logits snapshot set");
             let token = cpu_sample_topk_topp(logits, top_k, top_p, min_p, temp, seed);
@@ -540,14 +552,17 @@ impl WorkflowOp for SampleOp {
             let kernel = SampleTopK::new(&logits_arg, out_arg, vocab_size, top_k, top_p, min_p, temp, seed);
             ctx.foundry.run(&kernel)?;
         }
+        sample_elapsed += sample_start.elapsed();
 
         // Update repetition state with the newly sampled token so the next step sees it.
         if use_token_penalties && self.rep_window_len > 0 {
+            let update_start = std::time::Instant::now();
             let ring_arg = self.rep_ring_arg.as_ref().expect("rep_ring_arg set");
             let pairs_arg = self.rep_pairs_arg.as_ref().expect("rep_pairs_arg set");
             let meta_arg = self.rep_meta_arg.as_ref().expect("rep_meta_arg set");
             let upd = RepetitionStateUpdateFromToken::new(ring_arg, pairs_arg, meta_arg, out_arg, self.rep_window_len as u32);
             ctx.foundry.run(&upd)?;
+            state_update_elapsed += update_start.elapsed();
         }
 
         // In batched decode, avoid scalar readback here; WhileBatchedOp reads the tensor buffers after
@@ -555,7 +570,9 @@ impl WorkflowOp for SampleOp {
         if in_batched_decode_loop {
             ctx.values.insert(self.output_var.clone(), Value::Tensor(out_arg.clone()));
         } else {
+            let readback_start = std::time::Instant::now();
             let token = out_buffer.read_scalar::<u32>();
+            readback_elapsed += readback_start.elapsed();
             if debug_logits && let Some(logits) = logits_snapshot.as_ref() {
                 debug_log_sample(
                     self.step,
@@ -567,7 +584,20 @@ impl WorkflowOp for SampleOp {
             }
             ctx.values.insert(self.output_var.clone(), Value::U32(token));
         }
-        write_internal_usize(ctx, INTERNAL_LAST_DECODE_US, decode_start.elapsed().as_micros() as usize);
+        let total_elapsed = decode_start.elapsed();
+        write_internal_usize(ctx, INTERNAL_LAST_DECODE_US, total_elapsed.as_micros() as usize);
+        if debug_decode_stage_timing && !in_batched_decode_loop {
+            tracing::info!(
+                target: "metallic_foundry::workflow::ops::sample",
+                "Decode sample timing: total={:.2} us | logits_snapshot={:.2} us | penalties={:.2} us | sample={:.2} us | rep_update={:.2} us | readback={:.2} us",
+                total_elapsed.as_secs_f64() * 1e6,
+                logits_snapshot_elapsed.as_secs_f64() * 1e6,
+                penalties_elapsed.as_secs_f64() * 1e6,
+                sample_elapsed.as_secs_f64() * 1e6,
+                state_update_elapsed.as_secs_f64() * 1e6,
+                readback_elapsed.as_secs_f64() * 1e6,
+            );
+        }
 
         Ok(WorkflowOpOutcome::Continue)
     }

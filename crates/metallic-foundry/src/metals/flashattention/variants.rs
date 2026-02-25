@@ -23,6 +23,32 @@ pub enum FlashDecodeTgOut {
     Half,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashPrefillEngine {
+    Fa1,
+    Fa2Pipelined,
+}
+
+impl FlashPrefillEngine {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fa1 => "fa1",
+            Self::Fa2Pipelined => "fa2",
+        }
+    }
+
+    pub const fn cache_key_suffix(self) -> &'static str {
+        self.as_str()
+    }
+
+    pub const fn template_tag(self) -> u32 {
+        match self {
+            Self::Fa1 => 0,
+            Self::Fa2Pipelined => 1,
+        }
+    }
+}
+
 impl FlashDecodeTgOut {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -225,6 +251,79 @@ pub fn select_flash_decode_variant_m2m3(head_dim: u32, kv_len: u32) -> FlashDeco
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlashSelectorDeviceClass {
+    Low,
+    Standard,
+    High,
+}
+
+#[inline]
+fn classify_selector_device(working_set_bytes: u64) -> FlashSelectorDeviceClass {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    if working_set_bytes < 12 * GIB {
+        FlashSelectorDeviceClass::Low
+    } else if working_set_bytes < 24 * GIB {
+        FlashSelectorDeviceClass::Standard
+    } else {
+        FlashSelectorDeviceClass::High
+    }
+}
+
+/// Device-capacity-aware decode selector entrypoint.
+///
+/// We currently use `recommended_max_working_set_size` as a conservative proxy for
+/// device class. Mid/high classes preserve existing tuned behavior, while low-memory
+/// devices use lighter variants for long/deep decode shapes.
+pub fn select_flash_decode_variant_for_working_set(
+    head_dim: u32,
+    kv_len: u32,
+    _storage_bytes: usize,
+    working_set_bytes: u64,
+) -> FlashDecodeVariant {
+    let device_class = classify_selector_device(working_set_bytes);
+
+    match head_dim {
+        64 => match device_class {
+            FlashSelectorDeviceClass::Low => {
+                if kv_len >= 256 {
+                    FlashDecodeVariant {
+                        warps: 8,
+                        keys_per_warp: 32,
+                        scalar: FlashDecodeScalar::Half2,
+                        tg_out: FlashDecodeTgOut::Float,
+                    }
+                } else {
+                    FlashDecodeVariant {
+                        warps: 8,
+                        keys_per_warp: 16,
+                        scalar: FlashDecodeScalar::Half2,
+                        tg_out: FlashDecodeTgOut::Float,
+                    }
+                }
+            }
+            FlashSelectorDeviceClass::Standard | FlashSelectorDeviceClass::High => select_flash_decode_variant_m2m3(head_dim, kv_len),
+        },
+        128 => match device_class {
+            FlashSelectorDeviceClass::Low => {
+                let tg_out = if kv_len >= 2048 {
+                    FlashDecodeTgOut::Half
+                } else {
+                    FlashDecodeTgOut::Float
+                };
+                FlashDecodeVariant {
+                    warps: 8,
+                    keys_per_warp: 16,
+                    scalar: FlashDecodeScalar::Half4,
+                    tg_out,
+                }
+            }
+            FlashSelectorDeviceClass::Standard | FlashSelectorDeviceClass::High => select_flash_decode_variant_m2m3(head_dim, kv_len),
+        },
+        _ => select_flash_decode_variant_m2m3(head_dim, kv_len),
+    }
+}
+
 /// Storage-byte aware selector entrypoint.
 ///
 /// Current FA kernels are F16-only and this still routes to the tuned M2/M3 table.
@@ -238,7 +337,9 @@ mod tests {
     use metallic_env::{EnvVarGuard, FoundryEnvVar};
     use serial_test::serial;
 
-    use super::{flash_decode_variant_from_env, select_flash_decode_variant, select_flash_decode_variant_m2m3};
+    use super::{
+        FlashDecodeVariant, flash_decode_variant_from_env, select_flash_decode_variant, select_flash_decode_variant_for_working_set, select_flash_decode_variant_m2m3
+    };
 
     #[test]
     fn storage_aware_selector_matches_tuned_table_for_current_paths() {
@@ -252,6 +353,29 @@ mod tests {
         let a = select_flash_decode_variant(128, 4096, 4);
         let b = select_flash_decode_variant_m2m3(128, 4096);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn working_set_selector_uses_lighter_d128_variant_on_low_memory_devices() {
+        // 8 GiB class -> low-memory selector branch.
+        let v = select_flash_decode_variant_for_working_set(128, 4096, 2, 8 * 1024 * 1024 * 1024);
+        assert_eq!(
+            v,
+            FlashDecodeVariant {
+                warps: 8,
+                keys_per_warp: 16,
+                scalar: super::FlashDecodeScalar::Half4,
+                tg_out: super::FlashDecodeTgOut::Half,
+            }
+        );
+    }
+
+    #[test]
+    fn working_set_selector_keeps_tuned_behavior_on_standard_devices() {
+        // 16 GiB class -> standard branch, should match existing tuned table.
+        let v = select_flash_decode_variant_for_working_set(64, 1024, 2, 16 * 1024 * 1024 * 1024);
+        let tuned = select_flash_decode_variant_m2m3(64, 1024);
+        assert_eq!(v, tuned);
     }
 
     #[test]

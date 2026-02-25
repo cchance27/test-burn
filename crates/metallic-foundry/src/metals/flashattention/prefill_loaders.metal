@@ -8,11 +8,29 @@ using namespace metal;
 typedef half FlashTileT;
 typedef half2 FlashVec2T;
 typedef half4 FlashVec4T;
+#define SDPA_PREFILL_DOUBLE_BUFFER 1
 #else
 typedef float FlashTileT;
 typedef float2 FlashVec2T;
 typedef float4 FlashVec4T;
+#define SDPA_PREFILL_DOUBLE_BUFFER 0
 #endif
+
+// D128 uses [32 x 128] tiles. D64 paths use the lower half.
+#define SDPA_PREFILL_TILE_BANK_STRIDE (32 * 128)
+
+#if SDPA_PREFILL_DOUBLE_BUFFER
+#define SDPA_PREFILL_DECLARE_SHARED(NAME_K, NAME_V) \
+    threadgroup FlashTileT NAME_K[2 * SDPA_PREFILL_TILE_BANK_STRIDE]; \
+    threadgroup FlashTileT NAME_V[2 * SDPA_PREFILL_TILE_BANK_STRIDE]
+#else
+#define SDPA_PREFILL_DECLARE_SHARED(NAME_K, NAME_V) \
+    threadgroup FlashTileT NAME_K[SDPA_PREFILL_TILE_BANK_STRIDE]; \
+    threadgroup FlashTileT NAME_V[SDPA_PREFILL_TILE_BANK_STRIDE]
+#endif
+
+#define SDPA_PREFILL_ENGINE_FA1 0u
+#define SDPA_PREFILL_ENGINE_FA2 1u
 
 // Cooperative tile load for a [TileN=32, D=64] block.
 // - `src` must already point at the first element of the tile (row 0, col 0).

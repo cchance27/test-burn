@@ -18,6 +18,7 @@ pub enum FoundryEnvVar {
     DebugStepLog,
     DebugKernelBindings,
     DebugCompiledStepSync,
+    DebugDecodeStageTiming,
     DebugStreamPoll,
     FoundryDecodeBatchSize,
     DisableBatchedPrefill,
@@ -47,6 +48,7 @@ pub enum FoundryEnvVar {
     SampleThreadsPerThreadgroup,
     SamplePerThreadM,
     DebugSdpa,
+    FaPrefillEngine,
     FaPrefillWarps,
     DisableFaPrefillSplitK,
     FaPrefillSplitK,
@@ -54,6 +56,8 @@ pub enum FoundryEnvVar {
     FaDecodeKeysPerWarp,
     FaDecodeScalar,
     FaDecodeTgOut,
+    FaDecodeEngine,
+    FaSelectorWorkingSetGb,
     SdpaForceMaterialized,
     DisableFa,
     SdpaDisableOnline,
@@ -81,6 +85,7 @@ impl FoundryEnvVar {
             FoundryEnvVar::DebugStepLog => "METALLIC_DEBUG_STEP_LOG",
             FoundryEnvVar::DebugKernelBindings => "METALLIC_DEBUG_KERNEL_BINDINGS",
             FoundryEnvVar::DebugCompiledStepSync => "METALLIC_DEBUG_COMPILED_STEP_SYNC",
+            FoundryEnvVar::DebugDecodeStageTiming => "METALLIC_DEBUG_DECODE_STAGE_TIMING",
             FoundryEnvVar::DebugStreamPoll => "METALLIC_DEBUG_STREAM_POLL",
             FoundryEnvVar::FoundryDecodeBatchSize => "METALLIC_FOUNDRY_DECODE_BATCH_SIZE",
             FoundryEnvVar::DisableBatchedPrefill => "METALLIC_DISABLE_BATCHED_PREFILL",
@@ -110,6 +115,7 @@ impl FoundryEnvVar {
             FoundryEnvVar::SampleThreadsPerThreadgroup => "METALLIC_SAMPLE_TPTG",
             FoundryEnvVar::SamplePerThreadM => "METALLIC_SAMPLE_PER_THREAD_M",
             FoundryEnvVar::DebugSdpa => "METALLIC_DEBUG_SDPA",
+            FoundryEnvVar::FaPrefillEngine => "METALLIC_FA_PREFILL_ENGINE",
             FoundryEnvVar::FaPrefillWarps => "METALLIC_FA_PREFILL_WARPS",
             FoundryEnvVar::DisableFaPrefillSplitK => "METALLIC_DISABLE_FA_PREFILL_SPLITK",
             FoundryEnvVar::FaPrefillSplitK => "METALLIC_FA_PREFILL_SPLIT_K",
@@ -117,6 +123,8 @@ impl FoundryEnvVar {
             FoundryEnvVar::FaDecodeKeysPerWarp => "METALLIC_FA_DECODE_KEYS_PER_WARP",
             FoundryEnvVar::FaDecodeScalar => "METALLIC_FA_DECODE_SCALAR",
             FoundryEnvVar::FaDecodeTgOut => "METALLIC_FA_DECODE_TG_OUT",
+            FoundryEnvVar::FaDecodeEngine => "METALLIC_FA_DECODE_ENGINE",
+            FoundryEnvVar::FaSelectorWorkingSetGb => "METALLIC_FA_SELECTOR_WORKING_SET_GB",
             FoundryEnvVar::SdpaForceMaterialized => "METALLIC_SDPA_FORCE_MATERIALIZED",
             FoundryEnvVar::DisableFa => "METALLIC_DISABLE_FA",
             FoundryEnvVar::SdpaDisableOnline => "METALLIC_SDPA_DISABLE_ONLINE",
@@ -160,6 +168,9 @@ pub const FOUNDRY_DECODE_BATCH_SIZE: TypedEnvVar<usize> =
 /// Typed descriptor for debug stream polling toggle.
 pub const DEBUG_STREAM_POLL: TypedEnvVar<bool> =
     TypedEnvVar::new(FoundryEnvVar::DebugStreamPoll.into_env(), parse_truthy_flag, format_bool);
+/// Typed descriptor for METALLIC_DEBUG_DECODE_STAGE_TIMING.
+pub const DEBUG_DECODE_STAGE_TIMING: TypedEnvVar<bool> =
+    TypedEnvVar::new(FoundryEnvVar::DebugDecodeStageTiming.into_env(), parse_truthy_flag, format_bool);
 /// Typed descriptor for METALLIC_DEBUG_KERNEL_BINDINGS.
 pub const DEBUG_KERNEL_BINDINGS: TypedEnvVar<bool> =
     TypedEnvVar::new(FoundryEnvVar::DebugKernelBindings.into_env(), parse_truthy_flag, format_bool);
@@ -210,6 +221,8 @@ pub const SAMPLE_TPTG: TypedEnvVar<usize> =
 pub const SAMPLE_PER_THREAD_M: TypedEnvVar<u32> = TypedEnvVar::new(FoundryEnvVar::SamplePerThreadM.into_env(), parse_u32, format_u32);
 /// Typed descriptor for METALLIC_FA_PREFILL_WARPS.
 pub const FA_PREFILL_WARPS: TypedEnvVar<u32> = TypedEnvVar::new(FoundryEnvVar::FaPrefillWarps.into_env(), parse_u32, format_u32);
+/// Typed descriptor for METALLIC_FA_PREFILL_ENGINE.
+pub const FA_PREFILL_ENGINE: TypedEnvVar<String> = TypedEnvVar::new(FoundryEnvVar::FaPrefillEngine.into_env(), parse_string, format_string);
 /// Typed descriptor for METALLIC_FA_PREFILL_SPLIT_K.
 pub const FA_PREFILL_SPLIT_K: TypedEnvVar<u32> = TypedEnvVar::new(FoundryEnvVar::FaPrefillSplitK.into_env(), parse_u32, format_u32);
 /// Typed descriptor for METALLIC_FA_DECODE_WARPS.
@@ -221,6 +234,11 @@ pub const FA_DECODE_KEYS_PER_WARP: TypedEnvVar<u32> =
 pub const FA_DECODE_SCALAR: TypedEnvVar<String> = TypedEnvVar::new(FoundryEnvVar::FaDecodeScalar.into_env(), parse_string, format_string);
 /// Typed descriptor for METALLIC_FA_DECODE_TG_OUT.
 pub const FA_DECODE_TG_OUT: TypedEnvVar<String> = TypedEnvVar::new(FoundryEnvVar::FaDecodeTgOut.into_env(), parse_string, format_string);
+/// Typed descriptor for METALLIC_FA_DECODE_ENGINE.
+pub const FA_DECODE_ENGINE: TypedEnvVar<String> = TypedEnvVar::new(FoundryEnvVar::FaDecodeEngine.into_env(), parse_string, format_string);
+/// Typed descriptor for METALLIC_FA_SELECTOR_WORKING_SET_GB.
+pub const FA_SELECTOR_WORKING_SET_GB: TypedEnvVar<u32> =
+    TypedEnvVar::new(FoundryEnvVar::FaSelectorWorkingSetGb.into_env(), parse_u32, format_u32);
 /// Typed descriptor for METALLIC_SDPA_DEBUG_ONLINE_COMPARE_MIN_KV.
 pub const SDPA_DEBUG_ONLINE_COMPARE_MIN_KV: TypedEnvVar<u32> =
     TypedEnvVar::new(FoundryEnvVar::SdpaDebugOnlineCompareMinKv.into_env(), parse_u32, format_u32);

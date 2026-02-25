@@ -9,7 +9,7 @@ inline void splitk_tile_range(uint kv_len, uint split_k, uint split_id, thread u
     tile_end = min(tiles, tile_begin + tiles_per_split);
 }
 
-template<uint WARPS>
+template<uint WARPS, uint ENGINE>
 inline void flash_prefill_splitk_part_d64(
     const device InputStorageT* q_base,
     const device InputStorageT* k_base,
@@ -65,16 +65,60 @@ inline void flash_prefill_splitk_part_d64(
     uint tile_end = 0;
     splitk_tile_range(params.kv_len, max((uint)1, params.split_k), split_id, tile_begin, tile_end);
 
+    uint tile_count = tile_end - tile_begin;
+    uint current_bank = 0u;
+#if SDPA_PREFILL_DOUBLE_BUFFER
+    const bool use_double_buffer = (ENGINE == SDPA_PREFILL_ENGINE_FA2);
+#else
+    const bool use_double_buffer = false;
+#endif
+    if (use_double_buffer && tile_count > 0u) {
+        uint first_tile = tile_begin;
+        uint first_start = first_tile * 32u;
+        uint first_rows = min((uint)32, params.kv_len - first_start);
+        uint linear_tid = tid.x;
+        threadgroup FlashTileT* k_prefetch = k_shared + current_bank * SDPA_PREFILL_TILE_BANK_STRIDE;
+        threadgroup FlashTileT* v_prefetch = v_shared + current_bank * SDPA_PREFILL_TILE_BANK_STRIDE;
+        for (uint load_tid = linear_tid; load_tid < 256; load_tid += tptg.x) {
+            load_tile(k_base + first_start * params.stride_k_s, k_prefetch, params.stride_k_s, first_rows, load_tid);
+            load_tile(v_base + first_start * params.stride_v_s, v_prefetch, params.stride_v_s, first_rows, load_tid);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
     for (uint k_tile_idx = tile_begin; k_tile_idx < tile_end; ++k_tile_idx) {
         uint k_start = k_tile_idx * 32;
         uint stored_rows = min((uint)32, params.kv_len - k_start);
 
-        uint linear_tid = tid.x;
-        for (uint load_tid = linear_tid; load_tid < 256; load_tid += tptg.x) {
-            load_tile(k_base + k_start * params.stride_k_s, k_shared, params.stride_k_s, stored_rows, load_tid);
-            load_tile(v_base + k_start * params.stride_v_s, v_shared, params.stride_v_s, stored_rows, load_tid);
+        bool has_next = false;
+        uint next_bank = current_bank;
+        threadgroup FlashTileT* k_tile = k_shared;
+        threadgroup FlashTileT* v_tile = v_shared;
+        if (use_double_buffer) {
+            uint local_tile_idx = k_tile_idx - tile_begin;
+            next_bank = current_bank ^ 1u;
+            has_next = (local_tile_idx + 1u) < tile_count;
+            if (has_next) {
+                uint next_k_start = (k_tile_idx + 1u) * 32u;
+                uint next_rows = min((uint)32, params.kv_len - next_k_start);
+                threadgroup FlashTileT* k_prefetch = k_shared + next_bank * SDPA_PREFILL_TILE_BANK_STRIDE;
+                threadgroup FlashTileT* v_prefetch = v_shared + next_bank * SDPA_PREFILL_TILE_BANK_STRIDE;
+                uint linear_tid = tid.x;
+                for (uint load_tid = linear_tid; load_tid < 256; load_tid += tptg.x) {
+                    load_tile(k_base + next_k_start * params.stride_k_s, k_prefetch, params.stride_k_s, next_rows, load_tid);
+                    load_tile(v_base + next_k_start * params.stride_v_s, v_prefetch, params.stride_v_s, next_rows, load_tid);
+                }
+            }
+            k_tile = k_shared + current_bank * SDPA_PREFILL_TILE_BANK_STRIDE;
+            v_tile = v_shared + current_bank * SDPA_PREFILL_TILE_BANK_STRIDE;
+        } else {
+            uint linear_tid = tid.x;
+            for (uint load_tid = linear_tid; load_tid < 256; load_tid += tptg.x) {
+                load_tile(k_base + k_start * params.stride_k_s, k_shared, params.stride_k_s, stored_rows, load_tid);
+                load_tile(v_base + k_start * params.stride_v_s, v_shared, params.stride_v_s, stored_rows, load_tid);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (int r = 0; r < 4; ++r) {
             uint q_global = q_row_start + my_row_local_base + r;
@@ -88,8 +132,8 @@ inline void flash_prefill_splitk_part_d64(
                 uint k_global = k_start + (uint)k;
                 if (k_global >= params.kv_len) break;
                 bool masked = (k_global > causal_limit);
-                FlashTileT k0 = masked ? (FlashTileT)0.0f : k_shared[k * 64 + lane];
-                FlashTileT k1 = masked ? (FlashTileT)0.0f : k_shared[k * 64 + lane + 32];
+                FlashTileT k0 = masked ? (FlashTileT)0.0f : k_tile[k * 64 + lane];
+                FlashTileT k1 = masked ? (FlashTileT)0.0f : k_tile[k * 64 + lane + 32];
                 float partial = (float)q_reg[r][0] * (float)k0 + (float)q_reg[r][1] * (float)k1;
                 float score = simd_sum(partial) * params.scale;
                 score = masked ? -1e30f : score;
@@ -103,8 +147,8 @@ inline void flash_prefill_splitk_part_d64(
                 if (k_global >= params.kv_len) break;
                 if (k_global > causal_limit) continue;
 
-                FlashTileT k0 = k_shared[k * 64 + lane];
-                FlashTileT k1 = k_shared[k * 64 + lane + 32];
+                FlashTileT k0 = k_tile[k * 64 + lane];
+                FlashTileT k1 = k_tile[k * 64 + lane + 32];
                 float partial = (float)q_reg[r][0] * (float)k0 + (float)q_reg[r][1] * (float)k1;
                 float score = simd_sum(partial) * params.scale;
 
@@ -115,8 +159,8 @@ inline void flash_prefill_splitk_part_d64(
                 }
                 float p = simd_broadcast(p_local, 0);
 
-                FlashTileT v0 = v_shared[k * 64 + lane];
-                FlashTileT v1 = v_shared[k * 64 + lane + 32];
+                FlashTileT v0 = v_tile[k * 64 + lane];
+                FlashTileT v1 = v_tile[k * 64 + lane + 32];
                 block_out[0] += p * (float)v0;
                 block_out[1] += p * (float)v1;
             }
@@ -139,7 +183,14 @@ inline void flash_prefill_splitk_part_d64(
             acc[r] = acc[r] * alpha_b + block_out * beta_b;
         }
 
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (use_double_buffer) {
+            if (has_next) {
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                current_bank = next_bank;
+            }
+        } else {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
     }
 
     uint q_tile_count = (params.q_len + TILE_M - 1) / TILE_M;
@@ -171,7 +222,7 @@ inline void flash_prefill_splitk_part_d64(
     }
 }
 
-template<uint WARPS>
+template<uint WARPS, uint ENGINE>
 inline void flash_prefill_splitk_part_d128(
     const device InputStorageT* q_base,
     const device InputStorageT* k_base,
@@ -232,16 +283,60 @@ inline void flash_prefill_splitk_part_d128(
     uint tile_end = 0;
     splitk_tile_range(params.kv_len, max((uint)1, params.split_k), split_id, tile_begin, tile_end);
 
+    uint tile_count = tile_end - tile_begin;
+    uint current_bank = 0u;
+#if SDPA_PREFILL_DOUBLE_BUFFER
+    const bool use_double_buffer = (ENGINE == SDPA_PREFILL_ENGINE_FA2);
+#else
+    const bool use_double_buffer = false;
+#endif
+    if (use_double_buffer && tile_count > 0u) {
+        uint first_tile = tile_begin;
+        uint first_start = first_tile * 32u;
+        uint first_rows = min((uint)32, params.kv_len - first_start);
+        uint linear_tid = tid.x;
+        threadgroup FlashTileT* k_prefetch = k_shared + current_bank * SDPA_PREFILL_TILE_BANK_STRIDE;
+        threadgroup FlashTileT* v_prefetch = v_shared + current_bank * SDPA_PREFILL_TILE_BANK_STRIDE;
+        for (uint load_tid = linear_tid; load_tid < 256; load_tid += tptg.x) {
+            load_tile_d128(k_base + first_start * params.stride_k_s, k_prefetch, params.stride_k_s, first_rows, load_tid);
+            load_tile_d128(v_base + first_start * params.stride_v_s, v_prefetch, params.stride_v_s, first_rows, load_tid);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
     for (uint k_tile_idx = tile_begin; k_tile_idx < tile_end; ++k_tile_idx) {
         uint k_start = k_tile_idx * 32;
         uint stored_rows = min((uint)32, params.kv_len - k_start);
 
-        uint linear_tid = tid.x;
-        for (uint load_tid = linear_tid; load_tid < 256; load_tid += tptg.x) {
-            load_tile_d128(k_base + k_start * params.stride_k_s, k_shared, params.stride_k_s, stored_rows, load_tid);
-            load_tile_d128(v_base + k_start * params.stride_v_s, v_shared, params.stride_v_s, stored_rows, load_tid);
+        bool has_next = false;
+        uint next_bank = current_bank;
+        threadgroup FlashTileT* k_tile = k_shared;
+        threadgroup FlashTileT* v_tile = v_shared;
+        if (use_double_buffer) {
+            uint local_tile_idx = k_tile_idx - tile_begin;
+            next_bank = current_bank ^ 1u;
+            has_next = (local_tile_idx + 1u) < tile_count;
+            if (has_next) {
+                uint next_k_start = (k_tile_idx + 1u) * 32u;
+                uint next_rows = min((uint)32, params.kv_len - next_k_start);
+                threadgroup FlashTileT* k_prefetch = k_shared + next_bank * SDPA_PREFILL_TILE_BANK_STRIDE;
+                threadgroup FlashTileT* v_prefetch = v_shared + next_bank * SDPA_PREFILL_TILE_BANK_STRIDE;
+                uint linear_tid = tid.x;
+                for (uint load_tid = linear_tid; load_tid < 256; load_tid += tptg.x) {
+                    load_tile_d128(k_base + next_k_start * params.stride_k_s, k_prefetch, params.stride_k_s, next_rows, load_tid);
+                    load_tile_d128(v_base + next_k_start * params.stride_v_s, v_prefetch, params.stride_v_s, next_rows, load_tid);
+                }
+            }
+            k_tile = k_shared + current_bank * SDPA_PREFILL_TILE_BANK_STRIDE;
+            v_tile = v_shared + current_bank * SDPA_PREFILL_TILE_BANK_STRIDE;
+        } else {
+            uint linear_tid = tid.x;
+            for (uint load_tid = linear_tid; load_tid < 256; load_tid += tptg.x) {
+                load_tile_d128(k_base + k_start * params.stride_k_s, k_shared, params.stride_k_s, stored_rows, load_tid);
+                load_tile_d128(v_base + k_start * params.stride_v_s, v_shared, params.stride_v_s, stored_rows, load_tid);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (int r = 0; r < 4; ++r) {
             uint q_global = q_row_start + my_row_local_base + r;
@@ -255,10 +350,10 @@ inline void flash_prefill_splitk_part_d128(
                 uint k_global = k_start + (uint)k;
                 if (k_global >= params.kv_len) break;
                 bool masked = (k_global > causal_limit);
-                FlashTileT k0 = masked ? (FlashTileT)0.0f : k_shared[k * 128 + lane];
-                FlashTileT k1 = masked ? (FlashTileT)0.0f : k_shared[k * 128 + lane + 32];
-                FlashTileT k2 = masked ? (FlashTileT)0.0f : k_shared[k * 128 + lane + 64];
-                FlashTileT k3 = masked ? (FlashTileT)0.0f : k_shared[k * 128 + lane + 96];
+                FlashTileT k0 = masked ? (FlashTileT)0.0f : k_tile[k * 128 + lane];
+                FlashTileT k1 = masked ? (FlashTileT)0.0f : k_tile[k * 128 + lane + 32];
+                FlashTileT k2 = masked ? (FlashTileT)0.0f : k_tile[k * 128 + lane + 64];
+                FlashTileT k3 = masked ? (FlashTileT)0.0f : k_tile[k * 128 + lane + 96];
                 float partial =
                     (float)q_reg[r][0] * (float)k0 +
                     (float)q_reg[r][1] * (float)k1 +
@@ -276,10 +371,10 @@ inline void flash_prefill_splitk_part_d128(
                 if (k_global >= params.kv_len) break;
                 if (k_global > causal_limit) continue;
 
-                FlashTileT k0 = k_shared[k * 128 + lane];
-                FlashTileT k1 = k_shared[k * 128 + lane + 32];
-                FlashTileT k2 = k_shared[k * 128 + lane + 64];
-                FlashTileT k3 = k_shared[k * 128 + lane + 96];
+                FlashTileT k0 = k_tile[k * 128 + lane];
+                FlashTileT k1 = k_tile[k * 128 + lane + 32];
+                FlashTileT k2 = k_tile[k * 128 + lane + 64];
+                FlashTileT k3 = k_tile[k * 128 + lane + 96];
                 float partial =
                     (float)q_reg[r][0] * (float)k0 +
                     (float)q_reg[r][1] * (float)k1 +
@@ -294,10 +389,10 @@ inline void flash_prefill_splitk_part_d128(
                 }
                 float p = simd_broadcast(p_local, 0);
 
-                FlashTileT v0 = v_shared[k * 128 + lane];
-                FlashTileT v1 = v_shared[k * 128 + lane + 32];
-                FlashTileT v2 = v_shared[k * 128 + lane + 64];
-                FlashTileT v3 = v_shared[k * 128 + lane + 96];
+                FlashTileT v0 = v_tile[k * 128 + lane];
+                FlashTileT v1 = v_tile[k * 128 + lane + 32];
+                FlashTileT v2 = v_tile[k * 128 + lane + 64];
+                FlashTileT v3 = v_tile[k * 128 + lane + 96];
                 block_out[0] += p * (float)v0;
                 block_out[1] += p * (float)v1;
                 block_out[2] += p * (float)v2;
@@ -322,7 +417,14 @@ inline void flash_prefill_splitk_part_d128(
             acc[r] = acc[r] * alpha_b + block_out * beta_b;
         }
 
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (use_double_buffer) {
+            if (has_next) {
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                current_bank = next_bank;
+            }
+        } else {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
     }
 
     uint q_tile_count = (params.q_len + TILE_M - 1) / TILE_M;
@@ -543,7 +645,7 @@ inline void flash_prefill_splitk_reduce_d128(
     }
 }
 
-template<uint WARPS>
+template<uint WARPS, uint ENGINE>
 ALWAYS_INLINE void run_sdpa_prefill_splitk_part_stage(
     const device InputStorageT* q,
     const device InputStorageT* k,
@@ -574,11 +676,11 @@ ALWAYS_INLINE void run_sdpa_prefill_splitk_part_stage(
     const device InputStorageT* v_ptr = v + v_offset;
 
     if (params.head_dim == 64) {
-        flash_prefill_splitk_part_d64<WARPS>(
+        flash_prefill_splitk_part_d64<WARPS, ENGINE>(
             q_ptr, k_ptr, v_ptr, partial_acc, partial_m, partial_l, params, k_shared, v_shared, gid, lid, tptg, simd_lane_id, simd_group_id
         );
     } else if (params.head_dim == 128) {
-        flash_prefill_splitk_part_d128<WARPS>(
+        flash_prefill_splitk_part_d128<WARPS, ENGINE>(
             q_ptr, k_ptr, v_ptr, partial_acc, partial_m, partial_l, params, k_shared, v_shared, gid, lid, tptg, simd_lane_id, simd_group_id
         );
     }

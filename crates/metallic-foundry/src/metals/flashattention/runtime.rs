@@ -1,9 +1,11 @@
-use metallic_env::{FoundryEnvVar, is_set};
+use metallic_env::{FA_DECODE_ENGINE, FA_SELECTOR_WORKING_SET_GB, FoundryEnvVar, is_set};
 
 use super::{
-    contract::require_dense_tensor_contract, dispatch::{infer_n_kv_heads, prefill_split_k_env, prefill_warps_env, select_prefill_split_k, select_prefill_warps}, kernels::{
+    contract::require_dense_tensor_contract, dispatch::{
+        infer_n_kv_heads, prefill_engine_env, prefill_split_k_env, prefill_warps_env, select_prefill_engine, select_prefill_split_k, select_prefill_warps
+    }, kernels::{
         FlashDecodeArgs, SdpaPrefillArgs, SdpaPrefillSplitKPartArgs, SdpaPrefillSplitKReduceArgs, get_flash_decode_kernel, get_sdpa_prefill_kernel, get_sdpa_prefill_splitk_part_kernel, get_sdpa_prefill_splitk_reduce_kernel
-    }, variants::{FlashDecodeVariant, flash_decode_variant_from_env, select_flash_decode_variant}
+    }, stages::SdpaPrefillVariant, variants::{FlashDecodeVariant, flash_decode_variant_from_env, select_flash_decode_variant_for_working_set}
 };
 use crate::{
     Foundry, MetalError, metals::{
@@ -15,6 +17,40 @@ use crate::{
 
 fn validate_flash_attention_qkv_dtypes(q: &TensorArg, k: &TensorArg, v: &TensorArg) -> Result<(), MetalError> {
     require_dense_tensor_contract("FlashAttention", &[("q", q), ("k", k), ("v", v)])
+}
+
+fn selector_working_set_bytes_with_fallback(fallback_bytes: u64) -> Result<u64, MetalError> {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    match FA_SELECTOR_WORKING_SET_GB.get_valid() {
+        Some(gb) => {
+            if gb == 0 {
+                return Err(MetalError::OperationNotSupported(
+                    "METALLIC_FA_SELECTOR_WORKING_SET_GB must be >= 1 when set".into(),
+                ));
+            }
+            Ok((gb as u64) * GIB)
+        }
+        None => Ok(fallback_bytes),
+    }
+}
+
+fn selector_working_set_bytes(foundry: &Foundry) -> Result<u64, MetalError> {
+    selector_working_set_bytes_with_fallback(foundry.device.recommended_max_working_set_size())
+}
+
+fn flash_decode_use_mma() -> Result<bool, MetalError> {
+    FA_DECODE_ENGINE
+        .get_valid()
+        .map(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "scalar" | "fa1" => Ok(false),
+            "mma" | "fa2" => Ok(true),
+            other => Err(MetalError::OperationNotSupported(format!(
+                "Invalid METALLIC_FA_DECODE_ENGINE='{other}'; expected one of: scalar, mma"
+            ))),
+        })
+        .transpose()
+        // Default decode engine is FA2/MMA; scalar is explicit opt-in.
+        .map(|v| v.unwrap_or(true))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -103,6 +139,7 @@ fn run_flash_decode_impl(
     validate_flash_attention_qkv_dtypes(q, k, v)?;
 
     if q_seq_len > 1 {
+        let device_working_set = selector_working_set_bytes(foundry)?;
         if variant_override.is_some() {
             return Err(MetalError::OperationNotSupported(
                 "run_flash_decode_with_variant is decode-only (q_seq_len must be 1)".into(),
@@ -278,13 +315,23 @@ fn run_flash_decode_impl(
             }
         };
 
-        let prefill_warps = prefill_warps_env().unwrap_or_else(|| select_prefill_warps(q.dtype.size_bytes()));
+        let prefill_warps =
+            prefill_warps_env().unwrap_or_else(|| select_prefill_warps(q.dtype.size_bytes(), kv_seq_len, q_seq_len, device_working_set));
         if !matches!(prefill_warps, 4 | 8) {
             return Err(MetalError::OperationNotSupported(format!(
                 "METALLIC_FA_PREFILL_WARPS must be 4 or 8, got {}",
                 prefill_warps
             )));
         }
+        let prefill_engine = if let Some(v) = prefill_engine_env()? {
+            v
+        } else {
+            select_prefill_engine(q.dtype.size_bytes(), kv_seq_len, q_seq_len, device_working_set)
+        };
+        let prefill_variant = SdpaPrefillVariant {
+            warps: prefill_warps,
+            engine: prefill_engine,
+        };
 
         let tiling_m = prefill_warps * 4;
         let grid_m_tiles = (q_seq_len + tiling_m - 1) / tiling_m;
@@ -294,7 +341,7 @@ fn run_flash_decode_impl(
         } else if let Some(v) = prefill_split_k_env() {
             v.max(1)
         } else {
-            select_prefill_split_k(kv_seq_len, q_seq_len, q.dtype.size_bytes())
+            select_prefill_split_k(kv_seq_len, q_seq_len, q.dtype.size_bytes(), device_working_set)
         };
         let kv_tiles = (kv_seq_len + 31) / 32;
         split_k = split_k.min(kv_tiles.max(1));
@@ -303,7 +350,9 @@ fn run_flash_decode_impl(
                 q_seq_len,
                 kv_seq_len,
                 prefill_warps,
+                prefill_engine = prefill_engine.as_str(),
                 split_k,
+                device_working_set,
                 storage_bytes = q.dtype.size_bytes(),
                 "FlashAttention prefill selector result"
             );
@@ -344,7 +393,7 @@ fn run_flash_decode_impl(
         if split_k <= 1 {
             let grid = GridSize::new(grid_m_tiles as usize, n_heads as usize, 1);
             let config = DispatchConfig::new(grid, group);
-            let kernel = get_sdpa_prefill_kernel(prefill_warps);
+            let kernel = get_sdpa_prefill_kernel(prefill_variant);
             let bound = kernel.clone().bind_arc(args, config);
             return foundry.run(&bound);
         }
@@ -398,7 +447,7 @@ fn run_flash_decode_impl(
         };
         let part_grid = GridSize::new(grid_m_tiles as usize, n_heads as usize, split_k as usize);
         let part_config = DispatchConfig::new(part_grid, group);
-        let part_kernel = get_sdpa_prefill_splitk_part_kernel(prefill_warps);
+        let part_kernel = get_sdpa_prefill_splitk_part_kernel(prefill_variant);
         let part_bound = part_kernel.clone().bind_arc(part_args, part_config);
         foundry.run(&part_bound)?;
 
@@ -489,13 +538,15 @@ fn run_flash_decode_impl(
         sdpa_params,
     };
 
+    let device_working_set = selector_working_set_bytes(foundry)?;
     let variant = if let Some(v) = variant_override {
         v
     } else if let Some(v) = flash_decode_variant_from_env(head_dim)? {
         v
     } else {
-        select_flash_decode_variant(head_dim, kv_seq_len, q.dtype.size_bytes())
+        select_flash_decode_variant_for_working_set(head_dim, kv_seq_len, q.dtype.size_bytes(), device_working_set)
     };
+    let use_mma = flash_decode_use_mma()?;
     variant.validate_for_head_dim(head_dim)?;
     if is_set(FoundryEnvVar::DebugSdpaVerbose) {
         let desc = KernelDtypeDescriptor::from_source_dtype(q.dtype)?;
@@ -506,6 +557,8 @@ fn run_flash_decode_impl(
             variant_keys_per_warp = variant.keys_per_warp,
             variant_scalar = variant.scalar.as_str(),
             variant_tg_out = variant.tg_out.as_str(),
+            decode_engine = if use_mma { "mma" } else { "scalar" },
+            device_working_set,
             storage_dtype = ?desc.storage,
             storage_bytes = desc.storage_size_bytes,
             compute_dtype = ?desc.compute,
@@ -519,14 +572,16 @@ fn run_flash_decode_impl(
     let group = ThreadgroupSize::d1(variant.threads_per_tg() as usize);
     let config = DispatchConfig::new(grid, group);
 
-    let kernel = get_flash_decode_kernel(head_dim, variant);
+    let kernel = get_flash_decode_kernel(head_dim, variant, use_mma);
     let bound = kernel.clone().bind_arc(args, config);
     foundry.run(&bound)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validate_flash_attention_qkv_dtypes;
+    use metallic_env::{EnvVarGuard, FoundryEnvVar};
+
+    use super::{flash_decode_use_mma, selector_working_set_bytes_with_fallback, validate_flash_attention_qkv_dtypes};
     use crate::{tensor::Dtype, types::TensorArg};
 
     #[test]
@@ -591,5 +646,41 @@ mod tests {
         let err = validate_flash_attention_qkv_dtypes(&q8, &q8, &q8).expect_err("expected fail-fast");
         let msg = format!("{err}");
         assert!(msg.contains("supports only dense F16/F32"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn selector_working_set_override_uses_env_value() {
+        let _override = EnvVarGuard::set(FoundryEnvVar::FaSelectorWorkingSetGb, "8");
+        let bytes = selector_working_set_bytes_with_fallback(123).expect("override should parse");
+        assert_eq!(bytes, 8 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn selector_working_set_override_rejects_zero() {
+        let _override = EnvVarGuard::set(FoundryEnvVar::FaSelectorWorkingSetGb, "0");
+        let err = selector_working_set_bytes_with_fallback(123).expect_err("zero override should fail-fast");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("METALLIC_FA_SELECTOR_WORKING_SET_GB must be >= 1"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn decode_engine_override_parses_mma() {
+        let _override = EnvVarGuard::set(FoundryEnvVar::FaDecodeEngine, "mma");
+        assert!(flash_decode_use_mma().expect("valid decode engine override"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn decode_engine_override_rejects_invalid() {
+        let _override = EnvVarGuard::set(FoundryEnvVar::FaDecodeEngine, "bogus");
+        let err = flash_decode_use_mma().expect_err("invalid decode engine should fail-fast");
+        let msg = format!("{err}");
+        assert!(msg.contains("Invalid METALLIC_FA_DECODE_ENGINE"), "unexpected error: {msg}");
     }
 }

@@ -126,16 +126,28 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Correctness/DX:** keep SDPA routing explicit and fail-fast; expand coverage with targeted parity tests for new variants/paths.
 - **Selector work:** auto-select per device + shape (kv_len, m) and expose env overrides for benchmarking.
 - **KV-cache quantization (proposal):** add a policy-driven quantized KV-cache format (e.g. int8 + per-block scales) consumable by FlashAttention tile loaders for bandwidth/memory wins, gated by device/heuristics and protected by parity/regression tests.
-
-## Runtime DType Support Matrix (Authoritative)
-
-| Area | Storage | Compute | Accum | Contract / fail-fast behavior |
-|---|---|---|---|---|
-| Runtime helper layer (`runtime_types.metal`) | Per-bound tensor dtype (`F16/F32/BF16` dense, `uchar` for quant storage) | Inferred from runtime tensor mix or `METALLIC_COMPUTE_DTYPE`/`--compute-dtype` | `METALLIC_ACCUM_DTYPE`/`--accum-dtype` (default `F32`) | Invalid dtype override value fails fast. If accum precision is narrower than compute, compute is clamped down to accum with warning. |
-| FlashAttention (dense) | Dense `F16`/`F32` tensors only; uniform Q/K/V/O dtype | Runtime helper compute contract | Runtime helper accum contract | Rejects non-dense or mixed dense dtypes in one op. Invalid accum override fails fast. Non-`F32` accum is allowed but emits stability warning. |
-| FusedQkv (tuple policy) | Per-tensor policy tuple `(q,k,v)` (uniform or mixed quant) | Runtime helper compute contract | Runtime helper accum contract | Tuple-policy fused dispatch is supported; unresolved/invalid policy contracts fail fast. |
-| Fused SwiGLU / fused FFN SwiGLU RMSNorm (tuple policy) | Per-tensor policy tuple `(gate,up)` | Runtime helper compute contract | Runtime helper accum contract | Tuple-policy fused dispatch is supported; unresolved/invalid policy contracts fail fast. |
-| CLI / config surface | N/A | `--compute-dtype`, `--foundry-env METALLIC_COMPUTE_DTYPE=...`, `FoundryConfig::with_compute_dtype(...)` | `--accum-dtype`, `--foundry-env METALLIC_ACCUM_DTYPE=...`, `FoundryConfig::with_accum_dtype(...)` | `Foundry::new_with_config(...)` applies per-instance overrides via `metallic_env` override scope. |
+- **Observed decode reality (Qwen q4_0 throughput runs):**
+  - Across WIP iterations, decode `mma` generally leads `scalar` by ~`1-2%` in stable runs, with occasional first-run outliers.
+  - Several decode-loop rewrites (extra prefetching/branch reshaping/full-tile transforms) showed noisy or negative absolute decode impact even when `mma-vs-scalar` spread improved.
+  - Practical conclusion: decode M=1 path on this device/model is currently closer to memory/latency bound than compute bound; micro-tweaks have diminishing returns.
+- **Execution policy for next FA2 work:**
+  - Keep the best-known decode baseline pinned and avoid large decode churn without isolated evidence.
+  - Prioritize higher-upside areas: prefill pipelining, selector quality, and KV bandwidth reduction.
+  - Gate each FA2 change with a focused micro-benchmark first, then validate end-to-end throughput second.
+  - Micro-benchmark command (decode-only, scalar vs mma kernel timing):
+    - `METALLIC_FA_MICRO_ITERS=200 METALLIC_FA_MICRO_WARMUP=20 METALLIC_FA_MICRO_SCALAR=both cargo test -q --message-format=short -p metallic-foundry --test flashattention_decode_micro_benchmark benchmark_flashattention_decode_scalar_vs_mma_micro -- --ignored --exact --nocapture`
+  - Decode diagnostics command (token-level stage timing + hot-step report):
+    - `METALLIC_DEBUG_DECODE_STAGE_TIMING=1 RUST_LOG=metallic_foundry::model::executor::forward=info,metallic_foundry::workflow::ops::sample=info cargo run --release -- <model.gguf> "<prompt>" --temperature 0 --top-k 1 --top-p 1 --min-p 0 --repeat-penalty 1 --repeat-last-n 64 --max-tokens 64 --output-format text`
+  - Diagnostic interpretation from current runs:
+    - `FlashAttention` is typically ~`12-16%` of decode-token cost; biggest single hotspot is usually `MatMul (Unified)` (often `idx=146`), followed by FFN fused steps.
+    - This confirms decode-side FA kernel tuning alone cannot produce large end-to-end decode gains without reducing non-FA hotspots.
+- **Decode benchmark/test state (current):**
+  - Added decode engine parity gate: `tests/flashattention_decode_engine_parity.rs` (scalar vs mma parity coverage on decode path).
+  - Added decode micro-benchmark: `tests/flashattention_decode_micro_benchmark.rs` (ignored, env-driven warmup/iters/scalar mode, materialized timing).
+  - Added opt-in decode timing env surface in `metallic-env`: `METALLIC_DEBUG_DECODE_STAGE_TIMING`.
+- **FA2 decode status:**
+  - MMA decode path and selector/bench/diagnostics are landed and usable.
+  - Decode-side performance closeout is **in progress** (not marked complete) pending targeted reductions in the top non-FA decode hotspots.
 
 ---
 
@@ -214,8 +226,8 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 
 ### 4. M3 ISA Optimization (Q8 AMX)
 - **Status:** F16 GEMM (`mma.metal`) uses `simdgroup_matrix`.
-- **Goal:** Implement dedicated **Q8 Blockwise** dequantization-to-AMX path.
-- **Impact:** Higher throughput for Q8 prefill batches by leveraging hardware matrix units directly from quantized data.
+- **Goal:** Implement dedicated **Q Blockwise** dequantization-to-AMX path.
+- **Impact:** Higher throughput for Q prefill batches by leveraging hardware matrix units directly from quantized data.
 
 ### 5. Tile Config Auto-Tuning (NEW)
 - **Problem:** The current `TileConfig::auto_select()` heuristic is naive and can pick suboptimal configurations.
