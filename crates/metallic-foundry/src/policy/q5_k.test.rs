@@ -842,7 +842,8 @@ fn q5_k_real_model_gemv_kernel_matches_direct_ggml() {
         },
         crate::metals::gemv::GemvStrategy::Canonical,
         crate::policy::activation::Activation::None,
-    );
+    )
+    .expect("build q5_k canonical gemv kernel");
 
     let args = crate::metals::gemv::step::GemvV2Args {
         weights: weights_arg,
@@ -1137,7 +1138,8 @@ fn q5_k_real_model_batched_gemv_kernel_matches_direct_ggml() {
         },
         crate::metals::gemv::GemvStrategy::Canonical,
         crate::policy::activation::Activation::None,
-    );
+    )
+    .expect("build q5_k batched canonical gemv kernel");
     let args = crate::metals::gemv::step::GemvV2Args {
         weights: weights_arg,
         scale_bytes,

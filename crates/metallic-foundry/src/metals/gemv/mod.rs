@@ -16,18 +16,28 @@ use crate::{
 fn resolve_gemv_strategy_for_input(
     requested_strategy: GemvStrategy,
     input_dtype: crate::tensor::Dtype,
+    layout: Layout,
+    n_dim: u32,
 ) -> Result<GemvStrategy, MetalError> {
+    const COL_MAJOR_AUTO_SCALAR_MIN_N: u32 = 4096;
+
     if matches!(requested_strategy, GemvStrategy::Vectorized) && !matches!(input_dtype, crate::tensor::Dtype::F16) {
         return Err(MetalError::OperationNotSupported(format!(
             "GemvV2 Vectorized strategy requires F16 input dtype, got {:?}. Use Auto/Canonical for non-F16 inputs.",
             input_dtype
         )));
     }
+    if matches!(requested_strategy, GemvStrategy::Scalar) && !matches!(layout, Layout::ColMajor) {
+        return Err(MetalError::OperationNotSupported(format!(
+            "GemvV2 Scalar strategy only supports ColMajor layout, got {layout:?}."
+        )));
+    }
 
-    Ok(match (requested_strategy, input_dtype) {
-        (GemvStrategy::Auto, crate::tensor::Dtype::F16) => GemvStrategy::Auto,
-        (GemvStrategy::Auto, _) => GemvStrategy::Canonical,
-        (other, _) => other,
+    Ok(match (requested_strategy, input_dtype, layout) {
+        (GemvStrategy::Auto, crate::tensor::Dtype::F16, Layout::ColMajor) if n_dim >= COL_MAJOR_AUTO_SCALAR_MIN_N => GemvStrategy::Scalar,
+        (GemvStrategy::Auto, crate::tensor::Dtype::F16, _) => GemvStrategy::Auto,
+        (GemvStrategy::Auto, _, _) => GemvStrategy::Canonical,
+        (other, _, _) => other,
     })
 }
 
@@ -212,14 +222,18 @@ impl CompiledStep for CompiledGemvV2UnifiedExecutionStep {
         };
 
         let requested_strategy = self.strategy.unwrap_or(GemvStrategy::Auto);
-        let selected_strategy = resolve_gemv_strategy_for_input(requested_strategy, input.dtype)?;
-        if matches!(requested_strategy, GemvStrategy::Auto) && matches!(selected_strategy, GemvStrategy::Canonical) {
+        let selected_strategy = resolve_gemv_strategy_for_input(requested_strategy, input.dtype, self.layout, n_dim)?;
+        if matches!(requested_strategy, GemvStrategy::Auto)
+            && (matches!(selected_strategy, GemvStrategy::Canonical) || matches!(selected_strategy, GemvStrategy::Scalar))
+        {
             tracing::debug!(
                 target: "metallic_foundry::metals::gemv",
                 input_dtype = ?input.dtype,
                 requested_strategy = ?requested_strategy,
                 selected_strategy = ?selected_strategy,
-                "GemvV2 Auto strategy downgraded to Canonical for non-F16 input"
+                layout = ?self.layout,
+                n_dim,
+                "GemvV2 Auto strategy resolved to a non-default path"
             );
         }
 
@@ -228,7 +242,7 @@ impl CompiledStep for CompiledGemvV2UnifiedExecutionStep {
             self.layout,
             selected_strategy,
             self.activation,
-        );
+        )?;
 
         let dispatch = DispatchConfig::warp_per_row(n_dim, batch);
 

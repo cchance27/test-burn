@@ -71,7 +71,7 @@ fn test_gemv_canonical_batched_parity_m4() -> Result<(), MetalError> {
         },
         GemvStrategy::Canonical,
         Activation::None,
-    );
+    )?;
     let dispatch = DispatchConfig::warp_per_row(n as u32, m as u32);
 
     let y_arg = metallic_foundry::TensorArg::from_tensor(&y);

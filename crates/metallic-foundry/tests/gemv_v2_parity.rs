@@ -190,7 +190,7 @@ fn run_gemv_v2_parity_test(cfg: V2TestConfig) {
         TestLayout::NK => Layout::RowMajor,
         TestLayout::KN => Layout::ColMajor,
     };
-    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), layout, GemvStrategy::Vectorized, Activation::None);
+    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), layout, GemvStrategy::Vectorized, Activation::None).unwrap();
     let dispatch = DispatchConfig::warp_per_row(cfg.n as u32, 1);
 
     foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
@@ -483,7 +483,7 @@ fn run_gemv_v2_q8_parity_test(cfg: V2TestConfig) {
         TestLayout::NK => Layout::RowMajor,
         TestLayout::KN => Layout::ColMajor,
     };
-    let kernel = get_gemv_v2_kernel(Arc::new(PolicyQ8), layout, GemvStrategy::Vectorized, Activation::None);
+    let kernel = get_gemv_v2_kernel(Arc::new(PolicyQ8), layout, GemvStrategy::Vectorized, Activation::None).unwrap();
     let dispatch = DispatchConfig::warp_per_row(cfg.n as u32, 1);
 
     foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
@@ -571,7 +571,7 @@ fn test_gemv_v2_f32_dense_preserve_parity_128x128() {
     };
 
     let policy = metallic_foundry::policy::resolve_policy(metallic_foundry::Dtype::F32);
-    let kernel = get_gemv_v2_kernel(policy, Layout::RowMajor, GemvStrategy::Canonical, Activation::None);
+    let kernel = get_gemv_v2_kernel(policy, Layout::RowMajor, GemvStrategy::Canonical, Activation::None).unwrap();
     let dispatch = DispatchConfig::warp_per_row(n as u32, 1);
     foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
     foundry.synchronize().unwrap();
@@ -637,7 +637,7 @@ fn test_gemv_v2_f32_input_q8_weights_preserve_parity_128x128() {
         beta: 0.0,
     };
 
-    let kernel = get_gemv_v2_kernel(Arc::new(PolicyQ8), Layout::RowMajor, GemvStrategy::Canonical, Activation::None);
+    let kernel = get_gemv_v2_kernel(Arc::new(PolicyQ8), Layout::RowMajor, GemvStrategy::Canonical, Activation::None).unwrap();
     let dispatch = DispatchConfig::warp_per_row(n as u32, 1);
     foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
     foundry.synchronize().unwrap();

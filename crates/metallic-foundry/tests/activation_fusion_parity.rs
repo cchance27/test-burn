@@ -23,7 +23,7 @@ fn run_activation_parity_test(
     let w_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n * k], TensorInit::CopyFrom(&w_data))?;
     let output_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n], TensorInit::Uninitialized)?;
 
-    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), layout, GemvStrategy::Vectorized, activation);
+    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), layout, GemvStrategy::Vectorized, activation)?;
     let dispatch = DispatchConfig::warp_per_row(n as u32, 1);
 
     let args = GemvV2Args {

@@ -14,7 +14,7 @@ use super::{
     config::use_f16_cols8, stages::{CanonicalDotStage, ScalarDotStage, VectorizedDotStage, WarpWriteOutputStage}
 };
 use crate::{
-    compound::{
+    MetalError, compound::{
         CompiledCompoundKernel, Layout, stages::{ThreadLayoutStage, WarpLayoutStage, WarpReduceStage}
     }, metals::common::{cache::get_or_build_compound_kernel, composition::manual_output}, policy::activation::Activation, types::TensorArg
 };
@@ -79,7 +79,26 @@ pub fn get_gemv_v2_kernel(
     layout: Layout,
     strategy: GemvStrategy,
     activation: Activation,
-) -> std::sync::Arc<CompiledCompoundKernel> {
+) -> Result<std::sync::Arc<CompiledCompoundKernel>, MetalError> {
+    let supported_pair = matches!(
+        (layout, strategy),
+        (Layout::RowMajor, GemvStrategy::Vectorized)
+            | (Layout::RowMajor, GemvStrategy::Auto)
+            | (Layout::RowMajor, GemvStrategy::Canonical)
+            | (Layout::ColMajor, GemvStrategy::Vectorized)
+            | (Layout::ColMajor, GemvStrategy::Auto)
+            | (Layout::ColMajor, GemvStrategy::Scalar)
+            | (Layout::ColMajor, GemvStrategy::Canonical)
+            | (Layout::Canonical { .. }, GemvStrategy::Auto)
+            | (Layout::Canonical { .. }, GemvStrategy::Canonical)
+            | (Layout::Canonical { .. }, GemvStrategy::Vectorized)
+    );
+    if !supported_pair {
+        return Err(MetalError::OperationNotSupported(format!(
+            "Unsupported GEMV layout/strategy pair: layout={layout:?}, strategy={strategy:?}"
+        )));
+    }
+
     let variant = format!(
         "{}_{:?}_{}_{}",
         layout.short_name(),
@@ -88,7 +107,7 @@ pub fn get_gemv_v2_kernel(
         activation.struct_name()
     );
     let policy_clone = policy.clone();
-    get_or_build_compound_kernel("gemv", variant, move || {
+    Ok(get_or_build_compound_kernel("gemv", variant, move || {
         let kernel_name = format!(
             "gemv_v2_{}_{:?}_{}_{}",
             layout.short_name(),
@@ -172,7 +191,7 @@ pub fn get_gemv_v2_kernel(
                 .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
                 .main(WarpWriteOutputStage::new().with_activation(activation))
                 .compile(),
-            _ => panic!("Unsupported layout/strategy pair: {:?}/{:?}", layout, strategy),
+            _ => unreachable!("unsupported layout/strategy pair validated before kernel build"),
         }
-    })
+    }))
 }

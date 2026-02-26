@@ -123,7 +123,7 @@ fn benchmark_gemv_v2_perf() {
     run_benchmark_case(&mut foundry, 4096, 4096, Layout::ColMajor, None, 0.5, iterations);
 
     println!("\n=== Large N Optimization (ColMajor) ===");
-    // Test large N case to verify Auto -> Scalar switch
+    // Auto now switches to Scalar for ColMajor F16 when N is large.
     let large_n_cases = vec![(896, 4096), (896, 16384)];
     for (k, n) in &large_n_cases {
         // Explicit Vectorized (Baseline)
@@ -138,7 +138,7 @@ fn benchmark_gemv_v2_perf() {
         );
         // Explicit Scalar (Optimized)
         run_benchmark_case(&mut foundry, *k, *n, Layout::ColMajor, Some(GemvStrategy::Scalar), 1.0, iterations);
-        // Auto (Should match Scalar)
+        // Auto (should match Scalar once N crosses threshold)
         run_benchmark_case(&mut foundry, *k, *n, Layout::ColMajor, Some(GemvStrategy::Auto), 1.0, iterations);
     }
 

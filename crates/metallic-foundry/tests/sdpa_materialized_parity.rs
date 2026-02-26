@@ -57,7 +57,7 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
     let scale_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![1], TensorInit::CopyFrom(scale_buf.as_slice()))?;
 
     // Kernels
-    let qk_kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized, Activation::None);
+    let qk_kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized, Activation::None)?;
     let qk_dispatch = DispatchConfig::warp_per_row(seq_len as u32, 1);
 
     let softmax_kernel = get_softmax_v2_kernel();
@@ -66,7 +66,7 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
         group: ThreadgroupSize::d1(256),
     };
 
-    let av_kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::ColMajor, GemvStrategy::Vectorized, Activation::None);
+    let av_kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::ColMajor, GemvStrategy::Vectorized, Activation::None)?;
     let av_dispatch = DispatchConfig::warp_per_row(head_dim as u32, 1);
 
     // Get base TensorArgs

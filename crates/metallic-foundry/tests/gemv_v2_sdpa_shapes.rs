@@ -29,7 +29,7 @@ fn test_gemv_v2_sdpa_foundry_qk() -> Result<(), MetalError> {
     let k_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n * k], TensorInit::CopyFrom(&k_data))?;
     let output_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n], TensorInit::Uninitialized)?;
 
-    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized, Activation::None);
+    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized, Activation::None)?;
     let dispatch = DispatchConfig::warp_per_row(n as u32, 1);
 
     let args = GemvV2Args {
@@ -93,7 +93,7 @@ fn test_gemv_v2_sdpa_foundry_av() -> Result<(), MetalError> {
     let v_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![k * n], TensorInit::CopyFrom(&v_data))?;
     let output_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n], TensorInit::Uninitialized)?;
 
-    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::ColMajor, GemvStrategy::Vectorized, Activation::None);
+    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::ColMajor, GemvStrategy::Vectorized, Activation::None)?;
     let dispatch = DispatchConfig::warp_per_row(n as u32, 1);
 
     let args = GemvV2Args {
