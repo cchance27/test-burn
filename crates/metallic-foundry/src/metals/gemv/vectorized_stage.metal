@@ -231,9 +231,13 @@ ALWAYS_INLINE float run_gemv_vectorized_stage(
 #endif
 
 #if (VEC_WIDTH == 8u)
-#if METALLIC_FASTPATH_INPUT_HALF
+#if METALLIC_FASTPATH_INPUT_HALF && defined(IS_K_CONTIGUOUS) && IS_K_CONTIGUOUS && defined(METALLIC_POLICY_WEIGHTS_FP16) && METALLIC_POLICY_WEIGHTS_FP16
     threadgroup GemvFastScalarT x_tile[K_CHUNK_SIZE];
-    const bool use_x_tile = ((n_dim & (WARPS_PER_TG - 1u)) == 0u);
+    // x_tile reduces duplicate input reads across warps, but adds two TG barriers per chunk.
+    // Restrict it to the dense contiguous FP16 fastpath and larger K to avoid barrier-heavy jitter.
+    const bool use_x_tile = !has_gamma && !has_shared_norm
+        && ((n_dim & (WARPS_PER_TG - 1u)) == 0u)
+        && (k_dim >= (K_CHUNK_SIZE * 2u));
 #else
     const bool use_x_tile = false;
 #endif
@@ -477,7 +481,7 @@ ALWAYS_INLINE float run_gemv_vectorized_stage(
                     const ulong idx = WEIGHT_INDEX(row_idx, k + i, k_dim, n_dim);
                     float temp_w[1];
                     Policy::template load_weights<1>(weights, idx, temp_w);
-                    const float x = (float)metallic_load_input(input, (ulong)(input_row_base + k + i)); // INDEX64_OK
+                    const float x = (i < 4u) ? xv_f32_lo[i] : xv_f32_hi[i - 4u];
                     acc_tail += temp_w[0] * scale * x + affine * x;
                 }
             }

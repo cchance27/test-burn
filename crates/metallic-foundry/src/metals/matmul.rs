@@ -78,6 +78,13 @@ impl Default for MatMulStep {
 // Compiled Wrapper
 // =============================================================================
 
+#[derive(Debug, Clone, Copy)]
+enum MatMulDispatchMode {
+    AlwaysGemv,
+    AlwaysGemm,
+    Dynamic,
+}
+
 #[derive(Debug)]
 pub struct CompiledMatMulStep {
     // We hold compiled versions of both kernels (or lazily?)
@@ -90,7 +97,7 @@ pub struct CompiledMatMulStep {
     k_val: DynamicValue<u32>,
     transpose_a: bool,
     transpose_b: bool,
-    gemm_enabled: bool,
+    mode: MatMulDispatchMode,
 }
 
 impl CompiledStep for CompiledMatMulStep {
@@ -101,18 +108,28 @@ impl CompiledStep for CompiledMatMulStep {
         bindings: &TensorBindings,
         symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
-        // Resolve M dimension at runtime
-        let m = self.m_val.resolve(bindings);
-
-        if m == 1 || !self.gemm_enabled {
-            // Dispatch GEMV
-            for step in &self.gemv {
-                step.execute(foundry, fast_bindings, bindings, symbols)?;
+        match self.mode {
+            MatMulDispatchMode::AlwaysGemv => {
+                for step in &self.gemv {
+                    step.execute(foundry, fast_bindings, bindings, symbols)?;
+                }
             }
-        } else {
-            // Dispatch GEMM
-            for step in &self.gemm {
-                step.execute(foundry, fast_bindings, bindings, symbols)?;
+            MatMulDispatchMode::AlwaysGemm => {
+                for step in &self.gemm {
+                    step.execute(foundry, fast_bindings, bindings, symbols)?;
+                }
+            }
+            MatMulDispatchMode::Dynamic => {
+                let m = self.m_val.resolve(bindings);
+                if m == 1 {
+                    for step in &self.gemv {
+                        step.execute(foundry, fast_bindings, bindings, symbols)?;
+                    }
+                } else {
+                    for step in &self.gemm {
+                        step.execute(foundry, fast_bindings, bindings, symbols)?;
+                    }
+                }
             }
         }
 
@@ -127,7 +144,17 @@ impl CompiledStep for CompiledMatMulStep {
         let m = self.m_val.resolve(globals);
         let n = self.n_val.resolve(globals);
         let k = self.k_val.resolve(globals);
-        let mode = if m == 1 || !self.gemm_enabled { "gemv" } else { "gemm" };
+        let mode = match self.mode {
+            MatMulDispatchMode::AlwaysGemv => "gemv",
+            MatMulDispatchMode::AlwaysGemm => "gemm",
+            MatMulDispatchMode::Dynamic => {
+                if m == 1 {
+                    "gemv"
+                } else {
+                    "gemm"
+                }
+            }
+        };
         Some(format!(
             "MatMul (Unified) mode={mode} m={m} n={n} k={k} ta={} tb={}",
             self.transpose_a, self.transpose_b
@@ -187,33 +214,48 @@ impl Step for MatMulStep {
 
         let gemm_enabled =
             !(matches!(layout, Layout::Canonical { .. }) || (self.n == DynamicValue::Literal(1) && self.k == DynamicValue::Literal(1)));
+        let mode = if !gemm_enabled {
+            MatMulDispatchMode::AlwaysGemv
+        } else {
+            match self.m {
+                DynamicValue::Literal(1) => MatMulDispatchMode::AlwaysGemv,
+                DynamicValue::Literal(_) => MatMulDispatchMode::AlwaysGemm,
+                _ => MatMulDispatchMode::Dynamic,
+            }
+        };
 
         // 1. Prepare GEMV Step (for M=1) using GemvV2UnifiedExecutionStep for both layouts
-        let gemv_step = GemvV2UnifiedExecutionStep {
-            weights: self.b.clone(),
-            input: self.a.clone(),
-            output: self.output.clone(),
-            bias: effective_bias.clone(),
-            residual: effective_c.clone(),
-            scale_bytes: effective_b_scales.clone(),
-            params: GemvV2Params {
-                k_dim: self.k.clone(),
-                n_dim: self.n.clone(),
-                weights_per_block: self.weights_per_block,
-                batch: self.m.clone(), // Correctly propagate M as batch for GEMV prefill
-            },
-            layout,
-            strategy,
-            activation: self.activation,
-            alpha: self.alpha,
-            beta: self.beta,
-            has_bias: if effective_bias.is_some() { 1 } else { 0 },
-            has_residual: if effective_c.is_some() { 1 } else { 0 },
+        let gemv_compiled = if matches!(mode, MatMulDispatchMode::AlwaysGemm) {
+            vec![]
+        } else {
+            let gemv_step = GemvV2UnifiedExecutionStep {
+                weights: self.b.clone(),
+                input: self.a.clone(),
+                output: self.output.clone(),
+                bias: effective_bias.clone(),
+                residual: effective_c.clone(),
+                scale_bytes: effective_b_scales.clone(),
+                params: GemvV2Params {
+                    k_dim: self.k.clone(),
+                    n_dim: self.n.clone(),
+                    weights_per_block: self.weights_per_block,
+                    batch: self.m.clone(), // Correctly propagate M as batch for GEMV prefill
+                },
+                layout,
+                strategy,
+                activation: self.activation,
+                alpha: self.alpha,
+                beta: self.beta,
+                has_bias: if effective_bias.is_some() { 1 } else { 0 },
+                has_residual: if effective_c.is_some() { 1 } else { 0 },
+            };
+            gemv_step.compile(bindings, symbols)
         };
-        let gemv_compiled = gemv_step.compile(bindings, symbols);
 
         // 2. Prepare GEMM Step (for M>1)
-        let gemm_compiled = if gemm_enabled {
+        let gemm_compiled = if matches!(mode, MatMulDispatchMode::AlwaysGemv) {
+            vec![]
+        } else if gemm_enabled {
             use crate::metals::gemm::GemmParams;
             let gemm_step = GemmV2Step {
                 a: self.a.clone(),
@@ -248,7 +290,7 @@ impl Step for MatMulStep {
             k_val: self.k.clone(),
             transpose_a: self.transpose_a,
             transpose_b: self.transpose_b,
-            gemm_enabled,
+            mode,
         })]
     }
 }

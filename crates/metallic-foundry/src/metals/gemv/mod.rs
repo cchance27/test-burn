@@ -17,10 +17,8 @@ fn resolve_gemv_strategy_for_input(
     requested_strategy: GemvStrategy,
     input_dtype: crate::tensor::Dtype,
     layout: Layout,
-    n_dim: u32,
+    _n_dim: u32,
 ) -> Result<GemvStrategy, MetalError> {
-    const COL_MAJOR_AUTO_SCALAR_MIN_N: u32 = 4096;
-
     if matches!(requested_strategy, GemvStrategy::Vectorized) && !matches!(input_dtype, crate::tensor::Dtype::F16) {
         return Err(MetalError::OperationNotSupported(format!(
             "GemvV2 Vectorized strategy requires F16 input dtype, got {:?}. Use Auto/Canonical for non-F16 inputs.",
@@ -34,7 +32,6 @@ fn resolve_gemv_strategy_for_input(
     }
 
     Ok(match (requested_strategy, input_dtype, layout) {
-        (GemvStrategy::Auto, crate::tensor::Dtype::F16, Layout::ColMajor) if n_dim >= COL_MAJOR_AUTO_SCALAR_MIN_N => GemvStrategy::Scalar,
         (GemvStrategy::Auto, crate::tensor::Dtype::F16, _) => GemvStrategy::Auto,
         (GemvStrategy::Auto, _, _) => GemvStrategy::Canonical,
         (other, _, _) => other,
@@ -120,6 +117,16 @@ pub struct GemvV2UnifiedExecutionStep {
 }
 
 #[derive(Debug)]
+struct PreResolvedGemvKernelPlan {
+    weights_dtype: crate::tensor::Dtype,
+    input_dtype: crate::tensor::Dtype,
+    kernel: std::sync::Arc<crate::compound::CompiledCompoundKernel>,
+    weights_per_block: u32,
+    has_scale: bool,
+    selected_strategy: GemvStrategy,
+}
+
+#[derive(Debug)]
 pub struct CompiledGemvV2UnifiedExecutionStep {
     pub weights: usize,
     pub input: usize,
@@ -135,6 +142,7 @@ pub struct CompiledGemvV2UnifiedExecutionStep {
     pub beta: f32,
     pub has_bias: u32,
     pub has_residual: u32,
+    pre_resolved: Option<PreResolvedGemvKernelPlan>,
 }
 
 #[typetag::serde(name = "GemvV2Unified")]
@@ -160,9 +168,38 @@ impl Step for GemvV2UnifiedExecutionStep {
 
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
         let weights_name = bindings.interpolate(self.weights.0.clone());
+        let input_name = bindings.interpolate(self.input.0.clone());
+        let pre_resolved = (|| {
+            let weights_arg = bindings.get(&weights_name).ok()?;
+            let input_arg = bindings.get(&input_name).ok()?;
+            let requested_strategy = self.strategy.unwrap_or(GemvStrategy::Auto);
+            let selected_strategy = resolve_gemv_strategy_for_input(requested_strategy, input_arg.dtype, self.layout, 0).ok()?;
+            let policy = crate::policy::resolve_policy(weights_arg.dtype);
+            let has_scale = policy.has_scale();
+            let weights_per_block = if has_scale {
+                policy.meta().weights_per_block as u32
+            } else {
+                self.params.weights_per_block
+            };
+            let kernel = get_gemv_v2_kernel(
+                policy as std::sync::Arc<dyn crate::fusion::MetalPolicy>,
+                self.layout,
+                selected_strategy,
+                self.activation,
+            )
+            .ok()?;
+            Some(PreResolvedGemvKernelPlan {
+                weights_dtype: weights_arg.dtype,
+                input_dtype: input_arg.dtype,
+                kernel,
+                weights_per_block,
+                has_scale,
+                selected_strategy,
+            })
+        })();
         vec![Box::new(CompiledGemvV2UnifiedExecutionStep {
             weights: symbols.get_or_create(weights_name.clone()),
-            input: symbols.get_or_create(bindings.interpolate(self.input.0.clone())),
+            input: symbols.get_or_create(input_name),
             output: symbols.get_or_create(bindings.interpolate(self.output.0.clone())),
             bias: self.bias.as_ref().map(|r| symbols.get_or_create(bindings.interpolate(r.0.clone()))),
             residual: self
@@ -184,6 +221,7 @@ impl Step for GemvV2UnifiedExecutionStep {
             beta: self.beta,
             has_bias: self.has_bias,
             has_residual: self.has_residual,
+            pre_resolved,
         })]
     }
 }
@@ -212,17 +250,44 @@ impl CompiledStep for CompiledGemvV2UnifiedExecutionStep {
         let n_dim = self.params.n_dim.resolve(bindings);
         let batch = self.params.batch.resolve(bindings);
 
-        // Resolve policy purely from the bound weight dtype.
-        // Quantization is intentionally "invisible" to the DSL/spec layer; bindings decide runtime policy.
-        let policy = crate::policy::resolve_policy(weights.dtype);
-        let weights_per_block = if policy.has_scale() {
-            policy.meta().weights_per_block as u32
-        } else {
-            self.params.weights_per_block
-        };
-
         let requested_strategy = self.strategy.unwrap_or(GemvStrategy::Auto);
-        let selected_strategy = resolve_gemv_strategy_for_input(requested_strategy, input.dtype, self.layout, n_dim)?;
+        let (kernel, selected_strategy, weights_per_block, has_scale) = if let Some(plan) = &self.pre_resolved {
+            if plan.weights_dtype == weights.dtype && plan.input_dtype == input.dtype {
+                (plan.kernel.clone(), plan.selected_strategy, plan.weights_per_block, plan.has_scale)
+            } else {
+                let policy = crate::policy::resolve_policy(weights.dtype);
+                let has_scale = policy.has_scale();
+                let weights_per_block = if has_scale {
+                    policy.meta().weights_per_block as u32
+                } else {
+                    self.params.weights_per_block
+                };
+                let selected_strategy = resolve_gemv_strategy_for_input(requested_strategy, input.dtype, self.layout, n_dim)?;
+                let kernel = get_gemv_v2_kernel(
+                    policy as std::sync::Arc<dyn crate::fusion::MetalPolicy>,
+                    self.layout,
+                    selected_strategy,
+                    self.activation,
+                )?;
+                (kernel, selected_strategy, weights_per_block, has_scale)
+            }
+        } else {
+            let policy = crate::policy::resolve_policy(weights.dtype);
+            let has_scale = policy.has_scale();
+            let weights_per_block = if has_scale {
+                policy.meta().weights_per_block as u32
+            } else {
+                self.params.weights_per_block
+            };
+            let selected_strategy = resolve_gemv_strategy_for_input(requested_strategy, input.dtype, self.layout, n_dim)?;
+            let kernel = get_gemv_v2_kernel(
+                policy as std::sync::Arc<dyn crate::fusion::MetalPolicy>,
+                self.layout,
+                selected_strategy,
+                self.activation,
+            )?;
+            (kernel, selected_strategy, weights_per_block, has_scale)
+        };
         if matches!(requested_strategy, GemvStrategy::Auto)
             && (matches!(selected_strategy, GemvStrategy::Canonical) || matches!(selected_strategy, GemvStrategy::Scalar))
         {
@@ -236,13 +301,6 @@ impl CompiledStep for CompiledGemvV2UnifiedExecutionStep {
                 "GemvV2 Auto strategy resolved to a non-default path"
             );
         }
-
-        let kernel = get_gemv_v2_kernel(
-            policy.clone() as std::sync::Arc<dyn crate::fusion::MetalPolicy>,
-            self.layout,
-            selected_strategy,
-            self.activation,
-        )?;
 
         let dispatch = DispatchConfig::warp_per_row(n_dim, batch);
 
@@ -268,7 +326,7 @@ impl CompiledStep for CompiledGemvV2UnifiedExecutionStep {
 
         let args = GemvV2Args {
             weights: TensorArg::from_tensor(weights),
-            scale_bytes: if policy.has_scale() {
+            scale_bytes: if has_scale {
                 let idx = self
                     .scale_bytes
                     .ok_or_else(|| MetalError::InputNotFound("scale field missing".into()))?;

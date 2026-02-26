@@ -21,8 +21,7 @@ fn env_usize(key: &str, default: usize) -> usize {
 }
 
 fn parse_shapes() -> Vec<Shape> {
-    let raw = std::env::var("METALLIC_DECODE_GEMV_SHAPES")
-        .unwrap_or_else(|_| "896x896,896x4864,896x151936".to_string());
+    let raw = std::env::var("METALLIC_DECODE_GEMV_SHAPES").unwrap_or_else(|_| "896x896,896x4864,896x151936".to_string());
     let mut shapes = Vec::new();
     for item in raw.split(',') {
         let part = item.trim();
@@ -39,11 +38,7 @@ fn parse_shapes() -> Vec<Shape> {
         shapes.push(Shape { k, n });
     }
     if shapes.is_empty() {
-        vec![
-            Shape { k: 896, n: 896 },
-            Shape { k: 896, n: 4864 },
-            Shape { k: 896, n: 151_936 },
-        ]
+        vec![Shape { k: 896, n: 896 }, Shape { k: 896, n: 4864 }, Shape { k: 896, n: 151_936 }]
     } else {
         shapes
     }
@@ -184,8 +179,15 @@ fn run_case(cols8_on: bool, shape: Shape, warmup: usize, iters: usize) -> Result
     let fast_gemm = build_fast_bindings(&bindings, &sym_gemm);
 
     let us_gemv_vec = measure_steps(&mut foundry, &compiled_gemv, &fast_gemv, &bindings, &sym_gemv, warmup, iters)?;
-    let us_gemv_auto =
-        measure_steps(&mut foundry, &compiled_gemv_auto, &fast_gemv_auto, &bindings, &sym_gemv_auto, warmup, iters)?;
+    let us_gemv_auto = measure_steps(
+        &mut foundry,
+        &compiled_gemv_auto,
+        &fast_gemv_auto,
+        &bindings,
+        &sym_gemv_auto,
+        warmup,
+        iters,
+    )?;
     let us_unified = measure_steps(&mut foundry, &compiled_uni, &fast_uni, &bindings, &sym_uni, warmup, iters)?;
     let us_gemm = measure_steps(&mut foundry, &compiled_gemm, &fast_gemm, &bindings, &sym_gemm, warmup, iters)?;
 

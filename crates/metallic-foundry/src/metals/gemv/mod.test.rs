@@ -26,9 +26,9 @@ fn gemv_strategy_vectorized_rejects_non_f16() {
 }
 
 #[test]
-fn gemv_strategy_auto_selects_scalar_for_colmajor_large_n() {
+fn gemv_strategy_auto_keeps_vectorized_for_colmajor_large_n() {
     let selected = resolve_gemv_strategy_for_input(GemvStrategy::Auto, Dtype::F16, Layout::ColMajor, 4096).expect("strategy resolution");
-    assert_eq!(selected, GemvStrategy::Scalar);
+    assert_eq!(selected, GemvStrategy::Auto);
 }
 
 #[test]
