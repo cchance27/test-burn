@@ -224,7 +224,7 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
     - **Fused MLP Down-Proj:** Evaluate fusing `Down` projection with the activation output of the previous SwiGLU step (likely high register pressure).
     - **Tail Fusion:** Fuse Final RMSNorm + Logits Projection + Sampling into one kernel.
 
-### 4. M3 ISA Optimization (Q8 AMX)
+### 4. M3 ISA Optimization (Qx AMX)
 - **Status:** F16 GEMM (`mma.metal`) uses `simdgroup_matrix`.
 - **Goal:** Implement dedicated **Q Blockwise** dequantization-to-AMX path.
 - **Impact:** Higher throughput for Q prefill batches by leveraging hardware matrix units directly from quantized data.

@@ -23,9 +23,9 @@ struct DecodeStageStats {
     other: Duration,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct DecodeStepStats {
-    name: &'static str,
+    name: String,
     total: Duration,
     count: u32,
     stage: DecodeStage,
@@ -34,7 +34,7 @@ struct DecodeStepStats {
 impl Default for DecodeStepStats {
     fn default() -> Self {
         Self {
-            name: "unknown",
+            name: "unknown".to_string(),
             total: Duration::ZERO,
             count: 0,
             stage: DecodeStage::Other,
@@ -112,6 +112,7 @@ impl CompiledModel {
 
         for (idx, step) in self.compiled_steps.iter().enumerate() {
             let step_name = step.name();
+            let step_perf_name = step.perf_metadata(bindings).unwrap_or_else(|| step_name.to_string());
             if debug_step_log {
                 tracing::info!("Forward compiled step {:03}: {}", idx, step_name);
             }
@@ -126,7 +127,7 @@ impl CompiledModel {
                 let elapsed = start.elapsed();
                 decode_stage_stats.add(stage, elapsed);
                 let entry = decode_step_stats.entry(idx).or_insert(DecodeStepStats {
-                    name: step_name,
+                    name: step_perf_name,
                     stage,
                     ..DecodeStepStats::default()
                 });

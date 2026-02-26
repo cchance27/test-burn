@@ -19,6 +19,12 @@ pub trait CompiledStep: Send + Sync + std::fmt::Debug {
     fn name(&self) -> &'static str {
         "UnnamedStep"
     }
+
+    /// Optional perf metadata label used for decode hot-step diagnostics.
+    /// Keep this lightweight: it may be called on hot paths when diagnostics are enabled.
+    fn perf_metadata(&self, _globals: &TensorBindings) -> Option<String> {
+        None
+    }
 }
 
 /// Pre-resolved indices for tensor arguments (weights, scales, etc.).

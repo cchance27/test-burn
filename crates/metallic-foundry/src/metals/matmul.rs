@@ -86,6 +86,10 @@ pub struct CompiledMatMulStep {
     gemm: Vec<Box<dyn CompiledStep>>,
 
     m_val: DynamicValue<u32>,
+    n_val: DynamicValue<u32>,
+    k_val: DynamicValue<u32>,
+    transpose_a: bool,
+    transpose_b: bool,
     gemm_enabled: bool,
 }
 
@@ -117,6 +121,17 @@ impl CompiledStep for CompiledMatMulStep {
 
     fn name(&self) -> &'static str {
         "MatMul (Unified)"
+    }
+
+    fn perf_metadata(&self, globals: &TensorBindings) -> Option<String> {
+        let m = self.m_val.resolve(globals);
+        let n = self.n_val.resolve(globals);
+        let k = self.k_val.resolve(globals);
+        let mode = if m == 1 || !self.gemm_enabled { "gemv" } else { "gemm" };
+        Some(format!(
+            "MatMul (Unified) mode={mode} m={m} n={n} k={k} ta={} tb={}",
+            self.transpose_a, self.transpose_b
+        ))
     }
 }
 
@@ -229,6 +244,10 @@ impl Step for MatMulStep {
             gemv: gemv_compiled,
             gemm: gemm_compiled,
             m_val: self.m.clone(),
+            n_val: self.n.clone(),
+            k_val: self.k.clone(),
+            transpose_a: self.transpose_a,
+            transpose_b: self.transpose_b,
             gemm_enabled,
         })]
     }
