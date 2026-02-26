@@ -20,6 +20,7 @@ fn run_benchmark_case(
     };
     let strategy_str = match strategy {
         Some(GemvStrategy::Auto) => "Auto",
+        Some(GemvStrategy::DecodeLmHead) => "DecodeLmHead",
         Some(GemvStrategy::Scalar) => "Scalar",
         Some(GemvStrategy::Vectorized) => "Vectorized",
         Some(GemvStrategy::Canonical) => "Canonical",

@@ -31,6 +31,7 @@ impl FusedQkvKernelVariant {
 fn strategy_variant_key(strategy: GemvStrategy) -> &'static str {
     match strategy {
         GemvStrategy::Auto => "auto",
+        GemvStrategy::DecodeLmHead => "decode_lmhead",
         GemvStrategy::Vectorized => "vectorized",
         GemvStrategy::Scalar => "scalar",
         GemvStrategy::Canonical => "canonical",

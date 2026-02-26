@@ -15,13 +15,17 @@ use crate::{
 
 fn resolve_gemv_strategy_for_input(
     requested_strategy: GemvStrategy,
+    weights_dtype: crate::tensor::Dtype,
     input_dtype: crate::tensor::Dtype,
     layout: Layout,
-    _n_dim: u32,
+    n_dim: u32,
 ) -> Result<GemvStrategy, MetalError> {
-    if matches!(requested_strategy, GemvStrategy::Vectorized) && !matches!(input_dtype, crate::tensor::Dtype::F16) {
+    const DECODE_LMHEAD_MIN_N: u32 = 131_072;
+    if matches!(requested_strategy, GemvStrategy::Vectorized | GemvStrategy::DecodeLmHead)
+        && !matches!(input_dtype, crate::tensor::Dtype::F16)
+    {
         return Err(MetalError::OperationNotSupported(format!(
-            "GemvV2 Vectorized strategy requires F16 input dtype, got {:?}. Use Auto/Canonical for non-F16 inputs.",
+            "GemvV2 Vectorized/DecodeLmHead strategies require F16 input dtype, got {:?}. Use Auto/Canonical for non-F16 inputs.",
             input_dtype
         )));
     }
@@ -31,10 +35,13 @@ fn resolve_gemv_strategy_for_input(
         )));
     }
 
-    Ok(match (requested_strategy, input_dtype, layout) {
-        (GemvStrategy::Auto, crate::tensor::Dtype::F16, _) => GemvStrategy::Auto,
-        (GemvStrategy::Auto, _, _) => GemvStrategy::Canonical,
-        (other, _, _) => other,
+    Ok(match (requested_strategy, weights_dtype, input_dtype, layout) {
+        (GemvStrategy::Auto, crate::tensor::Dtype::F16, crate::tensor::Dtype::F16, Layout::RowMajor) if n_dim >= DECODE_LMHEAD_MIN_N => {
+            GemvStrategy::DecodeLmHead
+        }
+        (GemvStrategy::Auto, _, crate::tensor::Dtype::F16, _) => GemvStrategy::Auto,
+        (GemvStrategy::Auto, _, _, _) => GemvStrategy::Canonical,
+        (other, _, _, _) => other,
     })
 }
 
@@ -173,7 +180,12 @@ impl Step for GemvV2UnifiedExecutionStep {
             let weights_arg = bindings.get(&weights_name).ok()?;
             let input_arg = bindings.get(&input_name).ok()?;
             let requested_strategy = self.strategy.unwrap_or(GemvStrategy::Auto);
-            let selected_strategy = resolve_gemv_strategy_for_input(requested_strategy, input_arg.dtype, self.layout, 0).ok()?;
+            let n_dim = match self.params.n_dim {
+                DynamicValue::Literal(v) => v,
+                _ => 0,
+            };
+            let selected_strategy =
+                resolve_gemv_strategy_for_input(requested_strategy, weights_arg.dtype, input_arg.dtype, self.layout, n_dim).ok()?;
             let policy = crate::policy::resolve_policy(weights_arg.dtype);
             let has_scale = policy.has_scale();
             let weights_per_block = if has_scale {
@@ -262,7 +274,8 @@ impl CompiledStep for CompiledGemvV2UnifiedExecutionStep {
                 } else {
                     self.params.weights_per_block
                 };
-                let selected_strategy = resolve_gemv_strategy_for_input(requested_strategy, input.dtype, self.layout, n_dim)?;
+                let selected_strategy =
+                    resolve_gemv_strategy_for_input(requested_strategy, weights.dtype, input.dtype, self.layout, n_dim)?;
                 let kernel = get_gemv_v2_kernel(
                     policy as std::sync::Arc<dyn crate::fusion::MetalPolicy>,
                     self.layout,
@@ -279,7 +292,7 @@ impl CompiledStep for CompiledGemvV2UnifiedExecutionStep {
             } else {
                 self.params.weights_per_block
             };
-            let selected_strategy = resolve_gemv_strategy_for_input(requested_strategy, input.dtype, self.layout, n_dim)?;
+            let selected_strategy = resolve_gemv_strategy_for_input(requested_strategy, weights.dtype, input.dtype, self.layout, n_dim)?;
             let kernel = get_gemv_v2_kernel(
                 policy as std::sync::Arc<dyn crate::fusion::MetalPolicy>,
                 self.layout,
@@ -288,9 +301,7 @@ impl CompiledStep for CompiledGemvV2UnifiedExecutionStep {
             )?;
             (kernel, selected_strategy, weights_per_block, has_scale)
         };
-        if matches!(requested_strategy, GemvStrategy::Auto)
-            && (matches!(selected_strategy, GemvStrategy::Canonical) || matches!(selected_strategy, GemvStrategy::Scalar))
-        {
+        if matches!(requested_strategy, GemvStrategy::Auto) && !matches!(selected_strategy, GemvStrategy::Auto) {
             tracing::debug!(
                 target: "metallic_foundry::metals::gemv",
                 input_dtype = ?input.dtype,

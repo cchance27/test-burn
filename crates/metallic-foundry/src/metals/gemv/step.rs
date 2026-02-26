@@ -64,6 +64,8 @@ pub enum GemvStrategy {
     /// Automatically select best strategy based on dimensions.
     #[default]
     Auto,
+    /// Decode LM-head optimized vectorized strategy (very large N, m=1 row-major path).
+    DecodeLmHead,
     /// Optimized vectorized strategy (fastest for small N / K-contiguous).
     Vectorized,
     /// Scalar strategy (optimized for large N / strided K).
@@ -84,6 +86,7 @@ pub fn get_gemv_v2_kernel(
         (layout, strategy),
         (Layout::RowMajor, GemvStrategy::Vectorized)
             | (Layout::RowMajor, GemvStrategy::Auto)
+            | (Layout::RowMajor, GemvStrategy::DecodeLmHead)
             | (Layout::RowMajor, GemvStrategy::Canonical)
             | (Layout::ColMajor, GemvStrategy::Vectorized)
             | (Layout::ColMajor, GemvStrategy::Auto)
@@ -119,6 +122,23 @@ pub fn get_gemv_v2_kernel(
         let use_f16_cols8 = policy_clone.meta().address_unit_bytes == 2 && use_f16_cols8();
 
         match (layout, strategy) {
+            (Layout::RowMajor, GemvStrategy::DecodeLmHead) => {
+                if use_f16_cols8 {
+                    manual_output(&format!("{}_cols8", kernel_name))
+                        .prologue(WarpLayoutStage::row_major().with_warps(16))
+                        .prologue(VectorizedDotStage::new(policy_clone.clone()).with_f16_cols8(true))
+                        .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                        .main(WarpWriteOutputStage::new().with_activation(activation))
+                        .compile()
+                } else {
+                    manual_output(&kernel_name)
+                        .prologue(WarpLayoutStage::row_major().with_warps(16))
+                        .prologue(VectorizedDotStage::new(policy_clone.clone()))
+                        .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                        .main(WarpWriteOutputStage::new().with_activation(activation))
+                        .compile()
+                }
+            }
             (Layout::RowMajor, GemvStrategy::Vectorized) | (Layout::RowMajor, GemvStrategy::Auto) => {
                 if use_f16_cols8 {
                     manual_output(&format!("{}_cols8", kernel_name))
